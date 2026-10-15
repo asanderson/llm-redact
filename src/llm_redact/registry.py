@@ -20,7 +20,7 @@ from __future__ import annotations
 import importlib.metadata
 import importlib.util
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 from .audit import build_audit as _build_audit
@@ -30,6 +30,7 @@ from .free_defaults import build_dashboard as _build_dashboard
 from .free_defaults import build_db_password as _build_db_password
 from .free_defaults import build_model_policy as _build_model_policy
 from .free_defaults import build_router as _build_router
+from .free_defaults import build_scan_sinks as _build_scan_sinks
 from .free_defaults import build_telemetry as _build_telemetry
 from .free_defaults import build_upload_inspector as _build_upload_inspector
 from .free_defaults import build_upstream_auth as _build_upstream_auth
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
         DbPasswordProvider,
         ModelPolicy,
         Router,
+        ScanSink,
         SessionRouter,
         Telemetry,
         UploadInspector,
@@ -110,6 +112,7 @@ class Registry:
     build_upstream_auth: Callable[[str, ProviderConfig], UpstreamAuth | None]
     build_upload_inspector: Callable[[Config, str], UploadInspector | None]
     build_model_policy: Callable[[Config, str], ModelPolicy | None]
+    build_scan_sinks: Callable[[Config, str], Sequence[ScanSink]]
     tool_base_url: Callable[[str], str]
     cli_commands: list[CliCommand]
     config_sections: list[ConfigSection]
@@ -177,6 +180,12 @@ class Registry:
         # of the process (reloads, the editor's dry run); `llm-redact
         # preview` builds its own.
         self.build_model_policy = _build_model_policy
+        # Read-only capture of the strings a request's redaction scanned
+        # (plugin_api.ScanSink: handed off the event loop, after the
+        # redaction succeeded and before the upstream is contacted). The
+        # Free default registers none — then nothing is recorded or queued.
+        # Built once at startup with the resolved tier (restart-only).
+        self.build_scan_sinks = _build_scan_sinks
         # `llm-redact run` passes the base URL it exports to wrapped tools
         # through this hook (identity-free in the core).
         self.tool_base_url = _tool_base_url

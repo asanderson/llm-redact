@@ -130,7 +130,12 @@ if TYPE_CHECKING:
     from llm_redact.detection.base import Detector
     from llm_redact.detection.engine import Allowlist
     from llm_redact.overrides import OverrideScope
-    from llm_redact.plugin_api import AuthorizationRequest, ConnectionRecheck, UpstreamAuth
+    from llm_redact.plugin_api import (
+        AuthorizationRequest,
+        ConnectionRecheck,
+        ScanContext,
+        UpstreamAuth,
+    )
     from llm_redact.proxy import ProxyState, RequestContext
 
 logger = logging.getLogger("llm_redact")
@@ -1345,6 +1350,27 @@ async def _authorize_upgrade(
     return http_url, headers, subprotocols
 
 
+def _scan_context(
+    adapter: WsAdapter, path: str, session_id: str, *, identity: bool
+) -> "ScanContext":
+    """A realtime connection's frames as a scan sink is told about them
+    (``plugin_api.ScanContext``): the upgrade's facts, the connection's
+    session and admitted subject."""
+    from llm_redact.plugin_api import ScanContext
+    from llm_redact.proxy import _REQUEST_USER
+
+    return ScanContext(
+        surface="websocket",
+        provider=adapter.provider,
+        adapter=adapter.name,
+        method="GET",
+        path=path,
+        session_id=session_id,
+        subject=_REQUEST_USER.get(),
+        identity=identity,
+    )
+
+
 def _upgrade_request(
     adapter: WsAdapter, path: str, query: QueryParams, identity: bool
 ) -> "AuthorizationRequest":
@@ -1803,6 +1829,15 @@ async def _relay(
     # by the models on the worker thread before the frame is checked and
     # redacted.
     prefetching = provider_config.detection and bool(ctx.redactor.plan.heavy_indices)
+    # A registered scan sink (scan_capture; none in the Free core): each
+    # client frame a sink wants has the strings its redaction scans
+    # recorded, queued for it right before the frame is sent.
+    capture = state.scan_capture if provider_config.detection else None
+    scan_context = (
+        _scan_context(adapter, path, ctx.session_id, identity=require_json)
+        if capture is not None
+        else None
+    )
 
     # The access gate asked again with the model each setup frame or model
     # update names (its optional authorize_request; Gemini/Vertex Live
@@ -1932,6 +1967,12 @@ async def _relay(
                     frame_redactor = frame_redactor.with_precomputed(frame_table[1], frame_table[0])
                 if frame_scope is not None:
                     frame_redactor = frame_redactor.with_overrides(frame_scope)
+                frame_recorder = None
+                if capture is not None:
+                    assert scan_context is not None  # built with the capture
+                    frame_recorder = capture.recorder(scan_context)
+                    if frame_recorder is not None:
+                        frame_redactor = frame_redactor.with_recorder(frame_recorder)
                 frame_ctx = RequestContext(
                     ctx.session_id, ctx.vault, frame_redactor, ctx.rehydrator
                 )
@@ -2015,6 +2056,9 @@ async def _relay(
                     override_marker = frame_marker or override_marker
                     # Handed to the upstream next, with no check between.
                     frame_scope.settle(sent=True)
+                if frame_recorder is not None and capture is not None:
+                    # Redacted and handed to the upstream next: captured.
+                    capture.submit(frame_recorder)
                 await upstream.send(outbound)
             except _ContentRefused as refused:
                 # The access gate refused what this frame's redaction found

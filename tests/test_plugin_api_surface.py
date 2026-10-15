@@ -133,6 +133,16 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
         },
     ),
     "ModelPolicy": ((), {"check": "(self, load: 'ModelLoad') -> 'str | None'"}),
+    "ScanSink": (
+        (),
+        {
+            "wants": "(self, context: 'ScanContext') -> 'bool'",
+            "capture": (
+                "(self, context: 'ScanContext', strings: 'tuple[ScannedString, ...]') -> 'None'"
+            ),
+            "close": "(self) -> 'None'",
+        },
+    ),
     "UpstreamAuth": (
         (),
         {
@@ -238,6 +248,14 @@ DATACLASSES: dict[str, str] = {
         "(text: 'str | None', complete: 'bool', extractor: 'str',"
         " proxy_credential: 'bool' = False, convert_text: 'str | None' = None) -> None"
     ),
+    "ScanContext": (
+        "(surface: 'str', provider: 'str', adapter: 'str', method: 'str', path: 'str',"
+        " session_id: 'str', subject: 'str | None', identity: 'bool') -> None"
+    ),
+    "ScannedDetection": (
+        "(detector_type: 'str', start: 'int', end: 'int', kind: 'str', source: 'str') -> None"
+    ),
+    "ScannedString": ("(text: 'str', detections: 'tuple[ScannedDetection, ...]') -> None"),
 }
 
 ALL: tuple[str, ...] = (
@@ -271,6 +289,10 @@ ALL: tuple[str, ...] = (
     "RouteRefusal",
     "Router",
     "SSEEvent",
+    "ScanContext",
+    "ScanSink",
+    "ScannedDetection",
+    "ScannedString",
     "SessionRouter",
     "Telemetry",
     "UploadInspector",

@@ -6,7 +6,13 @@ from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple, Protocol
 
 from llm_redact.detection.base import Detection, Detector
-from llm_redact.detection.engine import Allowlist, DetectorPlan, PrecomputedTable, plan_for
+from llm_redact.detection.engine import (
+    Allowlist,
+    DetectorPlan,
+    DetectorSource,
+    PrecomputedTable,
+    plan_for,
+)
 from llm_redact.jsonwalk import transform_strings
 from llm_redact.vault import PlaceholderSpaceExhausted, Vault
 
@@ -58,6 +64,17 @@ class OverrideCheck(Protocol):
         """The request is being refused for a finding no approval can pass
         (a deny string in text the proxy cannot rewrite): its refusal must
         carry no code."""
+
+
+class DetectionRecorder(Protocol):
+    """Where a redactor that records what it scans (``with_recorder``)
+    hands each text it scans: with every detection found in it — the
+    configured detectors' (allowlists applied) and the added deny
+    strings' — each with the detector it came from, before anything acts
+    on them (``scan_capture.ScanRecorder``). Read-only: it can change
+    nothing the redaction does."""
+
+    def record(self, text: str, found: Sequence[tuple[Detection, DetectorSource]]) -> None: ...
 
 
 class TextScan(NamedTuple):
@@ -182,6 +199,7 @@ class Redactor:
         added_deny: DetectorPlan | None = None,
         final_blocks: frozenset[str] = frozenset(),
         precomputed: PrecomputedTable | None = None,
+        recorder: DetectionRecorder | None = None,
     ) -> None:
         # The detector list compiled for string-at-a-time detection (same
         # output, gated per string), taken as it is now: plan_for shares the
@@ -224,6 +242,10 @@ class Redactor:
         # request will scan, computed ahead of it off the event loop
         # (with_precomputed, ner_prefetch); None runs them inline.
         self._precomputed = precomputed
+        # Where every text this redactor scans is handed with its
+        # detections (with_recorder: a registered scan sink's capture,
+        # scan_capture); None records nothing and detects as before.
+        self._recorder = recorder
 
     @property
     def plan(self) -> DetectorPlan:
@@ -270,6 +292,16 @@ class Redactor:
         copy._precomputed = table if plan is self._plan else {}
         return copy
 
+    def with_recorder(self, recorder: DetectionRecorder) -> "Redactor":
+        """A thin copy that hands every text it scans (``redact_text``,
+        ``scan``) to ``recorder`` with the detections found in it, each
+        with the detector it came from (``DetectionRecorder``) — the same
+        detections, acted on exactly as without it. Its floor and budget
+        copies keep it."""
+        copy = self._copy(self._floors, self._budget)
+        copy._recorder = recorder
+        return copy
+
     def _copy(self, floors: Mapping[str, int], budget: StringBudget | None) -> "Redactor":
         return Redactor(
             self._plan,
@@ -284,6 +316,7 @@ class Redactor:
             added_deny=self._added_deny,
             final_blocks=self._final_blocks,
             precomputed=self._precomputed,
+            recorder=self._recorder,
         )
 
     def _detect(self, text: str) -> list[Detection]:
@@ -315,10 +348,37 @@ class Redactor:
         """The detections redaction acts on in ``text``: the configured
         policy's (``_resolve_overlaps``), with the added deny strings'
         matches taken in (``_absorb``)."""
+        if self._recorder is not None:
+            return self._recorded_winners(text, self._recorder)
         winners = _resolve_overlaps(self._detect(text))
         if self._added_deny is None:
             return winners
         return self._absorb(text, winners, self._added_deny.detect(text, self._allowlist))
+
+    def _recorded_winners(self, text: str, recorder: DetectionRecorder) -> list[Detection]:
+        """``_winners`` with a recorder attached (``with_recorder``): the
+        same detections, each found with the detector it came from
+        (``DetectorPlan.detect_sourced``, ``detect``'s detections in its
+        order) — the heavy ones taken from the precomputed table as
+        ``_detect`` takes them — handed to ``recorder`` with ``text``, then
+        resolved exactly as ``_winners`` resolves them."""
+        row = None
+        table = self._precomputed
+        if table is not None:
+            row = table.get(text)
+            if row is None:
+                self._plan.count_prefetch_miss()
+        found = self._plan.detect_sourced(text, self._allowlist, row)
+        added = (
+            self._added_deny.detect_sourced(text, self._allowlist)
+            if self._added_deny is not None
+            else []
+        )
+        recorder.record(text, found + added)
+        winners = _resolve_overlaps([d for d, _source in found])
+        if self._added_deny is None:
+            return winners
+        return self._absorb(text, winners, [d for d, _source in added])
 
     def _absorb(
         self, text: str, winners: list[Detection], added: list[Detection]

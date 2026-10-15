@@ -65,6 +65,15 @@ table miss) waits for at most the string the worker is on, never the whole
 batch. A model fault refuses the request (nothing is forwarded), exactly as
 it did when the models ran inline.
 
+A plugin may register scan sinks (none in the Free core; docs/plugins.md
+"Scan sinks"): a sink that wants a request is handed, after its redaction
+succeeded and right before the request leaves for its upstream, each
+distinct string the redaction scanned — UNREDACTED, as the client sent it
+— with every detection's type, span and the rule or model that found it.
+The hand-off is a bounded queue served by one worker thread, so a sink
+never holds up a request; a refused request is never handed over. Without
+a sink nothing is recorded.
+
 A request body with nothing to redact is forwarded as its original bytes
 (no parse-and-reserialize round trip). The one exception is a JSON object
 that repeats a key, at any depth: the parser keeps the last occurrence,

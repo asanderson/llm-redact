@@ -1389,6 +1389,130 @@ class ModelPolicy(Protocol):
     def check(self, load: ModelLoad) -> str | None: ...
 
 
+# --- scan capture seam ------------------------------------------------------------
+# The strings a request's redaction scanned, handed READ-ONLY to the sinks a
+# plugin registers (``Registry.build_scan_sinks``; the Free default registers
+# none, and without a sink nothing is recorded or queued). Owner-approved for
+# llm-redact-pro's opt-in training capture. A sink receives UNREDACTED text —
+# the values the proxy exists to keep from the provider: whatever it keeps is
+# outside the vault's protections, and it must never log or export it.
+
+
+@dataclass(frozen=True)
+class ScanContext:
+    """Where one capture comes from, as a ``ScanSink`` is told: the facts
+    the core already records about the request in its rows, never a value.
+
+    ``surface`` is ``http`` (one request) or ``websocket`` (one client
+    frame of a realtime connection: each frame is a capture of its own);
+    ``provider`` the provider it goes to; ``adapter`` the provider
+    adapter's name; ``method`` the HTTP method (``GET`` for a realtime
+    frame: its connection's upgrade); ``path`` the request path (the
+    upgrade's for a frame); ``session_id`` the vault session it is redacted
+    in (with llm-redact-pro's named users, the user's own copy);
+    ``subject`` the access gate's admitted subject (None without one: the
+    local operator); ``identity`` whether it reaches its provider with a
+    credential the proxy holds."""
+
+    surface: str
+    provider: str
+    adapter: str
+    method: str
+    path: str
+    session_id: str
+    subject: str | None
+    identity: bool
+
+
+@dataclass(frozen=True)
+class ScannedDetection:
+    """One detection in a ``ScannedString``: its placeholder type
+    (``detector_type``), its span (``text[start:end]`` of the string — the
+    value itself is never repeated), and the detector that found it:
+    ``kind`` ``rule`` (a built-in regex rule), ``custom`` (a
+    ``[[detection.custom_rules]]`` rule), ``deny`` (a deny string, the
+    operator's or an access gate's overlay), ``ner`` (an NER backend) or
+    ``other`` (any other detector); ``source`` the rule's name, the NER
+    backend's as configured (``spacy``, ``hf``, ``gliner``, …: the names
+    ``/status`` ``detection.ner.backends`` uses) or ``deny_strings``.
+
+    Every detection is listed, as found — after the allowlists, BEFORE
+    overlap resolution and modes: a span a longer or higher-priority
+    detection won, a warn-mode value (forwarded as sent) and a block-mode
+    one (which refused nothing here: a refused request is never captured)
+    are listed alike. Spans may overlap."""
+
+    detector_type: str
+    start: int
+    end: int
+    kind: str
+    source: str
+
+
+@dataclass(frozen=True)
+class ScannedString:
+    """One string the request's redaction scanned, exactly as the client
+    sent it — UNREDACTED: the original values, never a placeholder the
+    proxy issued for them — with its detections, by start (longest first
+    where two start together). A string the client sent holding a
+    placeholder (a pasted answer, a compacted history) holds it here too."""
+
+    text: str = field(repr=False)
+    detections: tuple[ScannedDetection, ...]
+
+
+class ScanSink(Protocol):
+    """Receives the strings the redaction scanned (``Registry.build_scan_sinks``,
+    built once at startup with the configuration and the resolved tier:
+    restart-only). Read-only by construction: nothing a sink does changes a
+    request, its redaction or its answer.
+
+    All three members are synchronous: a sink declaring one ``async def``
+    is refused at startup (a ``ConfigError``), and an awaitable answer is
+    closed unawaited and counted as a fault.
+
+    ``wants`` is asked synchronously ON THE EVENT LOOP for every request
+    whose body the core redacts — and every realtime client frame —
+    BEFORE its redaction: keep it cheap (a flag, a sample, a clock; never
+    I/O). Only ``True`` captures it; an exception means no, counted as a
+    fault. Covered: everything the request's redaction scans — JSON body
+    strings, verbatim and label fields, an upload's form fields, file
+    names, text and JSONL file parts, the text an upload inspector
+    extracted from a binary part, a convert-mode document's text, a
+    realtime frame's strings. Not covered: a body the core forwards
+    unredacted (``[providers.NAME] detection = false``, a pass-through
+    route, an exempt MCP server's blocks, a binary part forwarded
+    unscanned) and the system note the core adds.
+
+    ``capture`` gets, for a request a sink wanted, each DISTINCT string its
+    redaction scanned, once, in the order first scanned — only once the
+    redaction succeeded and the request is handed to its upstream (a
+    realtime frame: right before it is sent). A request or frame refused
+    at any point (a block, an access gate's check, the audit START row, an
+    authorizer, a budget) is never captured. It is called on ONE worker
+    thread, never on the event loop and never two calls at once (not
+    always the same thread: the worker idles out), in the order the
+    requests were handed upstream. The queue in front of it is bounded: a
+    capture that does not fit is DROPPED and counted, never waited for —
+    a slow sink loses captures, never a request's time (a sink that
+    computes much still shares the process's interpreter with the event
+    loop: hand heavy work to another process). An exception is
+    contained: counted (bookkeeping stage ``scan_sink``) and logged by
+    its TYPE only, once per outage. The strings are user data: a sink must
+    never log them or put any of them in an exception message.
+
+    ``close`` is called once at shutdown, after the queue was drained
+    (bounded), from a thread of its own and never while a ``capture``
+    runs: when a capture is still running as the shutdown bound is
+    reached, NO sink is closed (the worker may still call any of them)."""
+
+    def wants(self, context: ScanContext) -> bool: ...
+
+    def capture(self, context: ScanContext, strings: tuple[ScannedString, ...]) -> None: ...
+
+    def close(self) -> None: ...
+
+
 # --- vault database credential seam ---------------------------------------------
 # ``Registry.build_db_password(vault_config)`` returns one of these (or None
 # for the static password). The RDBMS vault store calls it synchronously at
@@ -1482,6 +1606,10 @@ __all__ = [
     "RouteRefusal",
     "Router",
     "SSEEvent",
+    "ScanContext",
+    "ScanSink",
+    "ScannedDetection",
+    "ScannedString",
     "SessionRouter",
     "Telemetry",
     "UploadInspector",

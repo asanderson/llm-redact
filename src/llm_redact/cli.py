@@ -940,6 +940,12 @@ def _print_posture(payload: dict[str, Any]) -> None:
             f"overrides: {overrides.get('always', 0)} every-time rule(s), uses {seen} —"
             " refused values/bodies FORWARDED as sent (`llm-redact override list`)"
         )
+    scan = payload.get("scan_capture") or {}
+    if scan.get("sinks"):
+        lines.append(
+            f"scan sinks: {scan['sinks']} registered — they receive the UNREDACTED text of the"
+            f" requests they capture ({scan.get('dropped_total', 0)} dropped)"
+        )
     inactive = payload.get("detection", {}).get("language_inactive_rules") or []
     if inactive:
         lines.append(f"language-inactive rules: {', '.join(inactive)} (not detected)")

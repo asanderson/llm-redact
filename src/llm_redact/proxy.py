@@ -153,6 +153,7 @@ from llm_redact.plugin_api import (
     RoutePlan,
     Router,
     RouteRefusal,
+    ScanContext,
     Telemetry,
     UploadInspector,
     UpstreamAuth,
@@ -192,6 +193,15 @@ from llm_redact.redactor import (
 )
 from llm_redact.registry import get_registry, loaded_plugins, pro_package_installed
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
+from llm_redact.scan_capture import (
+    CLOSE_SECONDS as SCAN_CLOSE_SECONDS,
+)
+from llm_redact.scan_capture import (
+    ScanCapture,
+    ScanRecorder,
+    build_scan_capture,
+    capture_status,
+)
 from llm_redact.sse import SSEEvent, SSEParser, serialize
 from llm_redact.upload_content import classify_file
 from llm_redact.upload_inspection import (
@@ -896,7 +906,9 @@ class ProxyState:
         # timed out (the connection is closed: connections.LiveConnections);
         # "realtime_frame" a realtime client frame's check that failed (the
         # connection is closed) and "realtime_server_frame" the router's
-        # observation of an upstream frame (contained: the frame is sent).
+        # observation of an upstream frame (contained: the frame is sent);
+        # "scan_sink" a registered scan sink's fault (contained, off the
+        # event loop: the request is long gone — scan_capture).
         self.bookkeeping_errors: Counter[str] = Counter()
         bind_fault_counter = getattr(self.vault_manager, "bind_fault_counter", None)
         if callable(bind_fault_counter):
@@ -1131,6 +1143,13 @@ class ProxyState:
             )
         self.inspection_limits: Limits | None = (
             inspector_limits(self.upload_inspector) if self.upload_inspector is not None else None
+        )
+        # Read-only capture of the strings a request's redaction scanned
+        # (plugin_api.ScanSink, scan_capture): None without a registered
+        # sink — the Free core — and then no redactor records anything and
+        # nothing is queued. Restart-only: built once with the resolved tier.
+        self.scan_capture: ScanCapture | None = build_scan_capture(
+            registry.build_scan_sinks(config, self.license.tier), self.bookkeeping_errors
         )
         # Inspected binary upload parts by (provider, outcome) — an honesty
         # counter like unscanned_uploads (upload_inspection.OUTCOMES).
@@ -3108,6 +3127,12 @@ async def _handle_local(
                 # an approved override let its values through). Counts only.
                 "inspected_uploads_total": _inspected_by_provider(state.inspected_uploads),
                 "upload_inspector": _inspector_status(state),
+                # Registered scan sinks (plugin_api.ScanSink: they receive
+                # the UNREDACTED strings of the requests they capture) and
+                # their queue: waiting, delivered (one for each sink a
+                # capture reached), dropped (the queue full, or left at
+                # shutdown), failed. Counts only.
+                "scan_capture": capture_status(state.scan_capture),
                 # How many browser origins the operator listed in
                 # allowed_origins (the count, not the list): pages there can
                 # read restored values back through the proxy — opt-in.
@@ -5062,6 +5087,49 @@ def _settle_upload(
         )
 
 
+def _recording(
+    redactor: Redactor,
+    capture: ScanCapture,
+    upload: _UploadFate,
+    request: Request,
+    adapter: ProviderAdapter,
+    *,
+    provider_name: str,
+    path: str,
+    session_id: str,
+    identity: bool,
+) -> Redactor:
+    """``redactor`` recording what it scans (``Redactor.with_recorder``)
+    when a registered scan sink wants this request (``ScanCapture.recorder``,
+    told the request's facts: ``plugin_api.ScanContext``), else ``redactor``
+    itself. The capture is queued once the request is handed to its
+    upstream (``upload`` settled sent) and dropped on every other way out:
+    a refused request is never captured."""
+    recorder = capture.recorder(
+        ScanContext(
+            surface="http",
+            provider=provider_name,
+            adapter=adapter.name,
+            method=request.method,
+            path=path,
+            session_id=session_id,
+            subject=_REQUEST_USER.get(),
+            identity=identity,
+        )
+    )
+    if recorder is None:
+        return redactor
+    upload.hold(functools.partial(_settle_capture, capture, recorder))
+    return redactor.with_recorder(recorder)
+
+
+def _settle_capture(capture: ScanCapture, recorder: ScanRecorder, sent: bool) -> None:
+    """A recorded request's fate (``_UploadFate``): queued for its sinks
+    when it went out, else forgotten."""
+    if sent:
+        capture.submit(recorder)
+
+
 def _plan_request(
     router: Router,
     request: Request,
@@ -5935,6 +6003,21 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         # The copy is this body's own: it counts the strings it redacts
         # against max_body_strings.
         budgeted = ctx.redactor.with_budget(max_body_strings)
+        if state.scan_capture is not None:
+            # A registered scan sink: the strings this redaction scans are
+            # recorded (when a sink wants them) and queued for it once the
+            # request is handed upstream.
+            budgeted = _recording(
+                budgeted,
+                state.scan_capture,
+                upload,
+                request,
+                adapter,
+                provider_name=provider_name,
+                path=path,
+                session_id=ctx.session_id,
+                identity=proxy_credential,
+            )
         if prefetched is not None:
             # The model-backed detections computed off the loop (above).
             budgeted = budgeted.with_precomputed(prefetched[1], prefetched[0])
@@ -6047,6 +6130,21 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             # This body's own copy, counting its strings (form fields, file
             # names, JSONL lines, extracted texts) against max_body_strings.
             upload_redactor = ctx.redactor.with_budget(max_body_strings)
+            if state.scan_capture is not None:
+                # As for a JSON body: every string the upload's redaction
+                # scans (an inspector's extracted texts included), queued
+                # for a scan sink that wants them once the upload is sent.
+                upload_redactor = _recording(
+                    upload_redactor,
+                    state.scan_capture,
+                    upload,
+                    request,
+                    adapter,
+                    provider_name=provider_name,
+                    path=path,
+                    session_id=ctx.session_id,
+                    identity=proxy_credential,
+                )
             if scope is not None:
                 upload_redactor = upload_redactor.with_overrides(scope)
             # NER off the event loop, as for a JSON body: every string the
@@ -8165,6 +8263,20 @@ async def _drain_map_writes(state: ProxyState) -> None:
         await asyncio.to_thread(drain, SHUTDOWN_DRAIN_SECONDS)
 
 
+async def _close_scan_capture(state: ProxyState) -> None:
+    """At shutdown, once the requests have finished: drain the scan sinks'
+    queue and close the sinks (off the loop, at most
+    ``scan_capture.CLOSE_SECONDS`` in all); what is still queued then is
+    counted and dropped. A fault is logged by type and never skips the rest
+    of the shutdown (the audit flush, the database closes)."""
+    if state.scan_capture is None:
+        return
+    try:
+        await asyncio.to_thread(state.scan_capture.close, SCAN_CLOSE_SECONDS)
+    except Exception as exc:  # noqa: BLE001 — contained: the shutdown goes on
+        logger.warning("closing the scan sinks failed (%s)", type(exc).__name__)
+
+
 def create_app(
     config: Config,
     *,
@@ -8259,8 +8371,10 @@ def create_app(
                     logger.warning("a background task had failed (%s)", type(outcome).__name__)
             await state.client.aclose()
             # The vault's background map writes land now (bounded): nothing
-            # submits another once the requests have finished.
-            await _drain_map_writes(state)
+            # submits another once the requests have finished. Beside them,
+            # as long at most, the scan sinks' queue drains and the sinks
+            # close (scan_capture): the shutdown budget is unchanged.
+            await asyncio.gather(_drain_map_writes(state), _close_scan_capture(state))
             if state.router is not None:
                 _close_contained("router", state.router.close)
             _close_upstream_auths(state.upstream_auth)

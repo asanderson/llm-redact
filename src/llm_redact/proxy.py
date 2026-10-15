@@ -1149,7 +1149,7 @@ class ProxyState:
         # sink — the Free core — and then no redactor records anything and
         # nothing is queued. Restart-only: built once with the resolved tier.
         self.scan_capture: ScanCapture | None = build_scan_capture(
-            tuple(registry.build_scan_sinks(config, self.license.tier)), self.bookkeeping_errors
+            registry.build_scan_sinks(config, self.license.tier), self.bookkeeping_errors
         )
         # Inspected binary upload parts by (provider, outcome) — an honesty
         # counter like unscanned_uploads (upload_inspection.OUTCOMES).
@@ -8267,9 +8267,14 @@ async def _close_scan_capture(state: ProxyState) -> None:
     """At shutdown, once the requests have finished: drain the scan sinks'
     queue and close the sinks (off the loop, at most
     ``scan_capture.CLOSE_SECONDS`` in all); what is still queued then is
-    counted and dropped."""
-    if state.scan_capture is not None:
+    counted and dropped. A fault is logged by type and never skips the rest
+    of the shutdown (the audit flush, the database closes)."""
+    if state.scan_capture is None:
+        return
+    try:
         await asyncio.to_thread(state.scan_capture.close, SCAN_CLOSE_SECONDS)
+    except Exception as exc:  # noqa: BLE001 — contained: the shutdown goes on
+        logger.warning("closing the scan sinks failed (%s)", type(exc).__name__)
 
 
 def create_app(

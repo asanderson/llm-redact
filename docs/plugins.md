@@ -285,7 +285,9 @@ returns your own text already masked.
 This is not an agent plugin: it is a seam of the proxy process, for a
 Python package like llm-redact-pro (whose opt-in training capture it was
 added for). `Registry.build_scan_sinks(config, tier)` returns the sinks,
-once at startup (restart-only); the contract is `plugin_api.ScanSink`:
+once at startup (restart-only); the contract is `plugin_api.ScanSink`,
+whose three members are synchronous (a sink declaring one `async def` is
+refused at startup):
 
 - `wants(context) -> bool` is asked synchronously, on the event loop,
   before each request's (or realtime client frame's) redaction — a flag,
@@ -322,13 +324,15 @@ idle and a new one starts with the next capture), in the order requests
 were handed upstream. The queue in front of it holds at most 256 captures
 and 16 Mi characters: a capture that does not fit is dropped and counted,
 never waited for, so a slow sink loses captures rather than slowing any
-request. A sink's exception is contained, counted
+request (the worker is a thread of the proxy's process: a sink that
+computes much competes with the event loop for the interpreter, so hand
+heavy work to another process). A sink's exception is contained, counted
 (`llm_redact_bookkeeping_errors_total{stage="scan_sink"}`) and logged by
 its type only, once per outage. At shutdown the queue drains for at most
 5 s beside the vault's map-write drain (the shutdown budget is unchanged;
 [resilience.md](resilience.md#shutdown-order)), what is left is dropped
-and counted, and each sink is closed once — never while one of its
-captures still runs.
+and counted, and each sink is closed once — never while a capture still
+runs: when one is still running as the 5 s run out, no sink is closed.
 
 `/status` `scan_capture` reports `sinks`, `queued`, `delivered_total` (one
 for each sink a capture reached), `dropped_total` and `faults_total`, and

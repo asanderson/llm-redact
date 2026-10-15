@@ -42,6 +42,7 @@ with the next capture (an idle proxy holds no extra thread).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import threading
 import time
@@ -115,12 +116,27 @@ class _Capture(NamedTuple):
 
 
 def _sink_problem(sink: object) -> str | None:
-    """Why ``sink`` cannot serve as a ``ScanSink`` (a member it lacks), else
-    None — the type and member names only."""
+    """Why ``sink`` cannot serve as a ``ScanSink`` (a member it lacks, or
+    one declared ``async def``: never awaited, its every call would capture
+    nothing), else None — the type and member names only."""
     for member in ("wants", "capture", "close"):
-        if not callable(getattr(sink, member, None)):
+        method = getattr(sink, member, None)
+        if not callable(method):
             return f"{type(sink).__name__} has no callable {member}()"
+        if inspect.iscoroutinefunction(method) or inspect.isasyncgenfunction(method):
+            return f"{type(sink).__name__}.{member}() is async def (it must be synchronous)"
     return None
+
+
+def _awaitable(answer: object) -> bool:
+    """Whether a sink's ``answer`` is an awaitable (never awaited: the
+    members are synchronous) — a coroutine is closed unrun, so it never
+    runs late nor warns that it was never awaited."""
+    if not inspect.isawaitable(answer):
+        return False
+    if inspect.iscoroutine(answer):
+        answer.close()
+    return True
 
 
 class ScanCapture:
@@ -175,7 +191,10 @@ class ScanCapture:
 
     def _wants(self, index: int, sink: ScanSink, context: ScanContext) -> bool:
         try:
-            return sink.wants(context) is True
+            answer: object = sink.wants(context)
+            if _awaitable(answer):
+                raise TypeError("wants() answered an awaitable")
+            return answer is True
         except Exception as exc:  # noqa: BLE001 — contained: counted, logged by type
             self._failed(index, exc)
             self._count_fault()
@@ -293,11 +312,21 @@ class ScanCapture:
     # -- the worker thread -------------------------------------------------------
 
     def _ensure_thread(self) -> None:
+        """Start the worker unless one runs (under ``_cond``). A thread that
+        cannot start (the process is out of threads) is never the request's
+        problem: what is queued waits for the next capture to try again —
+        or is counted and dropped at shutdown."""
         if self._thread is None:
-            self._thread = threading.Thread(
-                target=self._work, name="llm-redact-scan-sinks", daemon=True
-            )
-            self._thread.start()
+            thread = threading.Thread(target=self._work, name="llm-redact-scan-sinks", daemon=True)
+            self._thread = thread
+            try:
+                thread.start()
+            except RuntimeError as exc:
+                self._thread = None
+                logger.warning(
+                    "scan capture: the sinks' worker thread could not start (%s)",
+                    type(exc).__name__,
+                )
 
     def _work(self) -> None:
         try:
@@ -334,7 +363,10 @@ class ScanCapture:
         contained (counted on the loop, logged by type once per outage)."""
         for index in capture.sinks:
             try:
-                self.sinks[index].capture(capture.context, capture.strings)
+                # Typed as the contract allows a plugin to get it wrong.
+                deliver: Callable[..., object] = self.sinks[index].capture
+                if _awaitable(deliver(capture.context, capture.strings)):
+                    raise TypeError("capture() answered an awaitable")
             except Exception as exc:  # noqa: BLE001 — contained: counted, logged by type
                 self._failed(index, exc)
                 self._post(self._count_fault)
@@ -381,14 +413,20 @@ class ScanCapture:
         outcome()
 
 
-def build_scan_capture(sinks: Sequence[ScanSink], faults: Counter[str]) -> ScanCapture | None:
-    """The proxy's capture for the registered ``sinks`` — None without any
-    (the Free core: nothing is recorded or queued). A sink lacking a member
-    of the contract is a ``ConfigError`` (the startup refuses to serve)."""
-    if not sinks:
-        return None
+def build_scan_capture(sinks: object, faults: Counter[str]) -> ScanCapture | None:
+    """The proxy's capture for the registered ``sinks`` (the factory's
+    answer, ``Registry.build_scan_sinks``) — None without any (the Free
+    core: nothing is recorded or queued). An answer that is not a tuple or
+    list of sinks, or a sink lacking a member of the contract, is a
+    ``ConfigError`` (the startup refuses to serve)."""
     from llm_redact.config import ConfigError
 
+    if not isinstance(sinks, tuple | list):
+        raise ConfigError(
+            f"the scan sink factory answered {type(sinks).__name__}, not a tuple of sinks"
+        )
+    if not sinks:
+        return None
     for sink in sinks:
         problem = _sink_problem(sink)
         if problem is not None:

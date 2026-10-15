@@ -1467,6 +1467,10 @@ class ScanSink(Protocol):
     restart-only). Read-only by construction: nothing a sink does changes a
     request, its redaction or its answer.
 
+    All three members are synchronous: a sink declaring one ``async def``
+    is refused at startup (a ``ConfigError``), and an awaitable answer is
+    closed unawaited and counted as a fault.
+
     ``wants`` is asked synchronously ON THE EVENT LOOP for every request
     whose body the core redacts — and every realtime client frame —
     BEFORE its redaction: keep it cheap (a flag, a sample, a clock; never
@@ -1490,15 +1494,17 @@ class ScanSink(Protocol):
     always the same thread: the worker idles out), in the order the
     requests were handed upstream. The queue in front of it is bounded: a
     capture that does not fit is DROPPED and counted, never waited for —
-    a slow sink loses captures, never a request's time. An exception is
+    a slow sink loses captures, never a request's time (a sink that
+    computes much still shares the process's interpreter with the event
+    loop: hand heavy work to another process). An exception is
     contained: counted (bookkeeping stage ``scan_sink``) and logged by
     its TYPE only, once per outage. The strings are user data: a sink must
     never log them or put any of them in an exception message.
 
     ``close`` is called once at shutdown, after the queue was drained
     (bounded), from a thread of its own and never while a ``capture``
-    runs: a sink still capturing when the shutdown bound is reached is not
-    closed."""
+    runs: when a capture is still running as the shutdown bound is
+    reached, NO sink is closed (the worker may still call any of them)."""
 
     def wants(self, context: ScanContext) -> bool: ...
 

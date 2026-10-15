@@ -1079,6 +1079,126 @@ def test_a_sink_lacking_a_member_refuses_the_startup(monkeypatch: pytest.MonkeyP
         create_app(Config())
 
 
+@pytest.mark.parametrize("member", ["wants", "capture", "close"])
+def test_a_sink_with_an_async_member_refuses_the_startup(
+    monkeypatch: pytest.MonkeyPatch, member: str
+) -> None:
+    # Never awaited, an async member would capture nothing on every call:
+    # the deploy gate (serve --check) must say so rather than call it OK.
+    async def asynchronous(self: Any, *args: Any) -> Any:
+        return True
+
+    sink_class = type("AsyncSink", (Sink,), {member: asynchronous})
+    _register(monkeypatch, sink_class())
+    with pytest.raises(
+        ConfigError, match=rf"scan sink cannot be used: AsyncSink.{member}\(\) is async def"
+    ):
+        create_app(Config())
+
+
+@pytest.mark.parametrize("answer", [None, Sink(), iter([Sink()])], ids=["none", "sink", "iter"])
+def test_a_factory_answer_that_is_no_tuple_of_sinks_refuses_the_startup(
+    monkeypatch: pytest.MonkeyPatch, answer: Any
+) -> None:
+    reg = Registry()
+    reg.build_scan_sinks = lambda config, tier: answer  # type: ignore[method-assign]
+    monkeypatch.setattr(registry_mod, "_registry", reg)
+    with pytest.raises(ConfigError, match=r"the scan sink factory answered \w+, not a tuple"):
+        create_app(Config())
+    # A list is a sequence of sinks too.
+    assert build_scan_capture([Sink()], Counter()) is not None
+
+
+class _AwaitingSink(Sink):
+    """A synchronous member that answers a coroutine (``wants`` or
+    ``capture``): never awaited, closed unrun, counted as a fault."""
+
+    def __init__(self, member: str) -> None:
+        super().__init__()
+        self.member = member
+        self.coroutines: list[Any] = []
+
+    def _coroutine(self) -> Any:
+        async def later() -> bool:
+            raise AssertionError("an answer of a scan sink is never awaited")
+
+        coroutine = later()
+        self.coroutines.append(coroutine)
+        return coroutine
+
+    def wants(self, context: ScanContext) -> bool:
+        if self.member == "wants":
+            return self._coroutine()  # type: ignore[no-any-return]
+        return super().wants(context)
+
+    def capture(self, context: ScanContext, strings: tuple[ScannedString, ...]) -> None:
+        if self.member == "capture":
+            return self._coroutine()  # type: ignore[no-any-return]
+        super().capture(context, strings)
+
+
+@pytest.mark.parametrize("member", ["wants", "capture"])
+async def test_an_awaitable_answer_is_closed_unrun_and_counted(
+    monkeypatch: pytest.MonkeyPatch, member: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    sink, other = _AwaitingSink(member), Sink()
+    _register(monkeypatch, sink, other)
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(Upstream()))
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        async with _client(app) as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers=OPENAI_HEADERS,
+                json={"model": "m", "messages": [{"role": "user", "content": f"to {EMAIL}"}]},
+            )
+        assert response.status_code == 200
+        await _delivered(app)
+    (coroutine,) = sink.coroutines
+    assert coroutine.cr_frame is None  # closed, never started
+    assert len(other.captures) == 1  # the other sink is served as before
+    assert sink.captures == []
+    state = app.state.proxy
+    assert state.bookkeeping_errors["scan_sink"] == 1
+    assert state.scan_capture.status()["faults_total"] == 1
+    assert "scan capture: sink _AwaitingSink failed (TypeError)" in caplog.text
+    assert EMAIL not in caplog.text
+    state.scan_capture.close(1)
+
+
+async def test_a_worker_that_cannot_start_never_fails_the_request(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Out of threads: the request is sent and answered all the same; the
+    # capture waits in the queue for the next one to start the worker.
+    sink = Sink()
+    _register(monkeypatch, sink)
+    upstream = Upstream()
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
+    real_start = threading.Thread.start
+    refused: list[str] = []
+
+    def start(self: threading.Thread) -> None:
+        if self.name == "llm-redact-scan-sinks" and not refused:
+            refused.append(self.name)
+            raise RuntimeError("can't start new thread")
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    body = {"model": "m", "messages": [{"role": "user", "content": f"to {EMAIL}"}]}
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        async with _client(app) as client:
+            first = await client.post("/v1/chat/completions", headers=OPENAI_HEADERS, json=body)
+            assert first.status_code == 200 and len(upstream.bodies) == 1
+            capture = app.state.proxy.scan_capture
+            assert capture.status()["queued"] == 1 and sink.captures == []
+            second = await client.post("/v1/chat/completions", headers=OPENAI_HEADERS, json=body)
+            assert second.status_code == 200
+            await _delivered(app)
+    assert refused and len(sink.captures) == 2
+    assert "the sinks' worker thread could not start (RuntimeError)" in caplog.text
+    capture.close(1)
+
+
 def test_status_names_registered_sinks_in_the_posture_block(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

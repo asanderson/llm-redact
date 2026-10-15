@@ -537,3 +537,32 @@ async def test_scan_sinks_drain_and_close_before_the_audit_flush_and_the_closes(
     assert sorted(events[4:6]) == ["azure.aclose", "s3.aclose"]
     assert events[6:] == ["audit.close", "vault.close"]
     assert app.state.proxy.scan_capture.status()["dropped_total"] == 0
+
+
+async def test_a_failing_scan_close_never_skips_the_flush_or_the_closes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A fault closing the scan sinks (here the capture's own close; a
+    # sink's close is contained inside it) is logged by type and the
+    # shutdown goes on: the audit sinks flush, then the databases close.
+    import llm_redact.scan_capture as capture_mod
+
+    events: list[str] = []
+    _register(monkeypatch, events)
+    scan = ScanSinkSpy(events)
+    registry_mod.get_registry().build_scan_sinks = lambda config, tier: (scan,)  # type: ignore[method-assign]
+
+    def close(self: object, timeout: float) -> int:
+        events.append("scan.close")
+        raise RuntimeError("https://store.example/?sig=SECRET")
+
+    monkeypatch.setattr(capture_mod.ScanCapture, "close", close)
+    app = _app(events, httpx.MockTransport(_answer))
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        async with app.router.lifespan_context(app):
+            await asyncio.sleep(0)
+    assert events[0] == "scan.close"
+    assert sorted(events[1:3]) == ["azure.aclose", "s3.aclose"]
+    assert events[3:] == ["audit.close", "vault.close"]
+    assert "closing the scan sinks failed (RuntimeError)" in caplog.text
+    assert "SECRET" not in caplog.text

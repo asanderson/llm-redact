@@ -314,9 +314,11 @@ upload inspector extracted from a binary part, a convert-mode document's
 text, realtime client frames. What is not: a request refused at any point
 (a block, an access gate's check, the `[audit] required` START row, an
 upstream authorizer, a routing budget), and anything the core forwards
-unredacted (`[providers.NAME] detection = false`, pass-through routes, an
-exempt MCP server's blocks, a binary part sent unscanned) or adds itself
-(the system note).
+without scanning it (`[providers.NAME] detection = false`, pass-through
+routes, an exempt MCP server's blocks, the MCP connector configuration —
+`mcp_servers`, `tools` of type `mcp`, with their credentials — a binary
+part sent unscanned, the structural values the redaction skips such as a
+`model` or base64 data) or adds itself (the system note).
 
 `capture` runs on ONE worker thread, never on the event loop and never two
 calls at once (not always the same thread: the worker exits after 5 s

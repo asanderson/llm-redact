@@ -509,6 +509,29 @@ async def test_a_message_names_each_detection_and_its_detector(
     app.state.proxy.scan_capture.close(1)
 
 
+async def test_the_context_names_the_path_never_its_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A Gemini API key rides the query (?key=): the context a sink is told
+    # names the path only.
+    sink = Sink()
+    _register(monkeypatch, sink)
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(Upstream()))
+    path = "/v1beta/models/gemini-2.5-pro:generateContent"
+    async with _client(app) as client:
+        response = await client.post(
+            f"{path}?key=AIzaSECRETSECRET",
+            json={"contents": [{"role": "user", "parts": [{"text": f"to {EMAIL}"}]}]},
+        )
+    assert response.status_code == 200, response.text
+    await _delivered(app)
+    ((context, strings),) = sink.captures
+    assert context.path == path and context.provider == "gemini"
+    assert "SECRET" not in repr(context)
+    assert [scanned.text for scanned in strings] == [f"to {EMAIL}"]
+    app.state.proxy.scan_capture.close(1)
+
+
 async def test_the_admitted_subject_and_a_routed_hop_are_captured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -602,6 +625,42 @@ async def test_a_body_forwarded_unredacted_is_never_recorded(
         passthrough = await client.get("/v1/unknown/thing", headers=OPENAI_HEADERS)
     assert response.status_code == 200 and passthrough.status_code == 200
     assert sink.wanted == []  # never even asked
+    app.state.proxy.scan_capture.close(1)
+
+
+async def test_the_mcp_connector_configuration_is_never_captured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Provider-directed configuration the provider receives as sent (an MCP
+    # server's URL and credential): never scanned, so never captured.
+    sink = Sink()
+    _register(monkeypatch, sink)
+    upstream = Upstream()
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
+    token = "mcp-credential-0123456789"
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/messages",
+            headers=ANTHROPIC_HEADERS,
+            json={
+                "model": "claude-x",
+                "max_tokens": 16,
+                "mcp_servers": [
+                    {
+                        "type": "url",
+                        "url": "https://mcp.example/sse",
+                        "name": "tools",
+                        "authorization_token": token,
+                    }
+                ],
+                "messages": [{"role": "user", "content": f"to {EMAIL}"}],
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert token.encode() in upstream.bodies[0]  # forwarded as sent
+    await _delivered(app)
+    ((_context, strings),) = sink.captures
+    assert [scanned.text for scanned in strings] == [f"to {EMAIL}"]
     app.state.proxy.scan_capture.close(1)
 
 

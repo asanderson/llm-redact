@@ -34,8 +34,9 @@ Each request asks for JSON matching a schema of ``{text, type}`` objects
 (``format`` for Ollama, ``response_format`` for OpenAI-compatible servers),
 at temperature 0 with a fixed seed. Strings longer than ``max_chars`` are
 skipped (counted, as on every backend); a longer string than one window is
-read in overlapping windows of whole words (windows.word_windows), all
-within one ``timeout_ms`` per string. What was found in a string is kept in
+read in overlapping windows of whole words (windows.word_windows; a word
+longer than a window in overlapping pieces of one), all within one
+``timeout_ms`` per string. What was found in a string is kept in
 a bounded cache keyed by the string's SHA-256, so the history an agent
 resends with every turn costs one server call per new string.
 
@@ -302,6 +303,21 @@ class _Client:
         return entities
 
 
+def _pieces(start: int, end: int) -> Iterator[tuple[int, int, bool]]:
+    """The window ``start``..``end`` as it is when it fits WINDOW_CHARS,
+    else (a single word longer than a window) cut into pieces of
+    WINDOW_CHARS characters, each starting a fifth of a window before the
+    previous one ends — so a value up to that long lies whole in one."""
+    if end - start <= WINDOW_CHARS:
+        yield start, end, False
+        return
+    step = WINDOW_CHARS - WINDOW_CHARS // 5
+    for first in range(start, end, step):
+        yield first, min(first + WINDOW_CHARS, end), True
+        if first + WINDOW_CHARS >= end:
+            return
+
+
 def _in_token(tokens: list[tuple[int, int]], ends: list[int], start: int, end: int) -> bool:
     """Whether ``start``..``end`` overlaps one of the start-sorted, disjoint
     placeholder ``tokens`` (``ends`` their ends)."""
@@ -459,10 +475,10 @@ class LlmNerDetector:
             return ()  # no letter or digit: nothing to find, nothing asked
         found: dict[str, str] = {}
         deadline = time.monotonic() + self._timeout
-        for start, end, over in windows:
-            if over:
-                # One word longer than a window: sent whole all the same,
-                # but past what a window is sized for.
+        for start, end, cut in windows:
+            if cut:
+                # A piece of one word longer than a window: the model
+                # reads that word only in pieces.
                 self.stats.windows_truncated += 1
             piece = text[start:end]
             try:
@@ -481,16 +497,25 @@ class LlmNerDetector:
         return pairs
 
     def _windows(self, text: str) -> list[tuple[int, int, bool]]:
-        """``text``'s windows as (start, end, over) character ranges: the
-        whole text when it fits one."""
+        """``text``'s windows as (start, end, cut) character ranges: the
+        whole text when it fits one (a blank or empty text included), else
+        overlapping windows of whole words — and a word longer than a
+        window cut into overlapping pieces of one (``cut`` True), so that
+        no request outgrows the context the server is asked for (NUM_CTX:
+        a longer prompt loses its start, the system prompt first)."""
+        if len(text) <= WINDOW_CHARS:
+            return [(0, len(text), False)]
         words = gliner_words(text)
+        if not words:
+            return [(0, len(text), False)]  # blank: never sent (nothing to find)
         # Each word costs its characters and the blank after it.
         nexts = [start for start, _end in words[1:]] + [len(text)]
         costs = [following - start for (start, _end), following in zip(words, nexts, strict=True)]
-        windows = list(word_windows(costs, WINDOW_CHARS, WINDOW_CHARS))
-        if len(windows) == 1:
-            return [(0, len(text), windows[0][2])]
-        return [(words[first][0], words[end - 1][1], over) for first, end, over in windows]
+        windows = word_windows(costs, WINDOW_CHARS, WINDOW_CHARS)
+        ranges: list[tuple[int, int, bool]] = []
+        for first, end, _over in windows:
+            ranges.extend(_pieces(words[first][0], words[end - 1][1]))
+        return ranges
 
     def _grounded(self, entities: list[Any], piece: str) -> Iterator[tuple[str, str]]:
         """The (value, type) pairs of ``entities`` worth redacting: a

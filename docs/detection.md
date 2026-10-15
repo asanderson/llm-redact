@@ -320,8 +320,10 @@ itself between two marker lines whose id is derived from the text, so the
 text cannot close its own frame; temperature 0 and a fixed seed; and a JSON
 schema for the answer (Ollama's `format`, the OpenAI `response_format`), a
 list of `{text, type}` objects. A string longer than 2,000 characters is read
-in overlapping windows of whole words, all within one `timeout_ms`; one
-longer than `max_chars` is skipped, as on every backend. What a string held
+in overlapping windows of whole words (a single word longer than that in
+overlapping pieces of 2,000 characters, counted `windows_truncated`, so no
+request outgrows the context the server is asked for), all within one
+`timeout_ms`; one longer than `max_chars` is skipped, as on every backend. What a string held
 is remembered by its SHA-256 (the last 4,096 strings, in process memory, gone
 with a reload), so the conversation history an agent resends with every
 request costs one call per new string. Each new string still costs a model
@@ -1177,7 +1179,7 @@ existing `detection.ner_enabled`):
 | `scanned_windowed` | strings the model read in overlapping windows (`hf`, `gliner`, `gliner2`) |
 | `skipped_max_chars` | strings longer than `[detection.ner] max_chars`, which the model never read (the regex rules and deny strings still scan them) |
 | `windows` | the windows the windowed strings were read in |
-| `windows_truncated` | windows (a string read whole counts as one) holding a single word longer than the model's encoder reads, which it may read only in part (`gliner`, `gliner2`) |
+| `windows_truncated` | windows (a string read whole counts as one) holding a single word longer than the model's encoder reads, which it may read only in part (`gliner`, `gliner2`); for `llm`, the pieces a word longer than its 2,000-character window is cut into |
 | `labels_dropped` | model entities whose type cannot be a placeholder type (never emitted) |
 | `offsets_dropped` | model entities of a requested type whose span the scanned string does not contain, or that came without one (never redacted: only the exact text sent can be restored) |
 | `ungrounded` | `llm` only: values the model server returned whose text does not occur in the text it read, is shorter than two characters or holds a placeholder's guillemet (never redacted) |

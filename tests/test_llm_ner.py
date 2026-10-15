@@ -233,15 +233,30 @@ def test_a_long_string_is_read_in_windows_and_a_value_redacted_everywhere(
     assert server.asked[0].startswith(NAME) and server.asked[-1].endswith(NAME)
 
 
-def test_one_word_longer_than_a_window_is_sent_whole_and_counted(
+def test_one_word_longer_than_a_window_is_read_in_pieces_and_counted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    blob = "x" * (llm_ner.WINDOW_CHARS + 10)
-    server = FakeModelServer()
+    # Sent whole, one long word would outgrow the context the server is
+    # asked for (NUM_CTX), and Ollama drops a prompt's start — the system
+    # prompt first. It is read in overlapping pieces of one window instead.
+    secret = "SecretWordValue"
+    blob = "x" * (2 * llm_ner.WINDOW_CHARS) + secret + "y" * llm_ner.WINDOW_CHARS
+    server = FakeModelServer([(secret, "person")])
     _redactor, detector = _build(monkeypatch, server)
-    detector.detect(f"{NAME} {blob}")
-    assert blob in server.asked
-    assert detector.stats.windows_truncated == 1
+    text = f"{NAME} {blob} end"
+    found = detector.detect(text)
+    assert [d.value for d in found] == [secret]
+    assert all(len(asked) <= llm_ner.WINDOW_CHARS for asked in server.asked)
+    pieces = [asked for asked in server.asked if set(asked) <= set(blob)]
+    assert len(pieces) == detector.stats.windows_truncated >= 4
+    # Together the pieces hold the whole word, each overlapping the next.
+    joined = pieces[0]
+    for piece in pieces[1:]:
+        overlap = llm_ner.WINDOW_CHARS // 5
+        assert joined.endswith(piece[:overlap])
+        joined += piece[overlap:]
+    assert joined == blob
+    assert detector.stats.scanned_windowed == 1
 
 
 def test_strings_over_max_chars_or_without_a_letter_are_not_sent(
@@ -255,6 +270,21 @@ def test_strings_over_max_chars_or_without_a_letter_are_not_sent(
     assert detector.detect(" -- !! ") == []
     assert server.chats == 0
     assert stats.skipped_max_chars == 1 and stats.scanned_whole == 1
+
+
+@pytest.mark.parametrize(
+    "text", ["", " ", "\n\t ", " " * 5000], ids=["empty", "space", "blanks", "long-blank"]
+)
+def test_an_empty_or_blank_string_is_read_and_never_sent(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    # A JSON body is full of them ("content": "", a blank tool result):
+    # read like any string (counted), never a server call, never a fault.
+    server = FakeModelServer([(NAME, "person")])
+    _redactor, detector = _build(monkeypatch, server)
+    assert detector.detect(text) == []
+    assert server.chats == 0
+    assert detector.stats.scanned_whole == 1 and detector.stats.errors == 0
 
 
 def test_a_string_read_before_is_answered_from_the_cache(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -802,6 +832,32 @@ async def test_the_proxy_redacts_what_the_model_server_finds_off_the_event_loop(
     assert NAME not in sent.decode() and "«PERSON_001»" in sent.decode()
     stats = _llm_stats(app)
     assert stats.inline_calls == stats.prefetch_misses == 0  # the NER worker asked
+    nothing_refused(app.state.proxy)
+
+
+@pytest.mark.parametrize("prefetching", [True, False])
+async def test_a_body_with_empty_and_blank_strings_goes_through(
+    monkeypatch: pytest.MonkeyPatch, prefetching: bool
+) -> None:
+    if not prefetching:
+        monkeypatch.setattr(proxy_module, "collect_request_strings", lambda *a, **k: None)
+    server = FakeModelServer([(NAME, "person")])
+    app, upstream = _app(monkeypatch, server)
+    messages = [
+        {"role": "system", "content": ""},
+        {"role": "user", "content": " \n "},
+        {"role": "user", "content": f"hi {NAME}"},
+    ]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=PROXY) as c:
+        response = await c.post(
+            "/v1/chat/completions",
+            json={"model": "gpt", "messages": messages},
+            headers=OPENAI_HEADERS,
+        )
+    assert response.status_code == 200, response.text
+    (sent,) = upstream.bodies
+    assert NAME not in sent.decode() and "«PERSON_001»" in sent.decode()
+    assert server.asked == [f"hi {NAME}"]
     nothing_refused(app.state.proxy)
 
 

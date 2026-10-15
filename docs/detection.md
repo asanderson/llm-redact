@@ -191,6 +191,10 @@ rule's value, a deny string. In such a run of overlapping values:
   rewrite the text (a verbatim field, an upload's extracted text), a span
   joining two or more values refuses the request with no override code,
   as a deny string does: no one approval names them all.
+- An `llm` backend's finding is never joined: as everywhere, it keeps only
+  what lies outside the other values, so the card or IBAN keeps its own
+  placeholder (`Order «PERSON_001» «CREDIT_CARD_001» «PERSON_002» Road`
+  when the model reads `12 4111 1111 1111 1111 Main` as a name).
 
 Everywhere else overlaps resolve as before: the value starting first wins,
 of those the longest, and under `[detection.modes]` the winner's mode

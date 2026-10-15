@@ -29,7 +29,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from llm_redact.bench.corpus import VALUE_GENERATORS, generate
-from llm_redact.detection.base import Detection, Detector
+from llm_redact.detection.base import ADDITIVE_TIER, Detection, Detector
 from llm_redact.detection.deny import DenyDetector, DenyEntry
 from llm_redact.detection.engine import (
     Allowlist,
@@ -42,7 +42,7 @@ from llm_redact.detection.engine import (
 from llm_redact.detection.ner import NerDetector
 from llm_redact.detection.regex_rules import RegexDetector
 from llm_redact.placeholders import PLACEHOLDER_RE
-from llm_redact.redactor import BlockedRequest, Redactor, _resolve_overlaps
+from llm_redact.redactor import BlockedRequest, Redactor, _resolve_overlaps, _sweep
 from llm_redact.rehydrate import Rehydrator
 from llm_redact.vault import InMemoryVault
 from ner_fakes import FakeSpacy
@@ -414,6 +414,76 @@ def test_joining_never_redacts_or_refuses_less_than_a_sweep_without_some(
     for d in detections:
         if d.joins and (d.tier == 0 or modes.get(d.detector_type, "redact") == "redact"):
             assert set(range(d.start, d.end)) <= now
+
+
+class _Additive:
+    """A stand-in for the llm NER backend: finds ``surface`` as an additive
+    (``ADDITIVE_TIER``) PERSON span."""
+
+    name = "llm"
+
+    def __init__(self, surface: str) -> None:
+        self.surface = surface
+
+    def detect(self, text: str) -> list[Detection]:
+        at = text.find(self.surface)
+        if at < 0:
+            return []
+        end = at + len(self.surface)
+        return [Detection(at, end, "PERSON", self.surface, 120, ADDITIVE_TIER)]
+
+
+@pytest.mark.parametrize(
+    ("surface", "expected"),
+    [
+        # Covering the card: the card keeps its own placeholder, the model's
+        # span only what lies outside it.
+        (f"12 {CARD} Main", "Order «PERSON_001» «CREDIT_CARD_001» «PERSON_002» Road"),
+        # Starting inside the card and running on: its tail is still redacted.
+        ("1111 Main", "Order 12 «CREDIT_CARD_001» «PERSON_001» Road"),
+    ],
+)
+def test_an_additive_span_is_cut_around_a_joining_value(surface: str, expected: str) -> None:
+    config = DetectionConfig()
+    detectors: list[Detector] = [*build_detectors(config), _Additive(surface)]
+    redactor = Redactor(detectors, InMemoryVault(), build_allowlist(config))
+    assert _redacted(redactor, f"Order 12 {CARD} Main Road") == expected
+    assert redactor.counts["CREDIT_CARD"] == 1
+
+
+@settings(deadline=None, max_examples=500)
+@given(
+    st.lists(SPAN, max_size=10),
+    st.lists(st.tuples(st.integers(0, 40), st.integers(1, 14)), max_size=4),
+    MODES,
+)
+def test_an_additive_detection_never_joins(
+    spans: list[tuple[int, int, str, bool, int]],
+    added: list[tuple[int, int]],
+    modes: dict[str, str],
+) -> None:
+    # The llm backend's detections next to joining values: the other
+    # winners (and refusals) are exactly those without them, and each keeps
+    # only what lies outside the winners, as _resolve_overlaps treats them.
+    text = "x" * 60
+    base = _sorted(spans)
+    extra = [Detection(a, a + n, "PERSON", text[a : a + n], 120, ADDITIVE_TIER) for a, n in added]
+    both = sorted(base + extra, key=lambda d: (d.start, -(d.end - d.start), d.priority))
+    redactor = Redactor([], InMemoryVault(), Allowlist(), modes=modes)
+    try:
+        without = redactor._resolved(text, base)
+    except BlockedRequest as refused:
+        with pytest.raises(BlockedRequest) as again:
+            redactor._resolved(text, both)
+        assert again.value.detector_type == refused.detector_type
+        return
+    winners = redactor._resolved(text, both)
+    assert [d for d in winners if d.tier != ADDITIVE_TIER] == without
+    assert all(a.end <= b.start for a, b in zip(winners, winners[1:], strict=False))
+    covered = {i for d in winners for i in range(d.start, d.end)}
+    ordered = sorted(extra, key=lambda d: (d.start, -(d.end - d.start), d.priority))
+    for d in _sweep(ordered):
+        assert set(range(d.start, d.end)) <= covered
 
 
 # --- the differential --------------------------------------------------------------

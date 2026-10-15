@@ -486,17 +486,28 @@ class Redactor:
         format), which is ``_join``ed. Without one, the sweep's own, byte
         for byte; with one, every character the sweep without the joining
         values would redact is redacted, and every value it refuses for
-        still refuses."""
+        still refuses. Additive detections (``ADDITIVE_TIER``: the llm NER
+        backend's) are never joined: they keep only what lies outside the
+        winners, exactly as ``_resolve_overlaps`` treats them, so one never
+        takes the place of a card or an IBAN, or of the type its
+        placeholder carries."""
         if not any(d.joins for d in detections):
             return _resolve_overlaps(detections)
         joined: list[Detection] = []
         swept: list[Detection] = []
-        for run in _overlapping(detections):
+        for run in _overlapping([d for d in detections if d.tier != ADDITIVE_TIER]):
             if any(d.joins for d in run):
                 joined += self._join(text, run)
             else:
                 swept += run
-        return sorted(joined + _resolve_overlaps(swept), key=lambda d: d.start)
+        winners = sorted(joined + _resolve_tiers(swept), key=lambda d: d.start)
+        additive = sorted(
+            (d for d in detections if d.tier == ADDITIVE_TIER),
+            key=lambda d: (d.start, -(d.end - d.start), d.priority),
+        )
+        if not additive:
+            return winners
+        return sorted(winners + _outside(winners, _sweep(additive)), key=lambda d: d.start)
 
     def _join(self, text: str, run: list[Detection]) -> list[Detection]:
         """One run of overlapping values holding one that joins, redacted so

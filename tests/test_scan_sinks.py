@@ -17,6 +17,7 @@ import copy
 import dataclasses
 import json
 import logging
+import re
 import threading
 import time
 from collections import Counter
@@ -45,6 +46,7 @@ from llm_redact.detection.engine import (
     build_detectors,
     detector_source,
 )
+from llm_redact.metrics import Metrics
 from llm_redact.ner_prefetch import collect_request_strings
 from llm_redact.plugin_api import (
     Inspection,
@@ -76,6 +78,7 @@ from test_ner_prefetch import _adapter
 from test_ner_prefetch_e2e import SlowNlp, Upstream, _client, _config, _send
 
 LIMIT = 100_000
+NO_DROPS = {"captures": 0, "characters": 0, "items": 0, "shutdown": 0}
 
 
 class Sink:
@@ -504,6 +507,7 @@ async def test_a_message_names_each_detection_and_its_detector(
         "queued": 0,
         "delivered_total": 1,
         "dropped_total": 0,
+        "dropped_by_reason": NO_DROPS,
         "faults_total": 0,
     }
     app.state.proxy.scan_capture.close(1)
@@ -722,6 +726,166 @@ def _never(*args: Any, **kwargs: Any) -> Any:
     raise AssertionError("must not be reached without a sink that wants the request")
 
 
+# --- the capture queue's metrics -----------------------------------------------
+
+CAPTURE_FAMILIES = {
+    "llm_redact_scan_captures_delivered_total": "counter",
+    "llm_redact_scan_captures_dropped_total": "counter",
+    "llm_redact_scan_capture_queue_depth": "gauge",
+}
+
+
+def _capture_samples(text: str) -> dict[str, float]:
+    """The scan capture families' sample lines of a scrape, by series."""
+    samples = {}
+    for line in text.splitlines():
+        if line.startswith("llm_redact_scan_capture"):
+            series, value = line.rsplit(" ", 1)
+            samples[series] = float(value)
+    return samples
+
+
+def _expected_samples(
+    *, delivered: int, queued: int, dropped: dict[str, int] | None = None
+) -> dict[str, float]:
+    reasons = {**NO_DROPS, **(dropped or {})}
+    return {
+        "llm_redact_scan_captures_delivered_total": delivered,
+        **{
+            f'llm_redact_scan_captures_dropped_total{{reason="{reason}"}}': count
+            for reason, count in reasons.items()
+        },
+        "llm_redact_scan_capture_queue_depth": queued,
+    }
+
+
+async def test_the_capture_metrics_move_with_deliveries_drops_and_the_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink = Sink()
+    _register(monkeypatch, sink)
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(Upstream()))
+    state = app.state.proxy
+    state.scan_capture = ScanCapture(
+        state.scan_capture.sinks, state.bookkeeping_errors, max_pending=1
+    )
+    body = {"model": "m", "messages": [{"role": "user", "content": f"to {EMAIL}"}]}
+
+    async def scrape() -> dict[str, float]:
+        text = (await client.get("/__llm-redact/metrics")).text
+        for family, kind in CAPTURE_FAMILIES.items():
+            assert text.count(f"# TYPE {family} {kind}") == 1
+        return _capture_samples(text)
+
+    async def post() -> None:
+        response = await client.post("/v1/chat/completions", headers=OPENAI_HEADERS, json=body)
+        assert response.status_code == 200
+
+    async with _client(app) as client:
+        # A registered sink: every series from the start, zeros included
+        # (a counter's first increase is then seen by rate() and increase()).
+        assert await scrape() == _expected_samples(delivered=0, queued=0)
+        await post()
+        await _delivered(app)
+        assert await scrape() == _expected_samples(delivered=1, queued=0)
+        # The sink gets stuck in a capture: one more waits in the queue,
+        # the rest are dropped by the bound they pass (one capture queued).
+        sink.release.clear()
+        sink.entered.clear()
+        await post()
+        assert await asyncio.to_thread(sink.entered.wait, 5)
+        for _ in range(3):
+            await post()
+        assert await scrape() == _expected_samples(delivered=1, queued=2, dropped={"captures": 2})
+        sink.release.set()
+        await _delivered(app)
+        samples = await scrape()
+    assert samples == _expected_samples(delivered=3, queued=0, dropped={"captures": 2})
+    # /status says the same.
+    status = state.scan_capture.status()
+    assert status["delivered_total"] == 3 and status["queued"] == 0
+    assert status["dropped_total"] == 2
+    assert status["dropped_by_reason"] == {**NO_DROPS, "captures": 2}
+    state.scan_capture.close(1)
+    assert _capture_samples(_render_counts(state.scan_capture)) == _expected_samples(
+        delivered=3, queued=0, dropped={"captures": 2}
+    )
+
+
+def _render_counts(capture: ScanCapture) -> str:
+    return Metrics("0").render(
+        detections=Counter(),
+        rehydrations=Counter(),
+        warnings=Counter(),
+        blocked=Counter(),
+        vault_entries=0,
+        vault_sessions=0,
+        scan_capture=capture.counts(),
+    )
+
+
+def test_each_drop_reason_is_its_own_series() -> None:
+    # The first bound a capture would pass names its drop: the characters
+    # and items bounds, then the shutdown (what the drain left, and what
+    # arrives once the sinks closed).
+    sink = Sink()
+    sink.release.clear()
+    capture = ScanCapture([sink], Counter(), max_chars=10, max_items=4)
+    capture.submit(_recorded(_CONTEXT, "x" * 50))  # an empty queue takes any one
+    assert sink.entered.wait(5)
+    capture.submit(_recorded(_CONTEXT, "y" * 2))  # queued
+    capture.submit(_recorded(_CONTEXT, "z" * 9))  # 2 + 9 > 10 characters
+    capture.submit(_recorded(_CONTEXT, *"pqrs"))  # 1 + 4 > 4 items
+    capture.submit(_recorded(_CONTEXT, "w"))  # queued
+    assert _capture_samples(_render_counts(capture)) == _expected_samples(
+        delivered=0, queued=3, dropped={"characters": 1, "items": 1}
+    )
+    assert capture.close(0.2) == 2  # y and w never delivered
+    capture.submit(_recorded(_CONTEXT, "v"))  # the sinks closed
+    expected = _expected_samples(
+        delivered=0, queued=1, dropped={"characters": 1, "items": 1, "shutdown": 3}
+    )
+    assert _capture_samples(_render_counts(capture)) == expected
+    sink.release.set()
+    assert capture.drain(5) == 0
+    assert capture.status()["dropped_total"] == 5
+    assert _capture_samples(_render_counts(capture)) == {
+        **expected,
+        "llm_redact_scan_captures_delivered_total": 1,
+        "llm_redact_scan_capture_queue_depth": 0,
+    }
+
+
+def test_a_bare_metrics_renders_the_capture_families_without_samples() -> None:
+    text = Metrics("0").render(
+        detections=Counter(),
+        rehydrations=Counter(),
+        warnings=Counter(),
+        blocked=Counter(),
+        vault_entries=0,
+        vault_sessions=0,
+    )
+    for family, kind in CAPTURE_FAMILIES.items():
+        assert f"# TYPE {family} {kind}" in text
+    assert _capture_samples(text) == {}
+
+
+def test_the_drop_reasons_are_the_documented_ones() -> None:
+    from pathlib import Path
+
+    doc = (Path(__file__).resolve().parent.parent / "docs" / "observability.md").read_text(
+        encoding="utf-8"
+    )
+    row = next(
+        line for line in doc.splitlines() if "`llm_redact_scan_captures_dropped_total` |" in line
+    )
+    assert set(capture_mod.DROP_REASONS) == set(NO_DROPS)
+    for reason in capture_mod.DROP_REASONS:
+        assert f"`{reason}`" in row, reason
+    # Every reason the row explains ("`name` (why)") is one the code counts.
+    assert set(re.findall(r"`([a-z]+)` \(", row)) == set(capture_mod.DROP_REASONS)
+
+
 async def test_a_slow_sink_never_holds_a_request_and_a_full_queue_drops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -755,6 +919,7 @@ async def test_a_slow_sink_never_holds_a_request_and_a_full_queue_drops(
         "queued": 2,
         "delivered_total": 0,
         "dropped_total": 2,
+        "dropped_by_reason": {**NO_DROPS, "captures": 2},
         "faults_total": 0,
     }
     sink.release.set()
@@ -1106,13 +1271,20 @@ async def test_without_a_sink_nothing_is_recorded_or_queued(
         )
         assert upload.status_code == 200
         status = (await client.get("/__llm-redact/status")).json()["scan_capture"]
+        metrics = (await client.get("/__llm-redact/metrics")).text
     assert status == {
         "sinks": 0,
         "queued": 0,
         "delivered_total": 0,
         "dropped_total": 0,
+        "dropped_by_reason": NO_DROPS,
         "faults_total": 0,
     }
+    # The families are there (dashboards and alerts find them), their
+    # samples are not: nothing says a capture queue exists.
+    for family, kind in CAPTURE_FAMILIES.items():
+        assert f"# TYPE {family} {kind}" in metrics
+    assert _capture_samples(metrics) == {}
     ws_upstream = FakeWsUpstream()
     async with ws_upstream.serving():
         ws_app = create_app(_ws_config(ws_upstream.port))
@@ -1288,6 +1460,7 @@ def test_a_capture_past_the_character_bound_is_dropped() -> None:
     capture.submit(_recorded(_CONTEXT, "z" * 8))  # 16 > 10: dropped
     capture.submit(_recorded(_CONTEXT))  # nothing recorded: not queued at all
     assert capture.status()["dropped_total"] == 1 and capture.status()["queued"] == 2
+    assert capture.status()["dropped_by_reason"] == {**NO_DROPS, "characters": 1}
     sink.release.set()
     assert capture.drain(5) == 0
     assert sink.texts() == [["x" * 50], ["y" * 8]]
@@ -1308,6 +1481,7 @@ def test_a_capture_past_the_item_bound_is_dropped() -> None:
     capture.submit(_recorded(_CONTEXT, "p", "q", "r"))  # 2 + 3 > 4: dropped
     capture.submit(_recorded(_CONTEXT, "s", "t"))  # 2 + 2: queued
     assert capture.status()["dropped_total"] == 1 and capture.status()["queued"] == 3
+    assert capture.status()["dropped_by_reason"] == {**NO_DROPS, "items": 1}
     sink.release.set()
     assert capture.drain(5) == 0
     assert sink.texts() == [list("abcdefgh"), ["xy"], ["s", "t"]]
@@ -1327,20 +1501,29 @@ def test_a_full_queue_logs_once_per_episode(caplog: pytest.LogCaptureFixture) ->
         assert capture.drain(5) == 0
         capture.submit(_recorded(_CONTEXT, "e"))
         assert capture.drain(5) == 0
-    assert caplog.text.count("the sinks' queue is full") == 1
+    assert caplog.text.count("the sinks' queue is full (its captures bound") == 1
     assert "caught up" in caplog.text
     assert capture.status()["dropped_total"] == 2
+    assert capture.status()["dropped_by_reason"] == {**NO_DROPS, "captures": 2}
     capture.close(1)
 
 
-def test_a_closed_capture_drops_what_it_is_handed_and_closes_its_sinks_once() -> None:
+def test_a_closed_capture_drops_what_it_is_handed_and_closes_its_sinks_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     sink = Sink()
     capture = ScanCapture([sink], Counter())
     capture.submit(_recorded(_CONTEXT, "a"))
     assert capture.close(1) == 0
     assert sink.events == ["capture", "close"]
-    capture.submit(_recorded(_CONTEXT, "b"))
-    assert capture.status()["dropped_total"] == 1
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        capture.submit(_recorded(_CONTEXT, "b"))
+        capture.submit(_recorded(_CONTEXT, "c"))
+    assert capture.status()["dropped_total"] == 2
+    assert capture.status()["dropped_by_reason"] == {**NO_DROPS, "shutdown": 2}
+    # Never read as a full queue: the sinks closed (said once).
+    assert caplog.text.count("captures arrive after the sinks closed") == 1
+    assert "queue is full" not in caplog.text
     assert capture.close(1) == 0
     assert sink.closed == 1
 
@@ -1362,6 +1545,7 @@ def test_close_drops_what_the_bound_leaves_and_never_closes_a_sink_mid_capture(
     assert "2 capture(s) were not delivered at shutdown" in caplog.text
     assert "still capturing at shutdown" in caplog.text
     assert capture.status()["dropped_total"] == 2
+    assert capture.status()["dropped_by_reason"] == {**NO_DROPS, "shutdown": 2}
     sink.release.set()
 
 
@@ -1572,6 +1756,7 @@ async def test_a_stuck_sink_never_holds_the_shutdown_past_its_bound(
     assert time.monotonic() - started < 5.0
     assert events == ["vault.close"] and sink.closed == 0
     assert app.state.proxy.scan_capture.status()["dropped_total"] == 1
+    assert app.state.proxy.scan_capture.status()["dropped_by_reason"]["shutdown"] == 1
     sink.release.set()
 
 

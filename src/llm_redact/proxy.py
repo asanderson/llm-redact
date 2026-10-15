@@ -3299,6 +3299,9 @@ async def _handle_local(
                 audit_sink_rows_dropped=_sink_counts(state, "rows_dropped"),
                 map_write_queue_depth=state.map_writes_pending(),
                 map_write_wait_timeouts=state.map_write_wait_timeouts,
+                scan_capture=state.scan_capture.counts()
+                if state.scan_capture is not None
+                else None,
                 ner_stats=[(name, stats) for name, _, stats in ner_backend_stats(state.detectors)],
             )
             + plugin_text,

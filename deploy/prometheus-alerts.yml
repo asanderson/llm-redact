@@ -104,3 +104,17 @@ groups:
         annotations:
           summary: "llm-redact NER is skipping strings longer than max_chars"
           description: "the {{ $labels.backend }} NER backend skipped {{ $value | printf \"%.3f\" }} strings/s over 15m as longer than [detection.ner] max_chars: the regex rules still scanned them, but names and other contextual values in them were not looked for. If long strings carry names (pasted documents, large tool results), raise max_chars (each window costs model time); otherwise accept the gap. llm-redact status shows the same as a posture line; see docs/troubleshooting.md (\"NER skipped\")."
+
+      # A plugin's scan sinks (none in the Free core) take the strings a
+      # request's redaction scanned from a bounded queue on one worker
+      # thread. A sustained drop rate on a queue bound means a sink does not
+      # keep up: requests are unaffected, the plugin misses their text. The
+      # shutdown reason is a process's last drain, never a trend.
+      - alert: LlmRedactScanCapturesDropped
+        expr: sum(rate(llm_redact_scan_captures_dropped_total{reason!="shutdown"}[15m])) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "llm-redact scan sinks are dropping captures"
+          description: "captures for a plugin's scan sinks were dropped at {{ $value | printf \"%.3f\" }}/s over 15m because the sinks' queue stayed full (llm_redact_scan_captures_dropped_total by reason: captures, characters or items; llm_redact_scan_capture_queue_depth): requests are unaffected, but the plugin that registered the sinks misses their text. A sink does not keep up with the traffic — check what it writes to, or have it capture fewer requests; a sink fault counts as llm_redact_bookkeeping_errors_total{stage=\"scan_sink\"} instead."

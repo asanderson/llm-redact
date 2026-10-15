@@ -101,6 +101,21 @@ def test_ner_coverage_gap_has_panels_and_an_alert() -> None:
     assert "max_chars" in rule["annotations"]["description"]
 
 
+def test_dropped_scan_captures_have_an_alert() -> None:
+    # A plugin's scan sinks that cannot keep up lose captures: the requests
+    # are unaffected, so the alert says so and names the queue's metrics;
+    # a process's last drain (reason shutdown) is no trend.
+    rules = yaml.safe_load((DEPLOY / "prometheus-alerts.yml").read_text())["groups"][0]["rules"]
+    rule = {r["alert"]: r for r in rules}["LlmRedactScanCapturesDropped"]
+    assert 'llm_redact_scan_captures_dropped_total{reason!="shutdown"}' in rule["expr"]
+    assert rule["labels"]["severity"] == "warning"
+    assert rule["annotations"]["summary"]
+    description = rule["annotations"]["description"]
+    assert "requests are unaffected" in description
+    assert "llm_redact_scan_capture_queue_depth" in description
+    assert 'llm_redact_bookkeeping_errors_total{stage="scan_sink"}' in description
+
+
 def test_prometheus_scrape_targets_reserved_path() -> None:
     text = (DEPLOY / "prometheus-scrape.yml").read_text()
     assert "/__llm-redact/metrics" in text

@@ -498,8 +498,8 @@ an extraction service. What the core guarantees:
 - no vault data: never a placeholder the proxy issued, never a mapping
   (a string the client itself sent holding a placeholder holds it);
 - surfaced: `/status` `scan_capture` (the number of sinks and the queue's
-  delivered/dropped/fault counts) and a `llm-redact status` posture line
-  while any sink is registered.
+  delivered/dropped/fault counts), the `llm_redact_scan_capture*` metrics
+  and a `llm-redact status` posture line while any sink is registered.
 
 ### Logging posture
 

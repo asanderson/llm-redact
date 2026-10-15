@@ -7,8 +7,9 @@ warning / block / rehydration counts by detector *type*, request duration
 and the proxy's own overhead, vault entry/session gauges and its map
 writer, audit-sink batches, compaction-fork counts, routing decisions and
 re-issues by upstream and rule name, NER coverage (strings read, skipped
-and entities dropped, by backend), a plugin's own gauges (llm-redact-pro:
-users and seats), and build info. It never carries secret values or placeholder ids (see
+and entities dropped, by backend), a plugin's scan sinks' capture queue
+(captures delivered and dropped, its depth), a plugin's own gauges
+(llm-redact-pro: users and seats), and build info. It never carries secret values or placeholder ids (see
 [threat-model.md](threat-model.md) § Logging posture), so scraping it is safe.
 
 Ready-to-use assets live in [`deploy/`](../deploy):
@@ -16,7 +17,7 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | File | What it is |
 |---|---|
 | `deploy/prometheus-scrape.yml` | A `scrape_configs` job to merge into your `prometheus.yml`. |
-| `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, upstream errors, high proxy-overhead p95, refusals caused by the proxy's own storage, NER skipping strings longer than `max_chars`). |
+| `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, upstream errors, high proxy-overhead p95, refusals caused by the proxy's own storage, NER skipping strings longer than `max_chars`, a plugin's scan sinks dropping captures). |
 | `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes, NER coverage: strings by outcome, strings skipped as longer than `max_chars`, windows and truncated windows, entities dropped). |
 
 ## Metrics reference
@@ -52,10 +53,19 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | `llm_redact_map_write_queue_depth` | gauge | — | Durable vault map writes (Responses chains, stored-object owner records, Live resumption handles) queued or in flight on the vault's background writer; 0 without one (the in-memory vault). Also `/status` `vault.map_writes_pending`. |
 | `llm_redact_map_write_wait_timeouts_total` | counter | `cause` | `[vault] map_writes = "before_answer"` answers sent before their map writes landed: `bound` (the wait reached `[vault] map_write_wait_seconds`) or `stuck` (not waited for: the writer is stuck behind an earlier write a wait gave up on — one bound per episode, not per answer). Another replica may then read the record as unknown a little longer (refused or sealed, never a wrong value). The same answers also count under the bookkeeping stage `map_write_wait` (kept for existing alerts). Also `/status` `vault.map_write_wait_timeouts_total`. |
 | `llm_redact_map_writes_mode` | gauge | `mode` | The effective `[vault] map_writes` (value 1): `before_answer`, `background` or `synchronous` (no background writer). Also `/status` `vault.map_writes`. |
+| `llm_redact_scan_captures_delivered_total` | counter | — | Captures of the strings a request's redaction scanned that a plugin's scan sink took (docs/plugins.md "Scan sinks"; none in the Free core): one for each sink a capture reached and that returned without a fault. A sink's fault counts under the bookkeeping stage `scan_sink` instead. Also `/status` `scan_capture.delivered_total`. |
+| `llm_redact_scan_captures_dropped_total` | counter | `reason` | Captures never handed to the scan sinks, one reason each: the first bound the capture would take the sinks' queue past — `captures` (256 captures waiting), `characters` (16 Mi characters), `items` (256 Ki strings plus detections), so the sinks do not keep up — or `shutdown` (still queued when the shutdown's 5 s drain ended). An empty queue takes any one capture. The request itself was unaffected: only the plugin misses its text. Also `/status` `scan_capture.dropped_by_reason`. |
+| `llm_redact_scan_capture_queue_depth` | gauge | — | Captures queued for the scan sinks or in flight on their worker thread. Also `/status` `scan_capture.queued`. |
 | `llm_redact_vault_entries` / `_sessions` | gauge | — | Vault size. |
 | `llm_redact_uptime_seconds` / `_start_time_seconds` | gauge | — | Process liveness. |
 | `llm_redact_info` | gauge | `version` | Build info (value 1). |
 | a plugin's own gauges | gauge | the plugin's | Rendered after the core's from an access gate's optional `metrics_samples` (llm-redact-pro: `llm_redact_users{state}`, `llm_redact_seats_licensed`, `llm_redact_seats_used` — see its docs/observability.md). The core enforces the SHAPE: a name under `llm_redact_` that no core family uses, at most 4 labels whose names and values are from `[a-z0-9_]` (a value at most 32 characters, with no run of 8 or more hexadecimal characters holding a digit — the shape of a key, hash, id or long number), a finite value, at most 256 samples; anything else is dropped and counted under the bookkeeping stage `plugin_metrics`. A shape check cannot tell a fixed state name from a user name that fits it (`alice_smith`): keeping every label value to a small fixed set is the plugin's obligation (llm-redact-pro's are fixed enums), and the samples are served on the open `/metrics` path. Read in a worker thread, at most 2 s per call, never two at once — scrapes arriving together (an HA pair of Prometheus servers) share the call in flight until its own 2 s bound: a slow or failing plugin never delays or fails the scrape (each scrape rendered without the gauges is counted under `plugin_metrics`, logged once per episode by exception type). |
+
+The three `llm_redact_scan_capture*` families render their samples only
+while a plugin registers a scan sink — then every drop reason, zeros
+included — as the audit sinks' and NER counters render theirs only for a
+running sink or backend; their `# HELP`/`# TYPE` lines are always there, so
+a dashboard or an alert reading them finds the family either way.
 
 The `llm_redact_ner_*` counters belong to the built NER detectors: they
 restart from zero when a configuration reload rebuilds the detectors (any
@@ -138,6 +148,10 @@ answers — none of them is a request the proxy refused to forward.
    skipping strings longer than `[detection.ner] max_chars` for 30 minutes:
    the regex rules still scanned them, but names in them were not looked for
    (raise `max_chars` if such strings carry names; docs/troubleshooting.md).
+   **`LlmRedactScanCapturesDropped`** warns when a plugin's scan sinks
+   keep dropping captures for 30 minutes because their queue stays full:
+   requests are unaffected, but the plugin that registered the sinks is
+   missing their text — a sink does not keep up with the traffic.
 3. **Visualize.** Import `deploy/grafana-dashboard.json` (Dashboards → Import),
    pick your Prometheus data source. The warn/block panels are colored to stand
    out because they represent values leaving the box or traffic being rejected.

@@ -677,6 +677,9 @@ def test_an_additive_detection_overlapping_nothing_is_kept_as_it_is() -> None:
         (3, 5, "xy", "K"),
         (6, 8, "cd", "PERSON"),
     ]
+    # Each piece keeps the cut detection's priority and tier.
+    assert cut[0] == Detection(0, 2, "PERSON", "ab", 100, ADDITIVE_TIER)
+    assert cut[2] == Detection(6, 8, "PERSON", "cd", 100, ADDITIVE_TIER)
 
 
 # --- configuration --------------------------------------------------------------------------

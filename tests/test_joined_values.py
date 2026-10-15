@@ -433,6 +433,24 @@ class _Additive:
         return [Detection(at, end, "PERSON", self.surface, 120, ADDITIVE_TIER)]
 
 
+def test_a_recorder_sees_the_same_joined_redaction() -> None:
+    # A scan sink's recorder (Redactor.with_recorder) changes nothing the
+    # redaction does, a joined run's union included.
+    class Recorder:
+        def __init__(self) -> None:
+            self.texts: list[str] = []
+
+        def record(self, text: str, found: object) -> None:
+            self.texts.append(text)
+
+    text = f"Order 12 {CARD} Main Street"
+    recorder = Recorder()
+    recorded = _redactor(STREET).with_recorder(recorder)
+    assert _redacted(recorded, text) == _redacted(_redactor(STREET), text)
+    assert _redacted(recorded, text) == "Order 12 «CREDIT_CARD_001»"
+    assert recorder.texts == [text, text]
+
+
 @pytest.mark.parametrize(
     ("surface", "expected"),
     [

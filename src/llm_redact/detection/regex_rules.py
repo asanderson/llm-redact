@@ -656,6 +656,34 @@ _CLOSE = r"""(?=[\s"'`)\]}>»”’“‘«‹›*<\\]|\Z)"""
 _END_OR_DOTS = rf"(?:(?![\w.-])|(?=\.++{_CLOSE}))"
 
 
+# The readings 1.12.1 added before a run of dots (and one ":" after an IPv6
+# address), and a PlanetScale token's run past 64 characters, are values
+# 1.12.0 read nowhere, right next to text another value may hold ("AHV
+# 756.9217.0769.85. Done", with "85. Done" a custom rule's value): each is
+# joined with the values it overlaps (Detection.joins), as a paper IBAN is,
+# so it takes no characters from them. Every other match of those rules is
+# read, and resolved, as in 1.12.0.
+
+
+def _before_dots(match: re.Match[str]) -> bool:
+    """Whether a belgian_nn or swiss_ahv number ends before a run of dots
+    (_END_OR_DOTS' second reading): joined (Detection.joins)."""
+    return match.string.startswith(".", match.end())
+
+
+def _ipv6_before_close(match: re.Match[str]) -> bool:
+    """Whether an IPv6 address ends before a run of dots or one ":" (the
+    ipv6 pattern's second end): joined (Detection.joins)."""
+    return match.string.startswith((".", ":"), match.end())
+
+
+def _planetscale_run(match: re.Match[str]) -> bool:
+    """Whether a PlanetScale token was read with its body and the dots
+    after it past 64 characters (the pattern's second alternative: the
+    first stops at 64): joined (Detection.joins)."""
+    return len(match.group(0).split("_", 2)[2]) > 64
+
+
 # Official IBAN lengths for common countries; other country codes fall back
 # to the checksum alone (the grammar already bounds 15-34 chars).
 # fmt: off
@@ -893,8 +921,10 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
         # Loose colon-hex candidate; the validator does the real work (see
         # _valid_ipv6). The repetition bound keeps long hex-pair dumps from
         # ever forming a candidate. It may end before a run of dots or one
-        # ":" (_CLOSE), but never takes a trailing ":" in: the lookbehinds
-        # refuse an end on "hex:" or ":::" ("2001:db8::" before a ":").
+        # ":" (_CLOSE), joined then with the values it overlaps
+        # (_ipv6_before_close), but never takes a trailing ":" in: the
+        # lookbehinds refuse an end on "hex:" or ":::" ("2001:db8::" before
+        # a ":").
         name="ipv6",
         detector_type="IPV6",
         pattern=re.compile(
@@ -903,6 +933,7 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
         ),
         validator=_valid_ipv6,
         required=((":",),),
+        joins=_ipv6_before_close,
     ),
     RegexRule(
         # scheme://user:password@host — redacts ONLY the password. No
@@ -1118,6 +1149,7 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
         languages=("de", "fr", "it"),
         required=(("756.",),),
         anchors=("756.",),
+        joins=_before_dots,
     ),
     RegexRule(
         # Separator display form only (YYMMDD-NNNN; + marks 100-year-olds).
@@ -1140,6 +1172,7 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
         validator=_belgian_nn_ok,
         languages=("nl", "fr", "de"),
         required=(_DIGIT_DOT,),
+        joins=_before_dots,
     ),
     RegexRule(
         # DDMMYY + century sign + NNN + mod-31 check char. The century sign
@@ -1636,9 +1669,10 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
         # The body's alphabet holds ".", so a token takes the dots after it
         # in: as in 1.12.0 up to 64 characters, and since 1.12.1 also when
         # they run past the 64th and _CLOSE follows them (a 64-character
-        # body before a sentence's "."). Not then when another token starts
-        # in the first 64: that one is read on its own (the outer match can
-        # lose an overlap to a value it starts inside, and take it along).
+        # body before a sentence's "."), joined with the values it overlaps
+        # (_planetscale_run). Not then when another token starts in the
+        # first 64: that one is read on its own (the outer match can lose
+        # an overlap to a value it starts inside, and take it along).
         name="planetscale_token",
         detector_type="PLANETSCALE_TOKEN",
         pattern=re.compile(
@@ -1650,6 +1684,7 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
         priority=10,
         required=(("pscale_tkn_", "pscale_oauth_", "pscale_pw_"),),
         anchors=("pscale_tkn_", "pscale_oauth_", "pscale_pw_"),
+        joins=_planetscale_run,
     ),
     RegexRule(
         # dp.pt. personal / dp.st. service / dp.ct. CLI / dp.sa. service

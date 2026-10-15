@@ -1,13 +1,15 @@
 """``Redactor.with_overrides``: the requester's approved overrides are
 asked only where detection refuses — a block-mode winner in
-``redact_text``/``blocked_type``, every refusing winner in ``scan_text`` —
-never for a value the redaction replaces or a warn-mode one. An approved
-value stays in place (forwarded as sent, uncounted); the thin copies keep
-the overrides; a redactor without them behaves exactly as before."""
+``redact_text``/``blocked_type``, every refusing winner in ``scan_text``
+(a span joining values each of them, so one code names them all) — never
+for a value the redaction replaces or a warn-mode one. An approved value
+stays in place (forwarded as sent, uncounted); the thin copies keep the
+overrides; a redactor without them behaves exactly as before."""
 
 from __future__ import annotations
 
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +19,7 @@ from llm_redact.detection.engine import (
     build_detectors,
     build_modes,
 )
+from llm_redact.overrides import OverrideScope, OverrideStore
 from llm_redact.redactor import BlockedRequest, Redactor
 from llm_redact.vault import InMemoryVault
 
@@ -224,3 +227,80 @@ def test_the_thin_copies_keep_the_overlays_blocks() -> None:
         with pytest.raises(BlockedRequest):
             copy.with_overrides(approved).redact_text(f"mail {EMAIL}")
     assert approved.asked == [] and approved.final == 2
+
+
+# --- a span joining values (Redactor._join) -------------------------------------------
+
+CARD = "4111 1111 1111 1111"
+UNION = f"Order 12 {CARD} Main Street"
+
+
+def _joining(tmp_path: Path) -> tuple[Redactor, OverrideStore]:
+    """A card read inside a run of digit groups joined with the address a
+    custom rule reads from inside it: ONE span in text the proxy cannot
+    rewrite; and the override store a scope reads."""
+    from llm_redact.detection.engine import CustomRule
+
+    street = CustomRule(name="street", detector_type="ADDRESS", pattern=r"\d{4} [A-Z][a-z]+ Street")
+    config = DetectionConfig(custom_rules=(street,))
+    redactor = Redactor(
+        build_detectors(config), InMemoryVault(), build_allowlist(config), modes=build_modes(config)
+    )
+    return redactor, OverrideStore(tmp_path / "overrides.db")
+
+
+def _refused_code(scope: OverrideScope) -> str:
+    code = scope.refusal_code("verbatim_field", "openai", "POST", "/v1/fine_tuning/jobs")
+    assert code is not None
+    return code
+
+
+def test_one_code_approves_every_value_a_joined_span_stands_for(tmp_path: Path) -> None:
+    redactor, store = _joining(tmp_path)
+    refused = OverrideScope(store, "")
+    assert redactor.with_overrides(refused).scan_text(UNION) == Counter({"CREDIT_CARD": 1})
+    store.approve("once", approver=None, code=_refused_code(refused))
+    # The next scan passes the span as sent; each value counted once in the
+    # content facts, however often it is asked.
+    scope = OverrideScope(store, "")
+    passing = redactor.with_overrides(scope)
+    assert passing.scan(UNION) == (Counter(), True)
+    assert passing.scan(f"again: {UNION}") == (Counter(), True)
+    assert scope.allowed_types() == {"CREDIT_CARD": 1, "ADDRESS": 1}
+    assert scope.commit() == (True, "once")
+    scope.settle(sent=True)
+    # The one-time grant is used up: refused again.
+    again = OverrideScope(store, "")
+    assert redactor.with_overrides(again).scan_text(UNION) == Counter({"CREDIT_CARD": 1})
+    assert again.allowed_types() == {}
+
+
+def test_an_every_time_approval_is_per_value(tmp_path: Path) -> None:
+    redactor, store = _joining(tmp_path)
+    refused = OverrideScope(store, "")
+    assert redactor.with_overrides(refused).scan_text(UNION) == Counter({"CREDIT_CARD": 1})
+    store.approve("always", approver=None, code=_refused_code(refused))
+    # Each value is a rule of its own: the same card joined with another
+    # address refuses, and its code names that address only.
+    other = UNION.replace("Main", "Elm")
+    scope = OverrideScope(store, "")
+    assert redactor.with_overrides(scope).scan_text(other) == Counter({"CREDIT_CARD": 1})
+    store.approve("once", approver=None, code=_refused_code(scope))
+    entries = [e for e in store.entries() if e.state == "once"]
+    assert [e.types for e in entries] == [("ADDRESS",)]
+    passing = OverrideScope(store, "")
+    assert redactor.with_overrides(passing).scan(other) == (Counter(), True)
+    assert passing.allowed_types() == {"CREDIT_CARD": 1, "ADDRESS": 1}
+
+
+def test_a_partly_approved_span_still_refuses(tmp_path: Path) -> None:
+    redactor, store = _joining(tmp_path)
+    # Approve the card alone, as a block-mode refusal's code would.
+    alone = OverrideScope(store, "")
+    assert not alone.allows("CREDIT_CARD", CARD)
+    store.approve("always", approver=None, code=_refused_code(alone))
+    scope = OverrideScope(store, "")
+    assert redactor.with_overrides(scope).scan(UNION) == (Counter({"CREDIT_CARD": 1}), False)
+    # The refusal's code names the address the card's rule does not pass.
+    store.approve("always", approver=None, code=_refused_code(scope))
+    assert redactor.with_overrides(OverrideScope(store, "")).scan(UNION).overridden

@@ -83,6 +83,18 @@ registry are read in the solid form only (Guernsey, Jersey, the Isle of
 Man and the French overseas departments use GB and FR IBANs, which are
 read in both forms).
 
+What these readings find — a number or an IPv6 address before a run of dots
+(or `:`), a PlanetScale token whose dots take it past 64 characters, an IBAN
+in the paper format — no release before 1.12.1 read, right next to text
+another value may hold. So none of them wins an overlap: each is joined with
+the values it overlaps ([below](#values-joined-with-the-ones-they-overlap)),
+and a value inside one keeps its own mode (a generic secret inside a
+PlanetScale token's run in block mode refuses the request; with `iban` in
+warn mode a card number inside a spaced IBAN is still redacted). A value
+read as 1.12.0 read it (a number or address not followed by a run of dots
+or `:`, a PlanetScale token of at most 64 characters with its dots, an IBAN
+in the solid form) resolves its overlaps as it did.
+
 Known residuals:
 
 - A paper-format IBAN is not read when one of `-`, `.`, `:`, `@`, `%` or
@@ -96,12 +108,6 @@ Known residuals:
   about 9,300, and one random `xxd -u` line in about 7,500, has a run that
   passes the checksum and is redacted as an IBAN (twenty million random
   lines of each).
-- A PlanetScale token's run wins an overlap like any longer match, so
-  under `[detection.modes]` a generic secret inside it follows
-  `planetscale_token`'s mode. A spaced IBAN is joined with the values it
-  overlaps instead ([below](#values-overlapping-a-card-read-in-a-run-or-a-paper-iban)):
-  a card number inside it in block mode refuses the request, and with
-  `iban` in warn mode the card number is still redacted.
 - An allowlist entry is an exact value: one in the solid form does not
   cover the same IBAN in the paper format. List both, or use
   `allowlist_patterns`.
@@ -163,14 +169,18 @@ Known residuals:
 - The Luhn check passes one random number in ten, so a stretch of a long
   run of digit groups that is no card can be redacted as one.
 
-### Values overlapping a card read in a run or a paper IBAN
+### Values joined with the ones they overlap
 
-A card read inside a longer run of digit groups and an IBAN in the paper
-format are values earlier releases did not read, written right next to
-text another value may hold. So neither takes characters from another
-value: each is joined with every value it overlaps, directly or through
-other overlapping values — a custom rule's value, an NER span, another
-rule's value, a deny string. In such a run of overlapping values:
+Some values are read where earlier releases read none, written right next
+to text another value may hold: a card read inside a longer run of digit
+groups (1.13.0), an IBAN in the paper format, and a value ending before a
+run of dots — a `belgian_nn` or `swiss_ahv` number, an IPv6 address (also
+before one `:`), a PlanetScale token whose dots take it past 64 characters
+(1.12.1; [Values next to punctuation](#values-next-to-punctuation)). So none
+of them takes characters from another value: each is joined with every
+value it overlaps, directly or through other overlapping values — a custom
+rule's value, an NER span, another rule's value, a deny string. In such a
+run of overlapping values:
 
 - A value in block mode refuses the request (an approved override lets
   it through as sent, where nothing redacted covers it).
@@ -179,20 +189,31 @@ rule's value, a deny string. In such a run of overlapping values:
   typed after the one starting first (of those, the longest):
   `Order 12 4111 1111 1111 1111 Main Street`, with `1111 Main Street` an
   address a custom rule or an NER model reads, goes upstream as
-  `Order 12 «CREDIT_CARD_001»`, and the answer gets the whole union back.
-  A value covering all the others stays itself (a paper IBAN holding a
-  card number is redacted as the IBAN).
+  `Order 12 «CREDIT_CARD_001»`, and `AHV 756.9217.0769.85. Done`, with
+  `85. Done` a custom rule's value, as `AHV «CH_AHV_001»`; the answer gets
+  the whole union back. A value covering all the others stays itself (a
+  paper IBAN holding a card number is redacted as the IBAN).
 - A value in warn mode is forwarded only where no redacted value covers
-  it, and counted as a warning only when no redacted value overlaps it.
+  it, and counted as a warning also when a redacted value overlaps it, as
+  long as part of it lies outside the redacted values: that part goes
+  upstream. One lying wholly inside them (a warn-mode rule's `9217` in
+  `AHV 756.9217.0769.85. Done`) sends nothing and is not counted. Of
+  warn-mode values overlapping one another, the one the overlap sweep
+  keeps is counted, as everywhere — so one value two detectors find (a
+  custom rule and an NER model reading the same address) counts once.
 - Each value is checked against the allowlists before it is joined: an
   allowlisted value joins nothing, and the joined text itself is no value
   an allowlist entry names.
 - A joined span is counted once, under its type. Where the proxy cannot
   rewrite the text (a verbatim field, an upload's extracted text), a span
-  joining two or more values refuses the request with no override code,
-  as a deny string does: no one approval names them all.
+  joining two or more values refuses the request unless every one of them
+  is approved ([overrides.md](overrides.md)): the refusal's code names them
+  all, one approval of it lets the span through as sent, and each value is
+  approved on its own (an every-time approval of the card passes it in
+  another span too). A span holding a deny string refuses with no code, as
+  a deny string does.
 - An `llm` backend's finding is never joined: as everywhere, it keeps only
-  what lies outside the other values, so the card or IBAN keeps its own
+  what lies outside the other values, so the joined value keeps its own
   placeholder (`Order «PERSON_001» «CREDIT_CARD_001» «PERSON_002» Road`
   when the model reads `12 4111 1111 1111 1111 Main` as a name).
 
@@ -217,8 +238,9 @@ type = "PROJECT"                 # -> «PROJECT_001»
 ```
 
 A deny match wins any overlap against rule matches (even longer ones;
-one overlapping a card read inside a run or a paper IBAN is redacted
-together with it, [above](#values-overlapping-a-card-read-in-a-run-or-a-paper-iban)),
+one overlapping a value joined with what it overlaps — a card read inside
+a run, a paper IBAN, a value before a run of dots — is redacted together
+with it, [above](#values-joined-with-the-ones-they-overlap)),
 bypasses the allowlist, and is never subject to per-rule modes — it always
 redacts. Matching is literal substring ("Auroras" gets its "Aurora"
 redacted); each casing variant round-trips back to exactly what was sent.
@@ -1135,9 +1157,10 @@ Every NER backend handles each string the redaction scans the same way:
    only what lies outside the others' winners), and the winner's mode
    redacts it into the vault, forwards it (warn) or refuses the request
    (block). A span of any other backend overlapping a card read inside a
-   run of digit groups or a paper IBAN is joined with it instead
-   ([Values overlapping a card read in a run or a paper IBAN](#values-overlapping-a-card-read-in-a-run-or-a-paper-iban));
-   an `llm` finding is not: it keeps only what lies outside the card or IBAN.
+   run of digit groups, a paper IBAN or a value before a run of dots is
+   joined with it instead
+   ([Values joined with the ones they overlap](#values-joined-with-the-ones-they-overlap));
+   an `llm` finding is not: it keeps only what lies outside that value.
 
 **Long strings.** A model reads a bounded number of tokens at a time and, left
 alone, ignores the rest of a longer string. The `hf`, `gliner` and `gliner2`

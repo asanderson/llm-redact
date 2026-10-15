@@ -53,18 +53,21 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   lists the residuals). On random runs of digit groups the rule's false positives barely move
   (13.44% to 13.72% of 5,000 runs; 14.48% to 14.58% of 5,000 runs ending in an expiry-shaped
   pair of groups).
-- **A custom rule's value or an NER span overlapping a spaced IBAN lost its part outside the
-  IBAN.** In `pay GB82 WEST 1234 5698 7654 32 Main Street`, with `32 Main Street` read as an
-  address, the IBAN (read since 1.12.1) won the overlap and `Main Street` went upstream as sent;
-  a card read inside a run of digit groups (above) would have done the same. Both are now
-  joined with every value they overlap, directly or through other overlapping values: whatever
-  any of them redacts is redacted, overlapping ones as one placeholder typed after the one
-  starting first (`pay «IBAN_001»`), and a value in block mode among them refuses the request.
-  (A finding of the new `llm` backend is not joined: like everywhere, it keeps only what lies
-  outside the other values, here as a placeholder of its own.)
-  Nothing 1.12.1 redacted or refused is forwarded now, with custom rules, NER spans and
-  `[detection.modes]` too: tests pin that against 1.12.1's pipeline (and, for the built-in rules
-  under the default modes, against 1.12.0's).
+- **A custom rule's value or an NER span overlapping a value read since 1.12.1 lost its part
+  outside that value.** In `pay GB82 WEST 1234 5698 7654 32 Main Street`, with `32 Main Street`
+  read as an address, the spaced IBAN won the overlap and `Main Street` went upstream as sent;
+  in `AHV 756.9217.0769.85. Done`, with `85. Done` a custom rule's value, `. Done` did (the
+  readings 1.12.1 added before a run of dots: `belgian_nn`, `swiss_ahv`, `ipv6` — also before
+  one `:` — and a PlanetScale token's run past 64 characters; 1.12.0 read no value there and
+  redacted the custom one whole); a card read inside a run of digit groups (above) would have
+  done the same. All of them are now joined with every value they overlap, directly or through
+  other overlapping values: whatever any of them redacts is redacted, overlapping ones as one
+  placeholder typed after the one starting first (`pay «IBAN_001»`, `AHV «CH_AHV_001»`), and a
+  value in block mode among them refuses the request. (A finding of the new `llm` backend is not
+  joined: like everywhere, it keeps only what lies outside the other values, here as a
+  placeholder of its own.) Nothing 1.12.0 or 1.12.1 redacted or refused is forwarded now, with
+  custom rules, NER spans and `[detection.modes]` too: tests pin that against both releases'
+  pipelines.
 
 ### Changed
 - **The `hf` backend's default model is now `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`**
@@ -80,14 +83,20 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   `hf` default", records the decision, what holds for the default entities and the caveats. The
   `hf-default` NER bench baselines are re-recorded for it, and the CI `ner-models` job also
   pulls `dslim/bert-base-NER`, which the `real_model` tests still read by name.
-- A spaced IBAN no longer imposes the `iban` rule's mode on a value it overlaps (it did since
-  1.12.1; the default modes are unaffected): with `credit_card = "block"` a spaced IBAN holding a
-  Luhn-valid card number refuses the request again, and with `iban = "warn"` that card number is
-  redacted. Values overlapping a card read inside a run of digit groups are treated alike, and a
-  warn-mode value among them is forwarded only where no redacted value covers it. Where the
+- A spaced IBAN, a value read before a run of dots and a PlanetScale token's run past 64
+  characters no longer impose their rule's mode on a value they overlap (they did since 1.12.1;
+  the default modes are unaffected): with `credit_card = "block"` a spaced IBAN holding a
+  Luhn-valid card number refuses the request again, with `iban = "warn"` that card number is
+  redacted, and a generic secret in block mode inside a PlanetScale token's run refuses the
+  request. Values overlapping a card read inside a run of digit groups are treated alike. A
+  warn-mode value among them is forwarded only where no redacted value covers it, and counted as
+  a warning, once, even where a redacted value overlaps it, as long as part of it lies outside the
+  redacted values (that part goes upstream; one wholly inside them is not counted). Where the
   proxy cannot rewrite the text (a verbatim field, an upload's extracted text), a span joining
-  two or more such values refuses the request with no override code, as a deny string does.
-  docs/detection.md describes how such values are joined.
+  two or more such values is put to refusal overrides value by value: the refusal's code names
+  every value, one approval of it lets the span through as sent (an access gate's content facts
+  count each value once), and a span holding a deny string refuses with no code, as a deny
+  string does. docs/detection.md describes how such values are joined.
 - The latency smoke check (`python -m llm_redact.bench --latency --check`) allows the proxy's
   own overhead on a 100 KB body up to 300 ms (was 150 ms). It is a tripwire for gross
   regressions such as quadratic behavior, measured at about 44 ms; a loaded shared CI runner

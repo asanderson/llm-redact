@@ -757,6 +757,31 @@ async def test_a_deny_string_in_a_verbatim_field_carries_no_code(tmp_path: Path)
     assert not upstream.requests
 
 
+async def test_a_joined_span_in_a_verbatim_field_is_approved_value_by_value(
+    tmp_path: Path,
+) -> None:
+    # A card read inside a run of digit groups, joined with the address a
+    # custom rule reads from inside it: one code names both values, and its
+    # approval forwards the field as sent, once.
+    from llm_redact.detection.engine import CustomRule
+
+    street = CustomRule(name="street", detector_type="ADDRESS", pattern=r"\d{4} [A-Z][a-z]+ Street")
+    upstream = Upstream()
+    app = _app(tmp_path, upstream, detection=DetectionConfig(custom_rules=(street,)))
+    suffix = "Order 12 4111 1111 1111 1111 Main Street"
+    body = {"model": "gpt-4o-mini", "training_file": "file-abc", "suffix": suffix}
+    async with _client(app) as client:
+        refused = await client.post("/v1/fine_tuning/jobs", json=body, headers=KEY)
+        assert refused.status_code == 400 and "`suffix`" in refused.text
+        entry = _store(tmp_path).approve("once", approver=None, code=_code(refused))
+        assert sorted(entry.types) == ["ADDRESS", "CREDIT_CARD"]
+        passed = await client.post("/v1/fine_tuning/jobs", json=body, headers=KEY)
+        assert passed.status_code == 200
+        assert json.loads(_sent(upstream))["suffix"] == suffix
+        again = await client.post("/v1/fine_tuning/jobs", json=body, headers=KEY)
+        assert again.status_code == 400 and len(upstream.requests) == 1
+
+
 # --- uploads --------------------------------------------------------------------------
 
 PDF = b"%PDF-1.7\n1 0 obj << >> endobj\n%%EOF\n"

@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 # Detection.tier of a detection that may only ADD to what the other
@@ -27,11 +27,18 @@ class Detection:
     tier: int = 1
     # A value read where an earlier release read none, right next to text
     # another value may hold (a card read inside a longer run of digit
-    # groups, an IBAN in the paper format): it must not take another value's
-    # characters, so the redactor JOINS it with every value it overlaps,
-    # directly or through others, instead of letting the overlap sweep hand
-    # them to one (Redactor._join): what any of them redacts is redacted.
+    # groups, an IBAN in the paper format, a value ending before a run of
+    # dots since 1.12.1): it must not take another value's characters, so
+    # the redactor JOINS it with every value it overlaps, directly or through
+    # others, instead of letting the overlap sweep hand them to one
+    # (Redactor._join): what any of them redacts is redacted.
     joins: bool = False
+    # The values a span joining overlapping ones stands for (a tier-0 union
+    # typed after the first, redactor._joined), in start order; empty for
+    # every other detection. Where the proxy cannot rewrite the text
+    # (Redactor.scan) each is put to the requester's overrides on its own.
+    # Left out of equality, hashing and repr, which stay the span's.
+    members: "tuple[Detection, ...]" = field(default=(), compare=False, repr=False)
 
 
 class DetectorUnavailable(Exception):

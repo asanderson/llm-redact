@@ -296,8 +296,9 @@ What that claim rests on, and what it does not:
   date of birth or username is: they reach the provider as typed.
 - **Structured values stay with the rules.** A model span longer than a
   rule's match wins overlap resolution (the longest span wins) and replaces
-  it (one overlapping a card read inside a run of digit groups or a paper
-  IBAN is joined with it into one placeholder: [detection.md](detection.md#values-overlapping-a-card-read-in-a-run-or-a-paper-iban));
+  it (one overlapping a card read inside a run of digit groups, a paper
+  IBAN or a value before a run of dots is joined with it into one
+  placeholder: [detection.md](detection.md#values-joined-with-the-ones-they-overlap));
   the bench counts such cases as structured regressions (none on the
   generated corpus for any configuration measured; one for ettin and two for
   `openai/privacy-filter` on OpenPII's English slice). The `llm` backend's

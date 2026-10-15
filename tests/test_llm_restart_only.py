@@ -357,6 +357,50 @@ def test_a_sighup_never_switches_on_a_dormant_table(
     assert server.requests == []
 
 
+@pytest.mark.parametrize("ran", [True, False], ids=["started running it", "started without it"])
+async def test_the_sighup_reload_off_the_loop_follows_the_same_start_rule(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    ran: bool,
+) -> None:
+    """What SIGHUP runs (``reload_off_loop``: the file read, its
+    restart-only paths pinned and its ``[detection]`` built on a worker
+    thread, then applied on the loop) starts the backend exactly when
+    ``reload`` would: again, at the startup values, on a proxy started
+    running it — the build off the loop knows the startup fact too —, and
+    never on one started without it, where nothing reaches the server."""
+    monkeypatch.setenv(KEY_VAR, KEY_VALUE)
+    server = install_llm(monkeypatch, FakeModelServer([(NAME, "person")]))
+    toml = LLM_TOML + f'api_key_env = "{KEY_VAR}"\n'
+    off = toml.replace("enabled = true", "enabled = false")
+    path = tmp_path / "config.toml"
+    path.write_text(toml if ran else off)
+    state = ProxyState(load_config(path), None, config_path=path)
+    if ran:
+        path.write_text(off)
+        assert await state.reload_off_loop() is True
+        assert not llm_backend_runs(state.config.detection.ner)
+    asked = len(server.requests)
+    path.write_text(toml)
+    with caplog.at_level(logging.ERROR, logger="llm_redact"):
+        applied = await state.reload_off_loop()
+    assert applied is ran
+    assert llm_backend_runs(state.config.detection.ner) is ran
+    redacted = state.preview(f"hi {NAME}")["redacted"]
+    if ran:
+        assert redacted == "hi «PERSON_001»"
+        assert [request.url.path for request in server.requests[asked:]] == [
+            "/api/tags",
+            "/api/chat",
+        ]
+        assert _sent(server) == {("http://127.0.0.1:11434", f"Bearer {KEY_VALUE}")}
+    else:
+        assert redacted == f"hi {NAME}"
+        assert "the proxy was not started running it" in caplog.text
+        assert server.requests == []
+
+
 @pytest.mark.parametrize("stop", _STOPS)
 @pytest.mark.parametrize("start", list(_RUNNING))
 def test_a_reload_starts_the_backend_again_at_the_values_the_proxy_started_with(

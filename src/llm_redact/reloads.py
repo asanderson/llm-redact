@@ -117,13 +117,15 @@ class ReloadScheduler:
         if self.running:
             self._again = True
             return
-        self._again = False
         self._task = asyncio.get_running_loop().create_task(
             self._run(), name="llm-redact config reload"
         )
 
     async def _run(self) -> None:
         while True:
+            # Cleared as each reload begins: a request that arrived before
+            # it (it reads the file after them) is served by it; one arriving
+            # while it runs asks for the next.
             self._again = False
             try:
                 await self._reload()

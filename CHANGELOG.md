@@ -48,6 +48,13 @@ and tags `vX.Y.Z`.
   dashboard's NER panel, and a `LlmRedactNerServerFailing` alert in
   `deploy/prometheus-alerts.yml` while the model server fails.
 
+### Fixed
+- **A request the redaction refuses part way no longer runs its NER models on the event loop.**
+  With NER enabled, a body holding more strings than `max_body_strings` (or a part the redaction
+  cannot read) had every string before that point detected inline, holding every other request
+  meanwhile — up to 100,000 model calls by default before the 413. Those strings are now detected
+  on the NER worker thread like any other request's; the refusal itself is unchanged.
+
 ## [1.12.1] - 2026-10-14
 
 Closes detection gaps 1.12.0 left: a Belgian national number, a Swiss AHV number or an IPv6

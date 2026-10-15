@@ -2313,12 +2313,12 @@ async def _prefetch_frame(
     *,
     require_json: bool,
     limit: int,
-) -> "tuple[DetectorPlan, dict[str, dict[int, list[Detection]]]] | None":
+) -> "tuple[DetectorPlan, dict[str, dict[int, list[Detection]]]]":
     """The connection redactor's plan and its heavy detectors' results for
     every string this client frame's redaction will scan (the adapter's own
-    ``redact_message`` run with a collector, which parses the frame itself)
-    — None when the collecting pass failed (the frame is then detected
-    inline, and refused by its real pass if it must be)."""
+    ``redact_message`` run with a collector, which parses the frame itself;
+    up to where that collecting pass failed, if it did: the frame's real
+    pass refuses it then, after scanning those strings first)."""
     from llm_redact.proxy import RequestContext  # runtime: avoids the import cycle
 
     plan = ctx.redactor.plan
@@ -2331,8 +2331,6 @@ async def _prefetch_frame(
         ),
         limit=limit,
     )
-    if strings is None:
-        return None
     return plan, await prefetch(plan, strings)
 
 

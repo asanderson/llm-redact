@@ -340,10 +340,11 @@ Each new string still costs a model call — hundreds of milliseconds to
 seconds — which runs off the event loop through the NER prefetch ("How NER
 runs"): one string at a time for the whole proxy, one request's strings
 after another's, so a request also waits for the new strings of the
-requests ahead of it. A string a request's prefetch did not cover (a reload
-during the request, or a body its collecting pass could not walk, such as
-one over `max_body_strings`) is asked inline, holding every other request
-for that call (`inline_calls`). Ollama unloads a model idle for five minutes
+requests ahead of it. A string a request's prefetch did not cover (a
+reload during the request) is asked inline, holding every other request for
+that call (`inline_calls`); a body the redaction refuses part way (one over
+`max_body_strings`, say) still has the strings before that point asked on
+the worker. Ollama unloads a model idle for five minutes
 (`OLLAMA_KEEP_ALIVE`); the first string after that waits for the load within
 `timeout_ms`.
 

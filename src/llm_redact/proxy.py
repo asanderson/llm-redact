@@ -4780,9 +4780,10 @@ async def _prefetch_json(
 ) -> tuple[DetectorPlan, PrecomputedTable] | None:
     """The live detector plan and its model-backed (heavy) detectors'
     results for every string the redaction of this JSON body will scan
-    (``ner_prefetch``: collected on the loop, detected on a worker thread)
-    — None when the plan has no heavy detector or the collecting pass
-    failed (the redaction then runs them inline, as before)."""
+    (``ner_prefetch``: collected on the loop, detected on a worker thread;
+    a collecting pass that failed, on a body the redaction will refuse,
+    hands over what it collected before the failure) — None when the plan
+    has no heavy detector (the redaction then runs none)."""
     plan = state.redactor.plan
     if not plan.heavy_indices:
         return None
@@ -4794,8 +4795,6 @@ async def _prefetch_json(
         limit=limit,
         mcp_exempt=frozenset(state.config.detection.mcp_exempt_servers),
     )
-    if strings is None:
-        return None
     return plan, await prefetch(plan, strings)
 
 
@@ -4812,8 +4811,8 @@ async def _prefetch_upload(
     plan and its heavy detectors' results for every string the upload's
     redaction will scan (its file names, form fields, text files and JSONL
     lines; a binary part's content is not text), collected by running the
-    adapter's own upload redaction with a collector — None when the plan
-    has no heavy detector or the collecting pass failed."""
+    adapter's own upload redaction with a collector (up to where it failed,
+    if it did) — None when the plan has no heavy detector."""
     plan = redactor.plan
     if not plan.heavy_indices:
         return None
@@ -4831,8 +4830,6 @@ async def _prefetch_upload(
         ),
         limit=limit,
     )
-    if strings is None:
-        return None
     return plan, await prefetch(plan, strings)
 
 

@@ -816,6 +816,10 @@ async def _chat(app: Any, content: str) -> httpx.Response:
         )
 
 
+async def _no_prefetch(*args: Any, **kwargs: Any) -> None:
+    return None  # the redaction runs the backend inline
+
+
 def _llm_stats(app: Any) -> Any:
     ((_name, _backend, stats),) = ner_backend_stats(app.state.proxy.detectors)
     return stats
@@ -835,12 +839,39 @@ async def test_the_proxy_redacts_what_the_model_server_finds_off_the_event_loop(
     nothing_refused(app.state.proxy)
 
 
+async def test_a_body_over_max_body_strings_asks_nothing_on_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The collecting pass stops at the string budget, and what it collected
+    # is still asked on the NER worker: the redaction reaches its 413
+    # without one model-server call on the event loop (it once made one per
+    # string up to max_body_strings there, 100,000 by default).
+    server = FakeModelServer([(NAME, "person")])
+    install_llm(monkeypatch, server)
+    upstream = _Upstream()
+    config = Config(detection=DetectionConfig(ner=llm_ner_config()), max_body_strings=20)
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    messages = [{"role": "user", "content": f"note {i} for {NAME}"} for i in range(25)]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=PROXY) as c:
+        response = await c.post(
+            "/v1/chat/completions",
+            json={"model": "gpt", "messages": messages},
+            headers=OPENAI_HEADERS,
+        )
+    assert response.status_code == 413, response.text
+    assert upstream.bodies == []
+    refused_once(app.state.proxy, "too_many_strings", "openai")
+    stats = _llm_stats(app)
+    assert server.chats == 20  # the strings within the budget, on the worker
+    assert stats.inline_calls == stats.prefetch_misses == 0
+
+
 @pytest.mark.parametrize("prefetching", [True, False])
 async def test_a_body_with_empty_and_blank_strings_goes_through(
     monkeypatch: pytest.MonkeyPatch, prefetching: bool
 ) -> None:
     if not prefetching:
-        monkeypatch.setattr(proxy_module, "collect_request_strings", lambda *a, **k: None)
+        monkeypatch.setattr(proxy_module, "_prefetch_json", _no_prefetch)
     server = FakeModelServer([(NAME, "person")])
     app, upstream = _app(monkeypatch, server)
     messages = [
@@ -866,7 +897,7 @@ async def test_a_failing_model_server_refuses_the_request_503(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, prefetching: bool
 ) -> None:
     if not prefetching:
-        monkeypatch.setattr(proxy_module, "collect_request_strings", lambda *a, **k: None)
+        monkeypatch.setattr(proxy_module, "_prefetch_json", _no_prefetch)
     server = FakeModelServer([(NAME, "person")], fail="timeout", fail_on="secret")
     app, upstream = _app(monkeypatch, server)
     with caplog.at_level(logging.INFO, logger="llm_redact"):

@@ -856,6 +856,27 @@ def test_each_drop_reason_is_its_own_series() -> None:
     }
 
 
+def test_a_capture_past_several_bounds_names_the_first_one() -> None:
+    # One reason per drop, in the documented order: captures before
+    # characters before items (a capture passing all three is a captures
+    # drop, one passing characters and items a characters drop).
+    sink = Sink()
+    sink.release.clear()
+    capture = ScanCapture([sink], Counter(), max_pending=2, max_chars=10, max_items=4)
+    capture.submit(_recorded(_CONTEXT, "x"))  # in flight
+    assert sink.entered.wait(5)
+    capture.submit(_recorded(_CONTEXT, "y"))  # queued: 1 capture, 1 char, 1 item
+    capture.submit(_recorded(_CONTEXT, *"abcdefghijkl"))  # 13 > 10 chars and 13 > 4 items
+    assert capture.status()["dropped_by_reason"] == {**NO_DROPS, "characters": 1}
+    capture.submit(_recorded(_CONTEXT, "z"))  # queued: 2 captures, the bound
+    capture.submit(_recorded(_CONTEXT, *"abcdefghijkl"))  # past all three bounds
+    assert capture.status()["dropped_by_reason"] == {**NO_DROPS, "characters": 1, "captures": 1}
+    sink.release.set()
+    assert capture.drain(5) == 0
+    assert sink.texts() == [["x"], ["y"], ["z"]]
+    capture.close(1)
+
+
 def test_a_bare_metrics_renders_the_capture_families_without_samples() -> None:
     text = Metrics("0").render(
         detections=Counter(),

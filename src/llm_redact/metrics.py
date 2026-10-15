@@ -514,8 +514,8 @@ def _scan_capture_lines(counts: ScanCaptureCounts | None) -> list[str]:
         "# HELP llm_redact_scan_captures_dropped_total Captures never handed to the scan"
         " sinks, by reason: captures, characters or items (the capture would take the queue"
         " past its bound of captures, characters, or strings plus detections — the sinks do"
-        " not keep up), shutdown (still queued when the shutdown's drain ended). The requests"
-        " themselves were unaffected."
+        " not keep up), shutdown (still queued when the shutdown's drain ended, or handed in"
+        " once the sinks closed). The requests themselves were unaffected."
     )
     lines.append("# TYPE llm_redact_scan_captures_dropped_total counter")
     if counts is not None:

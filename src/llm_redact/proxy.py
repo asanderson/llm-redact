@@ -83,7 +83,6 @@ from llm_redact.config import (
     apply_env_overrides,
     default_config_path,
     identity_upstream_problem,
-    llm_backend_runs,
     load_config,
     map_writes_mode,
     normalize_origin,
@@ -1067,14 +1066,6 @@ class ProxyState:
         _log_ner_warnings(config.detection, self.detection_snapshot.detectors)
         if config.detection.encrypted_content_passthrough:
             logger.warning("%s", ENCRYPTED_CONTENT_RISK_WARNING)
-        # Whether this process started running the llm backend: the one
-        # startup fact a reload may need that the running config does not
-        # keep (a reload may stop the backend). Written here only, read by
-        # every pin_restart_only_paths of the process (apply_config,
-        # prepare_config, a SIGHUP reload's build off the event loop): a
-        # reload may start the backend again only on a proxy started with
-        # it, at the values it started with.
-        self._llm_at_startup = llm_backend_runs(config.detection.ner)
         # Process-lifetime totals by type (for /status), shared across all
         # per-session redactors/rehydrators.
         self.detection_counts: Counter[str] = Counter()
@@ -2015,10 +2006,11 @@ class ProxyState:
         inject_system_note, max_body_bytes, provider upstreams. Requires
         restart (kept with a warning): vault, audit, host, port, the llm
         backend's url, allow_remote and api_key_env (and a reload that
-        would start that backend is refused unless the proxy was started
-        running it and the reload names the values it started with). An
-        open realtime connection whose provider settings, upstream
-        authorizer or detection policy changed is closed 1012 (reconnect).
+        would start that backend is refused unless it names the values the
+        proxy started with — a dormant table's, or the defaults, on a proxy
+        started without it). An open realtime connection whose provider
+        settings, upstream authorizer or detection policy changed is closed
+        1012 (reconnect).
         The access gate's optional ``reload`` then re-reads its own policy.
         """
         try:
@@ -2060,9 +2052,9 @@ class ProxyState:
         Failures are ``reload``'s, and so are their log lines: a file that
         does not parse, a build that fails (an unknown rule, a missing NER
         extra, a model not cached, a reload that would start the llm
-        backend on a process started without it or at other values than it
-        started with) is logged "config reload failed; keeping current config"
-        and nothing is swapped — after the "changes require restart" lines
+        backend at other values than the proxy started with) is logged
+        "config reload failed; keeping current config" and nothing is
+        swapped — after the "changes require restart" lines
         ``apply_config`` logs before it builds, when the file got that far
         (``_DetectionBuildFailed``: the build failed on the worker, so those
         lines are logged on the loop before the failure, as ``reload`` logs
@@ -2122,7 +2114,7 @@ class ProxyState:
         configuration (``apply_config`` logs its restart-required lines
         before it builds). Assigns nothing on the proxy."""
         fresh = apply_env_overrides(load_config(self.config_path))
-        candidate, _kept = pin_restart_only_paths(fresh, live, llm_at_startup=self._llm_at_startup)
+        candidate, _kept = pin_restart_only_paths(fresh, live)
         try:
             prepared = self._prepare_detection(candidate)
         except Exception as exc:
@@ -2148,17 +2140,15 @@ class ProxyState:
         """``fresh`` with its restart-only paths inside ``[detection]`` kept
         from the running configuration (``pin_restart_only_paths``: a
         ConfigError, before anything is logged, for one that would start
-        the llm backend on a proxy started without it or with any of those
-        paths changed, or that the kept values make invalid), and the
-        names of every restart-only part that differs from the running
-        configuration — RESTART_ONLY_KEYS sections, plugin sections by their
-        names, then the dotted paths — each logged as a WARNING ("changes
-        require restart; keeping current"). What ``apply_config`` logs
+        the llm backend with any of those paths changed, or that the kept
+        values make invalid), and the names of every restart-only part that
+        differs from the running configuration — RESTART_ONLY_KEYS
+        sections, plugin sections by their names, then the dotted paths —
+        each logged as a WARNING ("changes require restart; keeping
+        current"). What ``apply_config`` logs
         before it builds anything; a SIGHUP reload whose build failed off
         the loop logs the same before its failure."""
-        fresh, kept_paths = pin_restart_only_paths(
-            fresh, self.config, llm_at_startup=self._llm_at_startup
-        )
+        fresh, kept_paths = pin_restart_only_paths(fresh, self.config)
         restart_required = [
             field_name
             for field_name in RESTART_ONLY_KEYS
@@ -2190,9 +2180,9 @@ class ProxyState:
         returned (and warned) so callers can surface "restart required" —
         a section's name, a path's dotted one (``detection.ner.llm.url``).
         A ``fresh`` the pinned paths refuse (one that would start the llm
-        backend on a process started without it running, or with any of
-        them changed — a reload starts it again only at the running values,
-        the ones the process started with —, or one they make invalid) is a
+        backend with any of them changed — a reload starts it only at the
+        running values, the ones the process started with, also on a
+        process started without it —, or one they make invalid) is a
         ConfigError before anything is logged or built: the running
         configuration stays.
 
@@ -2389,9 +2379,8 @@ class ProxyState:
 
         Like apply_config, it keeps the running values of the restart-only
         keys inside ``[detection]`` (RESTART_ONLY_PATHS) and refuses a
-        candidate that would start the llm backend on a process started
-        without it running or with any of them changed, or that the kept
-        values make invalid.
+        candidate that would start the llm backend with any of them
+        changed, or that the kept values make invalid.
 
         Safe on a worker thread (a dashboard runs it off the event loop): it
         assigns nothing on the proxy and never touches the event loop; it
@@ -2399,9 +2388,7 @@ class ProxyState:
         apply swapping them meanwhile is either seen whole or not at all
         (and the generation tells apply_config which).
         """
-        candidate, _kept = pin_restart_only_paths(
-            candidate, self.config, llm_at_startup=self._llm_at_startup
-        )
+        candidate, _kept = pin_restart_only_paths(candidate, self.config)
         prepared = self._prepare_detection(candidate)
         try:
             effective = apply_env_overrides(candidate)

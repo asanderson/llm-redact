@@ -6,16 +6,17 @@ Whoever can change ``[detection]`` — a file edit and SIGHUP, the
 llm-redact-pro config editor — must not point the backend at another
 server or name another environment variable as the key it sends: a running
 proxy never begins to send scanned text, or a credential, to a destination
-it was not started with. A reload keeps the running values — the startup
-ones: no apply moves them —, applies the rest of ``[detection]`` and names
-the kept keys (dotted) among the restart-required ones. A reload STARTS
-the backend (added to the backends, NER switched on, re-added after a
-reload removed it) only to re-activate it: on a proxy started running it,
-at those values. One that would start it on a proxy started without it
-(at whatever values: a dormant table's, the defaults), or with any of them
-changed, or that the kept values make invalid, is refused with the running
-configuration kept. The editor's dry run (validate_config) and prepared
-build (prepare_config) agree with the apply.
+its startup configuration does not name. A reload keeps the running values
+— the startup ones: no apply moves them —, applies the rest of
+``[detection]`` and names the kept keys (dotted) among the
+restart-required ones. A reload STARTS the backend (added to the backends,
+NER switched on, re-added after a reload removed it) only at those values:
+on a proxy started running it, and on one started without it, where they
+are those of a table its startup file held dormant (NER off), or the
+defaults. One that would start it with any of them changed, or that the
+kept values make invalid, is refused with the running configuration kept.
+The editor's dry run (validate_config) and prepared build (prepare_config)
+agree with the apply.
 
 The server is ``ner_fakes.FakeModelServer`` behind an
 ``httpx.MockTransport``: every request the backend makes is recorded, at
@@ -25,7 +26,9 @@ whatever URL it was sent to.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +52,7 @@ from llm_redact.config import (
 from llm_redact.detection.engine import DetectionConfig, LlmNerConfig, NerConfig, ner_backend_stats
 from llm_redact.proxy import ProxyState, create_app
 from llm_redact.realtime import RealtimeRelay
-from ner_fakes import LLM_MODEL, FakeModelServer, install_llm, llm_ner_config
+from ner_fakes import LLM_DIGEST, LLM_MODEL, FakeModelServer, install_llm, llm_ner_config
 from test_llm_ner import LLM_TOML, NAME, PROXY, _app, _chat, _Upstream
 
 NAMES = [restart_only_name(path) for path in RESTART_ONLY_PATHS]
@@ -214,12 +217,19 @@ def test_a_reload_that_removes_the_backend_keeps_its_destination(
     assert state.config.detection.ner.llm.url == "http://127.0.0.1:11434"
 
 
-# --- a reload starts the backend again only where the proxy started it -----------------------
+# --- a reload starts the backend only at the values the proxy started with --------------------
 
 
 # The remote server a startup configuration names (never REMOTE, the
 # server a reload names instead).
 STARTED_REMOTE = "https://llm.started.example"
+
+# Every refusal of a start at other values opens so, then names the changed
+# keys (never a value).
+_REFUSAL = (
+    "[detection.ner] a reload cannot start the llm backend at other values than the proxy"
+    " started with: "
+)
 
 
 def _dormant(ner: NerConfig) -> Config:
@@ -227,8 +237,9 @@ def _dormant(ner: NerConfig) -> Config:
     return Config(detection=DetectionConfig(ner=dataclasses.replace(ner, enabled=False)))
 
 
-# A proxy started WITHOUT the backend running: no reload starts it, at
-# whatever values — the defaults, or a table its file held dormant.
+# A proxy started WITHOUT the backend running: a reload starts it at the
+# values its startup configuration holds — the defaults, or a table its
+# file held dormant — and nowhere else.
 _NOT_RUNNING = {
     "the defaults (NER off, no table)": Config(),
     "llm the backend, NER off": _dormant(llm_ner_config()),
@@ -301,28 +312,57 @@ def _refusals(state: ProxyState, fresh: Config) -> list[str]:
 _VALUES = (REMOTE, STARTED_REMOTE, "elsewhere", "llm.started", OTHER_VAR, KEY_VAR)
 
 
-@pytest.mark.parametrize("at", ["the startup values", *_ELSEWHERE])
 @pytest.mark.parametrize("start", list(_NOT_RUNNING))
-def test_a_reload_never_starts_the_backend_on_a_proxy_started_without_it(
-    monkeypatch: pytest.MonkeyPatch, start: str, at: str
+def test_a_reload_starts_the_backend_on_a_proxy_started_without_it_at_the_startup_values(
+    monkeypatch: pytest.MonkeyPatch, start: str
 ) -> None:
-    """Not even at the url and key variable a dormant table names, nor at
-    the defaults: a running proxy never begins to send scanned text, or a
-    credential, to a model server it did not send to from its start."""
+    """At the url, allow_remote and key variable a dormant table names, or
+    at the defaults: the start sends scanned text, and the key, to the
+    server the startup configuration names — nowhere else. The dry run and
+    the prepared build agree with the apply, and each build reads the key's
+    variable and checks the server as the startup does."""
+    monkeypatch.setenv(KEY_VAR, KEY_VALUE)
+    server = install_llm(monkeypatch, FakeModelServer([(NAME, "person")]))
+    state = ProxyState(_NOT_RUNNING[start], None)
+    startup = state.config
+    assert not ner_backend_stats(state.detectors) and server.requests == []
+    fresh = _started(startup)
+    state.validate_config(fresh)  # the dry run agrees, and changes nothing
+    assert not ner_backend_stats(state.detectors) and state.config is startup
+    # The editor's save: built off the loop, adopted by the apply.
+    assert state.apply_config(fresh, prepared=state.prepare_config(fresh)) == []
+    ((_n, started, _s),) = ner_backend_stats(state.detectors)
+    url = _destination(startup)[0]
+    assert started.server == url and _destination(state.config) == _destination(startup)
+    # The dry run and the prepared build each checked the server the startup
+    # configuration names, with the key it names (read from the environment
+    # at each build); the apply built nothing more.
+    assert [request.url.path for request in server.requests] == ["/api/tags"] * 2
+    key = None if startup.detection.ner.llm.api_key_env is None else f"Bearer {KEY_VALUE}"
+    assert _sent(server) == {(url, key)}
+    assert state.preview(f"hi {NAME}")["redacted"] == "hi «PERSON_001»"
+    assert _sent(server) == {(url, key)}
+
+
+@pytest.mark.parametrize("moved", _ELSEWHERE)
+@pytest.mark.parametrize("start", list(_NOT_RUNNING))
+def test_a_start_at_other_values_on_a_proxy_started_without_it_is_refused(
+    monkeypatch: pytest.MonkeyPatch, start: str, moved: str
+) -> None:
+    """Another url, allow_remote or key variable than the startup
+    configuration's — a dormant table's, or the defaults: a running proxy
+    never begins to send scanned text, or a credential, anywhere its startup
+    configuration does not name. Refused before any server is asked, naming
+    the changed keys, never a value."""
     monkeypatch.setenv(KEY_VAR, KEY_VALUE)
     monkeypatch.setenv(OTHER_VAR, OTHER_VALUE)
     server = install_llm(monkeypatch, FakeModelServer([(NAME, "person")]))
     state = ProxyState(_NOT_RUNNING[start], None)
-    assert not ner_backend_stats(state.detectors)
     before = (state.config, state.detectors)
-    fresh = _started(state.config)
-    if at != "the startup values":
-        fresh = _with(fresh, **_elsewhere(state.config, at))
-    for message in _refusals(state, fresh):
-        assert message.startswith(
-            "[detection.ner] a reload cannot start the llm backend: the proxy was not started"
-            " running it ("
-        )
+    moves = _elsewhere(state.config, moved)
+    changed = [name for name in NAMES if name.rpartition(".")[2] in moves]
+    for message in _refusals(state, _with(_started(state.config), **moves)):
+        assert message.startswith(f"{_REFUSAL}{', '.join(changed)} changed (")
         assert all(name in message for name in NAMES)
         # Names only, never a value.
         assert not any(value in message for value in _VALUES)
@@ -330,47 +370,148 @@ def test_a_reload_never_starts_the_backend_on_a_proxy_started_without_it(
     assert server.requests == []  # no server was asked anything
 
 
-def test_a_sighup_never_switches_on_a_dormant_table(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    "fault", ["another digest", "the model not served", "the key variable unset"]
+)
+def test_a_first_start_by_reload_checks_the_server_as_the_startup_does(
+    monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
-    """The file the proxy started with held the backend's table — a remote
-    server, a key variable — with NER off; a reload of it with NER on is
-    refused and logged, the running configuration kept: nothing reaches
-    the server, the key included."""
+    """A start on a proxy started without the backend builds as the startup
+    does: a server serving the model at another digest (re-tagged since the
+    pin) or not at all, or a key variable unset since, refuses it with the
+    running configuration kept — before any text is sent."""
     monkeypatch.setenv(KEY_VAR, KEY_VALUE)
-    server = install_llm(monkeypatch, FakeModelServer([(NAME, "person")]))
-    toml = LLM_TOML + (
-        f'url = "{STARTED_REMOTE}"\nallow_remote = true\napi_key_env = "{KEY_VAR}"\n'
+    server = install_llm(
+        monkeypatch,
+        FakeModelServer(
+            [(NAME, "person")],
+            digest="0" * 64 if fault == "another digest" else LLM_DIGEST,
+            listed=fault != "the model not served",
+        ),
     )
-    path = tmp_path / "config.toml"
-    path.write_text(toml.replace("enabled = true", "enabled = false"))
-    state = ProxyState(load_config(path), None, config_path=path)
+    state = ProxyState(_dormant(llm_ner_config(api_key_env=KEY_VAR)), None)
+    if fault == "the key variable unset":
+        monkeypatch.delenv(KEY_VAR)
     before = (state.config, state.detectors)
-    path.write_text(toml)
-    with caplog.at_level(logging.ERROR, logger="llm_redact"):
-        state.reload()
-    assert "config reload failed; keeping current config" in caplog.text
-    assert "the proxy was not started running it" in caplog.text
-    assert not any(value in caplog.text for value in _VALUES)
+    expected = {
+        "another digest": "different digest",
+        "the model not served": LLM_MODEL,
+        "the key variable unset": f"the environment variable {KEY_VAR} is unset",
+    }[fault]
+    for message in _refusals(state, _started(state.config)):
+        assert expected in message
     assert (state.config, state.detectors) == before
-    assert state.preview(f"hi {NAME}")["redacted"] == f"hi {NAME}"
-    assert server.requests == []
+    # The model list only (none at all without the key): no text was sent.
+    assert {request.url.path for request in server.requests} <= {"/api/tags"}
+    assert server.asked == []
 
 
+@pytest.mark.parametrize("startup", ["a dormant table", "no table: the defaults"])
+async def test_a_sighup_switches_the_backend_on_at_the_startup_values_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    startup: str,
+) -> None:
+    """End to end through the file, on a proxy started WITHOUT the backend:
+    its startup file held the backend's table with NER off (naming a key
+    variable), or held none. A SIGHUP reload naming another key variable is
+    refused and logged, nothing reaching any server; one switching NER on at
+    the startup values starts the backend there — the build reads the key
+    and checks the server and the model's digest as the startup does —,
+    requests are redacted with its findings, ``/status`` and ``doctor`` show
+    it, and an open realtime relay admitted under the old detection policy
+    is revoked (closed 1012: it reconnects under the new one)."""
+    from llm_redact.doctor_cli import _check_llm, _Report
+
+    monkeypatch.setenv(KEY_VAR, KEY_VALUE)
+    monkeypatch.setenv(OTHER_VAR, OTHER_VALUE)
+    server = install_llm(monkeypatch, FakeModelServer([(NAME, "person")]))
+    dormant = startup == "a dormant table"
+    on = LLM_TOML + (f'api_key_env = "{KEY_VAR}"\n' if dormant else "")
+    path = tmp_path / "config.toml"
+    path.write_text(on.replace("enabled = true", "enabled = false") if dormant else "")
+    upstream = _Upstream()
+    app = create_app(
+        load_config(path), upstream_transport=httpx.MockTransport(upstream), config_path=path
+    )
+    state = app.state.proxy
+    relay = RealtimeRelay(
+        "openai",
+        state.config.providers["openai"],
+        None,
+        state.detectors,
+        state.allowlist,
+        state.modes,
+    )
+    state.realtime_relays.add(relay)
+    assert (await _chat(app, f"hi {NAME}")).status_code == 200
+    assert NAME in upstream.bodies[-1].decode()  # no detector of names
+    assert (await _status(app))["detection"]["ner"]["backends"] == {}
+
+    # Another key variable: refused and logged, the running configuration kept.
+    before = (state.config, state.detectors)
+    path.write_text(LLM_TOML + f'api_key_env = "{OTHER_VAR}"\n')
+    with caplog.at_level(logging.ERROR, logger="llm_redact"):
+        assert state.reload() is False
+    assert "config reload failed; keeping current config" in caplog.text
+    assert f"{_REFUSAL}detection.ner.llm.api_key_env changed (" in caplog.text
+    assert not any(value in caplog.text for value in (*_VALUES, OTHER_VALUE, KEY_VALUE))
+    assert (state.config, state.detectors) == before and relay.revoked is None
+    assert server.requests == []  # no server was asked anything
+
+    # At the startup values: started there.
+    path.write_text(on)
+    assert state.reload() is True
+    assert (relay.revoked, relay.close_code) == ("[detection] policy", 1012)
+    assert (await _chat(app, f"hi {NAME}")).status_code == 200
+    sent = upstream.bodies[-1].decode()
+    assert NAME not in sent and "«PERSON_001»" in sent
+    assert [request.url.path for request in server.requests] == ["/api/tags", "/api/chat"]
+    key = f"Bearer {KEY_VALUE}" if dormant else None
+    assert _sent(server) == {("http://127.0.0.1:11434", key)}
+    status = await _status(app)
+    assert status["detection"]["ner"]["enabled"] is True
+    entry = status["detection"]["ner"]["backends"]["llm"]
+    assert (entry["server"], entry["api"], entry["api_key"]) == (
+        "http://127.0.0.1:11434",
+        "ollama",
+        dormant,
+    )
+    assert entry["counters"]["scanned_whole"] == 1
+    assert KEY_VALUE not in str(status) and KEY_VAR not in str(status)
+    # doctor reads the same file: the server, the key's variable, the model.
+    report = _Report(json_mode=True)
+    _check_llm(report, load_config(path))
+    rows = [("PASS", "model server http://127.0.0.1:11434 is on loopback (ollama API)")]
+    if dormant:
+        rows.append(
+            ("PASS", f"api key: {KEY_VAR} is set (sent as a bearer token to the model server only)")
+        )
+    rows.append(("PASS", f"model server serves {LLM_MODEL!r} at the pinned digest"))
+    assert [(row["level"], row["message"]) for row in report.rows] == rows
+
+
+@pytest.mark.parametrize(
+    "moved", [False, True], ids=["at the startup values", "another key variable"]
+)
 @pytest.mark.parametrize("ran", [True, False], ids=["started running it", "started without it"])
 async def test_the_sighup_reload_off_the_loop_follows_the_same_start_rule(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     ran: bool,
+    moved: bool,
 ) -> None:
     """What SIGHUP runs (``reload_off_loop``: the file read, its
     restart-only paths pinned and its ``[detection]`` built on a worker
     thread, then applied on the loop) starts the backend exactly when
-    ``reload`` would: again, at the startup values, on a proxy started
-    running it — the build off the loop knows the startup fact too —, and
-    never on one started without it, where nothing reaches the server."""
+    ``reload`` would: at the startup values — on a proxy started running it
+    (a reload stopped it since) and on one started without it, its startup
+    file holding the table dormant —, and never with a key variable changed,
+    where nothing reaches the server."""
     monkeypatch.setenv(KEY_VAR, KEY_VALUE)
+    monkeypatch.setenv(OTHER_VAR, OTHER_VALUE)
     server = install_llm(monkeypatch, FakeModelServer([(NAME, "person")]))
     toml = LLM_TOML + f'api_key_env = "{KEY_VAR}"\n'
     off = toml.replace("enabled = true", "enabled = false")
@@ -382,23 +523,24 @@ async def test_the_sighup_reload_off_the_loop_follows_the_same_start_rule(
         assert await state.reload_off_loop() is True
         assert not llm_backend_runs(state.config.detection.ner)
     asked = len(server.requests)
-    path.write_text(toml)
+    path.write_text(toml.replace(KEY_VAR, OTHER_VAR) if moved else toml)
     with caplog.at_level(logging.ERROR, logger="llm_redact"):
         applied = await state.reload_off_loop()
-    assert applied is ran
-    assert llm_backend_runs(state.config.detection.ner) is ran
+    assert applied is not moved
+    assert llm_backend_runs(state.config.detection.ner) is not moved
     redacted = state.preview(f"hi {NAME}")["redacted"]
-    if ran:
+    if moved:
+        assert redacted == f"hi {NAME}"
+        assert f"{_REFUSAL}detection.ner.llm.api_key_env changed (" in caplog.text
+        assert not any(value in caplog.text for value in (*_VALUES, OTHER_VALUE))
+        assert len(server.requests) == asked
+    else:
         assert redacted == "hi «PERSON_001»"
         assert [request.url.path for request in server.requests[asked:]] == [
             "/api/tags",
             "/api/chat",
         ]
         assert _sent(server) == {("http://127.0.0.1:11434", f"Bearer {KEY_VALUE}")}
-    else:
-        assert redacted == f"hi {NAME}"
-        assert "the proxy was not started running it" in caplog.text
-        assert server.requests == []
 
 
 @pytest.mark.parametrize("stop", _STOPS)
@@ -454,10 +596,7 @@ def test_a_reload_that_would_start_it_again_anywhere_else_is_refused(
     moves = _elsewhere(startup, moved)
     changed = [name for name in NAMES if name.rpartition(".")[2] in moves]
     for message in _refusals(state, _with(startup, **moves)):
-        assert message.startswith(
-            "[detection.ner] a reload cannot start the llm backend anywhere but where the proxy"
-            f" was started to send it: {', '.join(changed)} changed ("
-        )
+        assert message.startswith(f"{_REFUSAL}{', '.join(changed)} changed (")
         assert all(name in message for name in NAMES)
         # Names only, never a value.
         assert not any(value in message for value in _VALUES)
@@ -622,10 +761,10 @@ def test_no_apply_moves_the_running_values_off_the_startup_ones(
     monkeypatch: pytest.MonkeyPatch, ran: bool
 ) -> None:
     """The start rule compares a reload with the RUNNING configuration's
-    values and with whether the backend ran at startup. The values are the
-    ones the process started with because no apply moves them — every kind
-    of apply, in turn, each after its dry run, which must answer alike —
-    and the backend starts again only on a proxy started running it."""
+    values alone. They are the ones the process started with because no
+    apply moves them — every kind of apply, in turn, each after its dry
+    run, which must answer alike — and a start at them is applied whether
+    the proxy started running the backend or not."""
     monkeypatch.setenv(KEY_VAR, KEY_VALUE)
     monkeypatch.setenv(OTHER_VAR, OTHER_VALUE)
     server = install_llm(monkeypatch, FakeModelServer([(NAME, "person")]))
@@ -636,11 +775,11 @@ def test_no_apply_moves_the_running_values_off_the_startup_ones(
     url = {"url": "http://localhost:11434"}
     moved: dict[str, Any] = {"url": REMOTE, "allow_remote": True, "api_key_env": OTHER_VAR}
     refused = "refused"
-    # A start at the startup values (alone, or with only kept keys moved)
-    # is applied on a proxy started running the backend and refused on one
-    # started without it.
-    starts: tuple[list[str] | str, bool] = ([], True) if ran else (refused, False)
-    keeps: tuple[list[str] | str, bool] = (NAMES, True) if ran else (refused, False)
+    # A start at the startup values is applied on a proxy started running
+    # the backend and on one started without it alike; a reload moving only
+    # kept keys while it runs keeps them.
+    starts: tuple[list[str] | str, bool] = ([], True)
+    keeps: tuple[list[str] | str, bool] = (NAMES, True)
     # (step, the reload, (what it reports, whether the backend then runs)).
     steps: list[tuple[str, Config, tuple[list[str] | str, bool]]] = [
         ("stopped, the url changed: kept", _with(off, **url), (NAMES[:1], False)),
@@ -671,11 +810,9 @@ def test_no_apply_moves_the_running_values_off_the_startup_ones(
         assert outcome == expected, step
         assert bool(ner_backend_stats(state.detectors)) is runs, step
         assert _destination(state.config) == startup, step
-        assert state._llm_at_startup is ran, step
-    # Every request went to the startup's server, with the startup's key —
-    # and none at all from a proxy started without the backend.
-    expected_sent = {("http://127.0.0.1:11434", f"Bearer {KEY_VALUE}")} if ran else set()
-    assert _sent(server) == expected_sent
+    # Every request went to the startup's server, with the startup's key,
+    # whichever way the proxy started.
+    assert _sent(server) == {("http://127.0.0.1:11434", f"Bearer {KEY_VALUE}")}
 
 
 def test_a_reload_the_kept_url_makes_invalid_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -755,19 +892,19 @@ def _value(config: Config, path: tuple[str, ...]) -> Any:
     return value
 
 
-@given(_configs(), _configs(), st.booleans())
+@given(_configs(), _configs())
 def test_a_hot_apply_never_moves_the_backend_or_starts_it_elsewhere(
-    fresh: Config, running: Config, at_startup: bool
+    fresh: Config, running: Config
 ) -> None:
     moved = [path for path in RESTART_ONLY_PATHS if _value(fresh, path) != _value(running, path)]
     try:
-        pinned, changed = pin_restart_only_paths(fresh, running, llm_at_startup=at_startup)
+        pinned, changed = pin_restart_only_paths(fresh, running)
     except ConfigError as refused:
         message = str(refused)
         assert all(name in message for name in NAMES)
         assert "elsewhere" not in message and "KEY_" not in message
-        # Refused only for a start on a process started without the
-        # backend, or at other values, or for kept values that cannot work.
+        # Refused only for a start at other values, or for kept values that
+        # cannot work.
         kept = _with(
             fresh,
             **{path[-1]: _value(running, path) for path in RESTART_ONLY_PATHS},
@@ -776,7 +913,7 @@ def test_a_hot_apply_never_moves_the_backend_or_starts_it_elsewhere(
         starts = _llm_runs(fresh) and not _llm_runs(running)
         unusable = llm_url_problem(llm.url, allow_remote=llm.allow_remote) is not None
         not_a_base = llm.url.endswith({"ollama": "/api", "openai": "/v1"}[llm.api])
-        assert (starts and (moved or not at_startup)) or unusable or not_a_base
+        assert (starts and moved) or unusable or not_a_base
         return
     # Applied: the destination is the running one, everything else fresh's.
     for path in RESTART_ONLY_PATHS:
@@ -784,22 +921,23 @@ def test_a_hot_apply_never_moves_the_backend_or_starts_it_elsewhere(
     assert changed == [restart_only_name(path) for path in moved]
     restored = _with(pinned, **{path[-1]: _value(fresh, path) for path in RESTART_ONLY_PATHS})
     assert restored == fresh
-    # Started only on a process started running it, at the running values:
-    # exactly the ones fresh named.
+    # Started only at the running values: exactly the ones fresh named.
     if _llm_runs(pinned) and not _llm_runs(running):
-        assert at_startup and changed == [] and pinned == fresh
+        assert changed == [] and pinned == fresh
 
 
-def test_the_strict_answer_is_the_default() -> None:
-    # A caller that does not say the backend ran at startup gets the strict
-    # rule: no start by a reload at all, even at the running values.
-    running = Config(
-        detection=DetectionConfig(ner=dataclasses.replace(llm_ner_config(), enabled=False))
-    )
-    fresh = _with(running, ner={"enabled": True})
-    with pytest.raises(ConfigError, match="the proxy was not started running it"):
-        pin_restart_only_paths(fresh, running)
-    assert pin_restart_only_paths(fresh, running, llm_at_startup=True) == (fresh, [])
+def test_a_start_at_the_running_values_needs_no_startup_fact() -> None:
+    # The running values are the startup ones, so they are all a start is
+    # compared with: whether the backend ran at startup is not asked (the
+    # pinning takes no such fact), and a start at them is applied over a
+    # dormant table and over the defaults alike — at any other, refused.
+    assert list(inspect.signature(pin_restart_only_paths).parameters) == ["fresh", "running"]
+    for running in (_dormant(llm_ner_config(api_key_env=KEY_VAR)), Config()):
+        fresh = _started(running)
+        assert pin_restart_only_paths(fresh, running) == (fresh, [])
+        elsewhere = re.escape(f"{_REFUSAL}detection.ner.llm.api_key_env changed (")
+        with pytest.raises(ConfigError, match=elsewhere):
+            pin_restart_only_paths(_with(fresh, api_key_env=OTHER_VAR), running)
 
 
 @given(_configs(), st.lists(_configs(), max_size=8))
@@ -807,16 +945,17 @@ def test_no_sequence_of_hot_applies_moves_the_startup_values(
     startup: Config, reloads: list[Config]
 ) -> None:
     # apply_config's chain: the running configuration becomes the pinned
-    # one, or stays when the reload is refused; whether the backend ran at
-    # startup is recorded once, as ProxyState does.
-    at_startup = llm_backend_runs(startup.detection.ner)
+    # one, or stays when the reload is refused.
     running = startup
     for fresh in reloads:
         try:
-            running, _changed = pin_restart_only_paths(fresh, running, llm_at_startup=at_startup)
+            pinned, _changed = pin_restart_only_paths(fresh, running)
         except ConfigError:
             continue
+        # A reload that starts the backend named the startup values.
+        if _llm_runs(pinned) and not _llm_runs(running):
+            for path in RESTART_ONLY_PATHS:
+                assert _value(fresh, path) == _value(startup, path)
+        running = pinned
         for path in RESTART_ONLY_PATHS:
             assert _value(running, path) == _value(startup, path)
-        # The backend runs only on a process started running it.
-        assert at_startup or not _llm_runs(running)

@@ -245,8 +245,10 @@ one probe; `llm-redact status` shows it while open. A server that requires
 a key reads it from the environment variable `api_key_env` names (sent as
 a bearer token, never shown). Its `url`, `allow_remote` and `api_key_env`
 take a restart: a reload (SIGHUP, the dashboard's editor) keeps their
-running values, never starts the backend on a proxy started without it,
-and starts it again only at the values the proxy started with.
+running values, and starts the backend only at the values the proxy
+started with, also on a proxy started without it (a table its startup file
+held with NER off, or the defaults: a reload adding "llm" switches the
+backend on there).
 
 Which models exist, what each finds (names; with a PII model also
 addresses, dates of birth, usernames and account numbers, best effort) and

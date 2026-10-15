@@ -60,9 +60,10 @@ llm-redact-pro dashboard's config editor:
    host/port/vault/audit/log/tls/otel/users/email are RESTART-ONLY —
    warn the user and stop if the change touches them; so are the llm
    backend's [detection.ner.llm] url, allow_remote and api_key_env, and
-   a reload never starts the llm backend on a proxy started without it,
-   and starts it again only at the values the proxy started with (any
-   other start takes a restart).
+   a reload starts the llm backend only at the values the proxy started
+   with, also on a proxy started without it (any other start takes a
+   restart) — switching it on sends every scanned string, unredacted,
+   to that server: tell the user which one before applying it.
 3. Validate BEFORE applying: `llm-redact serve --check` must exit 0.
    If it fails, fix the file or revert it — never leave the config
    failing --check, because a SIGHUP would silently keep the old config

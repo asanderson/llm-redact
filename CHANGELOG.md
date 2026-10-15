@@ -176,13 +176,15 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     llm-redact-pro config editor) keeps their running values, applies the rest of
     `[detection]` and names them in its "require restart" warning (`detection.ner.llm.url`, …).
     Those running values are the ones the proxy started with (no reload moves them). A reload
-    never starts the backend (`"llm"` added to the backends, NER switched on with it) on a
-    proxy started without it, not even a `[detection.ner.llm]` table the startup file held
-    with NER off; on one started running it, a reload may start it again after a reload
-    stopped it, only at those values — the build reading the key and checking the server as
-    at startup. Any other start is refused with the running configuration kept, naming keys,
-    never a value. Whoever can change `[detection]` can therefore never make a running proxy
-    send scanned text, or a key, somewhere it did not send to from its start.
+    starts the backend (`"llm"` added to the backends, NER switched on with it, again after a
+    reload stopped it) only at those values, also on a proxy started without it: there they
+    are a `[detection.ner.llm]` table the startup file held with NER off, or the defaults
+    (Ollama on loopback, no key) — the build reading the key and checking the server as at
+    startup. A start with any of the three changed is refused with the running configuration
+    kept, naming keys, never a value. Whoever can change `[detection]` can therefore never make
+    a running proxy send scanned text, or a key, somewhere its startup configuration does not
+    name — but can switch the backend on there, a dormant table's server or the loopback
+    default included (docs/threat-model.md lists it among the residual risks).
     `config.RESTART_ONLY_PATHS` lists the three for the editor, and `apply_config`'s
     restart-required list (the plugin API's `DashboardHost` contract) now holds their dotted
     names beside the section names: an entry is a name to show, not always a `Config`

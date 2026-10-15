@@ -260,6 +260,8 @@ def test_an_approved_or_warn_value_yields_to_a_union_at_any_tier(tier: int) -> N
     assert blocking.blocked_type(text) is None
     assert blocking.redact_text(text) == "mail bob at «DENY_001» dot com please"
     assert {value for _type, value in approved.asked} == {value}
+    # Part of it is sent, but an approved block is no warning.
+    assert blocking.warn_counts == Counter()
     warning = Redactor(
         [detector],
         InMemoryVault(),
@@ -958,3 +960,29 @@ def test_a_warn_value_is_a_warning_exactly_when_part_of_it_is_still_sent(
         got = redactor.redact_text(text)
         redacted = replaced(text, got, vault)
         assert redactor.warn_counts == expected_warnings(detections, configured, modes, redacted)
+
+
+def test_an_llm_finding_piece_an_added_string_cuts_is_swept_with_the_other_cut_values() -> None:
+    # A configured deny string (I) cuts a warn-mode value (FGHIJ, EMAIL) and
+    # an llm finding starting where it starts (FGHIJKLMNO, PERSON) into two
+    # pieces, FGH and JKLMNO; an added string (G) takes the first piece's
+    # place. The cut values are read in the overlap sweep's order — by start,
+    # the longest first — so the email counts and the piece it overlaps does
+    # not (one value), while the second piece is a winner left whole.
+    text = _LETTERS
+    found = [
+        Detection(5, 10, "EMAIL", text[5:10]),
+        Detection(5, 15, "PERSON", text[5:15], 120, ADDITIVE_TIER),
+        Detection(8, 9, "DENY", text[8:9], tier=0),
+    ]
+    vault = InMemoryVault()
+    redactor = Redactor(
+        [_Spans(found)],
+        vault,
+        Allowlist(),
+        modes={"EMAIL": "warn", "PERSON": "warn"},
+        added_deny=_plan(("G",)),
+    )
+    got = redactor.redact_text(text)
+    assert got == "ABCDEF«DENY_001»H«DENY_002»JKLMNOPQRSTUVWX"
+    assert redactor.warn_counts == Counter({"EMAIL": 1, "PERSON": 1})

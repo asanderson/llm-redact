@@ -278,6 +278,9 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   results its prefetch computed — a reload replaced the detectors while it waited — each also
   counted inline), until now on `/status` and `/metrics` only. Both stay at zero while every
   request is prefetched and nobody runs a preview. The row's panels are now three to a line.
+  The counter's `# HELP` text, the metrics reference (docs/observability.md) and the NER
+  counter table (docs/detection.md) now define it the same way: they said every inline call
+  ran on the event loop, and llm-redact-pro's preview now runs on a worker thread of its own.
 
 ### Fixed
 - A SIGHUP during the proxy's shutdown — a terminal closing, a reload racing a stop — could end

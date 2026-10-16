@@ -617,9 +617,10 @@ def _ner_lines(backends: list[tuple[str, "NerStats"]]) -> list[str]:
         (
             "llm_redact_ner_inline_calls_total",
             "inline_calls",
-            "Strings an NER backend ran on the event loop (holding up every other request"
-            " for that string's inference) instead of ahead of the redaction on the NER"
-            " worker thread, by backend.",
+            "Strings an NER backend was run on by the redaction itself instead of ahead of"
+            " it on the NER worker thread (on a request's path that is the event loop,"
+            " holding up every other request for that string's inference; a dashboard"
+            " redaction preview counts too, on its own worker thread), by backend.",
         ),
         (
             "llm_redact_ner_prefetch_misses_total",

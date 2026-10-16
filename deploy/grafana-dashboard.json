@@ -328,7 +328,7 @@
     {
       "type": "timeseries",
       "title": "NER entities dropped by backend",
-      "description": "Model entities never redacted, all of which should stay at zero: labels = their type cannot be a placeholder type (llm_redact_ner_labels_dropped_total; usually an [detection.ner] entities entry that cannot be one), offsets = the scanned string does not contain their span (llm_redact_ner_offsets_dropped_total), ungrounded = values the llm backend's model server returned that the text it read does not hold, or too short to tell from the words around it (llm_redact_ner_ungrounded_total; the llm backend only, every other backend reports zero).",
+      "description": "Model entities never redacted. labels = their type cannot be a placeholder type (llm_redact_ner_labels_dropped_total; usually an [detection.ner] entities entry that cannot be one) and offsets = the scanned string does not contain their span (llm_redact_ner_offsets_dropped_total): both should stay at zero. ungrounded = values the llm backend's model server returned that do not occur in the text it read (invented or mangled), that are shorter than two characters, or that hold a placeholder's guillemet; a placeholder of an earlier turn that a request carries (a compacted history, a pasted answer) counts here too, so ungrounded can rise without the server inventing anything (llm_redact_ner_ungrounded_total; the llm backend only, every other backend reports zero).",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 68 },
       "fieldConfig": { "defaults": { "unit": "cps", "color": { "mode": "fixed", "fixedColor": "orange" } }, "overrides": [] },

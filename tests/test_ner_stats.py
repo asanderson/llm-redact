@@ -8,10 +8,12 @@ loads a model or reaches the network.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 from collections import Counter
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -385,6 +387,9 @@ async def test_status_counts_requests_previews_and_resets_on_rebuild(
         )
         assert hf["counters"]["scanned_whole"] == 1
         assert hf["counters"]["skipped_max_chars"] == 1
+        # The request's strings were detected ahead of the redaction (the NER
+        # prefetch): nothing ran inline, nothing was missed.
+        assert hf["counters"]["inline_calls"] == hf["counters"]["prefetch_misses"] == 0
         assert after["detection"]["ner"]["enabled"] is True
         assert after["detection"]["ner"]["max_chars"] == 40
         assert after["detection"]["ner"]["unmatched_entities"] == []
@@ -394,10 +399,14 @@ async def test_status_counts_requests_previews_and_resets_on_rebuild(
         for key in ("detections_total", "warnings_total", "providers", "vault", "audit"):
             assert key in after
 
-        # A dashboard preview runs the live detectors, so it counts too.
-        state.preview(SHORT)
+        # A dashboard preview runs the live detectors, so it counts too —
+        # run, as llm-redact-pro runs it, on a worker thread of its own: it
+        # has no prefetched results, so its string is an inline call (off
+        # the event loop) and no prefetch miss.
+        await asyncio.to_thread(state.preview, SHORT)
         counters = (await _status(client))["detection"]["ner"]["backends"]["hf"]["counters"]
         assert counters["scanned_whole"] == 2
+        assert (counters["inline_calls"], counters["prefetch_misses"]) == (1, 0)
 
         # A reload that keeps [detection] keeps the counters...
         state.apply_config(config)
@@ -506,6 +515,61 @@ def test_metrics_render_each_backend() -> None:
         'llm_redact_ner_prefetch_misses_total{backend="hf"} 0',
         'llm_redact_ner_prefetch_misses_total{backend="gliner"} 6',
     ]
+
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+def _table_row(doc: str, start: str) -> str:
+    """The one row of a Markdown table in ``docs/<doc>`` starting ``start``."""
+    text = (REPO / "docs" / doc).read_text(encoding="utf-8")
+    (row,) = [line for line in text.splitlines() if line.startswith(start)]
+    return row
+
+
+def test_every_definition_of_the_inline_counter_counts_a_preview() -> None:
+    # A redaction preview has no prefetched results, so each string it
+    # hands an NER backend is an inline call — on the event loop when the
+    # host calls it there, on a worker thread of its own in llm-redact-pro's
+    # dashboard (the status test above runs it so). Every place defining
+    # llm_redact_ner_inline_calls_total says both: the /metrics HELP text,
+    # the metrics reference, the NER counter table and the dashboard panel
+    # (the first three once said every inline call held up the event loop,
+    # beside a panel saying a preview counts off it).
+    from llm_redact.metrics import Metrics
+
+    text = Metrics("0").render(
+        detections=Counter(),
+        rehydrations=Counter(),
+        warnings=Counter(),
+        blocked=Counter(),
+        vault_entries=0,
+        vault_sessions=0,
+        ner_stats=[("hf", NerStats())],
+    )
+    (help_line,) = [
+        line
+        for line in text.splitlines()
+        if line.startswith("# HELP llm_redact_ner_inline_calls_total ")
+    ]
+    dashboard = json.loads((REPO / "deploy" / "grafana-dashboard.json").read_text("utf-8"))
+    (panel,) = [
+        p
+        for p in dashboard["panels"]
+        if "llm_redact_ner_inline_calls_total" in json.dumps(p.get("targets", []))
+    ]
+    definitions = {
+        "HELP": help_line,
+        "observability.md": _table_row(
+            "observability.md", "| `llm_redact_ner_inline_calls_total` |"
+        ),
+        "detection.md": _table_row("detection.md", "| `inline_calls` |"),
+        "dashboard": panel["description"],
+    }
+    for where, definition in definitions.items():
+        for phrase in ("by the redaction itself", "request's path", "event loop", "preview"):
+            assert phrase in definition, (where, phrase)
+        assert "worker thread" in definition.split("preview", 1)[1], where
 
 
 def test_the_ner_families_are_core_families() -> None:

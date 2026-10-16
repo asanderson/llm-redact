@@ -276,6 +276,31 @@ def test_the_ner_model_server_has_a_panel_of_its_own() -> None:
     }
 
 
+def test_the_entities_dropped_panel_says_what_ungrounded_counts() -> None:
+    # labels and offsets dropped mean a configuration or a model is wrong:
+    # they should stay at zero. ungrounded also counts what the llm
+    # backend's grounding rightly refuses (llm_ner._grounded): a value
+    # shorter than two characters, or one holding a placeholder's guillemet
+    # (an earlier turn's token a request carries). So the panel names every
+    # case the metrics reference names, and its "should stay at zero" leaves
+    # ungrounded out (one sentence once held all three, naming neither case).
+    row = _row_panels("NER coverage")
+    (panel,) = [p for p in row if "llm_redact_ner_ungrounded_total" in json.dumps(p["targets"])]
+    description = panel["description"]
+    (zero,) = [s for s in re.split(r"(?<=\.)\s+", description) if "stay at zero" in s]
+    assert "labels" in zero and "offsets" in zero, zero
+    assert "ungrounded" not in zero, zero
+    doc = (DEPLOY.parent / "docs" / "observability.md").read_text(encoding="utf-8")
+    (reference,) = [
+        line
+        for line in doc.splitlines()
+        if line.startswith("| `llm_redact_ner_ungrounded_total` |")
+    ]
+    for phrase in ("two characters", "guillemet"):
+        assert phrase in reference, phrase
+        assert phrase in description, phrase
+
+
 def _override(matcher: str, options: Any, prop: str, value: Any) -> dict[str, Any]:
     return {
         "matcher": {"id": matcher, "options": options},

@@ -1170,7 +1170,8 @@ the rest and names each kept key (`detection.ner.llm.url`,
 `[detection.ner] backends`, NER switched on with it, its table added, or
 any of these after a reload stopped it — only at the values the proxy
 started with, also on a proxy started without it: there they are those of
-a `[detection.ner.llm]` table the startup file held with NER off, or the
+a `[detection.ner.llm]` table the startup file held while the backend did
+not run (NER off, or `"llm"` not among `[detection.ner] backends`), or the
 defaults (Ollama on loopback, no key) when it held none.
 
 `config reload failed; keeping current config: [detection.ner] a reload

@@ -178,7 +178,8 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     Those running values are the ones the proxy started with (no reload moves them). A reload
     starts the backend (`"llm"` added to the backends, NER switched on with it, again after a
     reload stopped it) only at those values, also on a proxy started without it: there they
-    are a `[detection.ner.llm]` table the startup file held with NER off, or the defaults
+    are a `[detection.ner.llm]` table the startup file held while the backend did not run
+    (NER off, or `"llm"` not among `[detection.ner] backends`), or the defaults
     (Ollama on loopback, no key) — the build reading the key and checking the server as at
     startup. A start with any of the three changed is refused with the running configuration
     kept, naming keys, never a value. Whoever can change `[detection]` can therefore never make

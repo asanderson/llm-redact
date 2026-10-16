@@ -524,7 +524,8 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 # and api_key_env take a restart, though the rest of [detection] reloads hot:
 # a reload keeps their running values, and starts the backend only at the
 # values the proxy started with, also on a proxy started without it — so a
-# table left here with NER off is a server a reload can switch on.
+# table left here while the backend does not run (NER off, or "llm" not
+# among [detection.ner] backends) is a server a reload can switch on.
 # [detection.ner.llm]
 # url = "http://127.0.0.1:11434"   # default: Ollama on loopback
 # api = "ollama"                   # or "openai" (an OpenAI-compatible server)

@@ -247,8 +247,9 @@ a bearer token, never shown). Its `url`, `allow_remote` and `api_key_env`
 take a restart: a reload (SIGHUP, the dashboard's editor) keeps their
 running values, and starts the backend only at the values the proxy
 started with, also on a proxy started without it (a table its startup file
-held with NER off, or the defaults: a reload adding "llm" switches the
-backend on there).
+held while the backend did not run — NER off, or "llm" not among
+`[detection.ner] backends` —, or the defaults: a reload adding "llm"
+switches the backend on there).
 
 Which models exist, what each finds (names; with a PII model also
 addresses, dates of birth, usernames and account numbers, best effort) and

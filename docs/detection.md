@@ -500,8 +500,10 @@ on with it, its table added, or any of these after a reload stopped it
 table) — is applied when the file names the `url`, `allow_remote` and
 `api_key_env` the proxy started with: on a proxy started running the
 backend, the ones it ran at; on one started without it, those of a
-`[detection.ner.llm]` table its startup file held with NER off, or the
-defaults (Ollama on loopback, no key) when the file held none. The build
+`[detection.ner.llm]` table its startup file held while the backend did
+not run (NER off, or `"llm"` not among `[detection.ner] backends`: a
+dormant table), or the defaults (Ollama on loopback, no key) when the file
+held none. The build
 then reads the key's variable and checks the server and its model exactly
 as at startup (any failure keeps the running configuration), `/status`
 shows the backend, and an open realtime connection is closed 1012 to

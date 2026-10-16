@@ -98,6 +98,23 @@ def _prose(text: str) -> str:
     return " ".join(" ".join(lines).replace("`", "").split())
 
 
+# A table lies dormant whenever the startup file holds it while the backend
+# does not run — NER off, OR NER on without "llm" among its backends (a
+# spaCy-only startup): pin_restart_only_paths starts the backend at either
+# table's values. Every text that says which values a first start uses names
+# both ways, never NER off alone (a reader running another backend would
+# take its table for one a reload cannot switch on).
+_DORMANT = 'NER off, or "llm" not among [detection.ner] backends'
+_NER_OFF_ALONE = re.compile(r"(?:held|left here) with NER off")
+
+
+@pytest.mark.parametrize("doc", [doc for doc in _START_RULE_DOCS if not doc.startswith("plugins/")])
+def test_docs_say_a_table_lies_dormant_whenever_the_backend_does_not_run(doc: str) -> None:
+    prose = _prose((ROOT / doc).read_text())
+    assert _DORMANT in prose, f"{doc}: does not say {_DORMANT!r}"
+    assert not _NER_OFF_ALONE.search(prose), f"{doc}: {_NER_OFF_ALONE.search(prose)}"
+
+
 @pytest.mark.parametrize("doc", _START_RULE_DOCS)
 def test_docs_state_when_a_reload_starts_the_llm_backend(doc: str) -> None:
     prose = _prose((ROOT / doc).read_text())
@@ -109,15 +126,17 @@ def test_docs_state_when_a_reload_starts_the_llm_backend(doc: str) -> None:
 
 def test_the_threat_model_states_the_residual_of_a_start_by_reload() -> None:
     """Whoever can change ``[detection]`` can switch the backend on at the
-    startup values — a dormant table's or the loopback defaults — and the
-    threat model says so among the residual risks, plainly."""
+    startup values — a dormant table's (NER off, or "llm" not among the
+    backends) or the loopback defaults — and the threat model says so among
+    the residual risks, plainly."""
     prose = _prose((ROOT / "docs/threat-model.md").read_text())
     row = prose[prose.index("| The opt-in llm NER backend") :]
     residual = row[row.index("Residual:") : row.index(" |", row.index("Residual:"))]
     for phrase in (
         "whoever can change [detection] can switch the backend on at the startup values",
         "on a proxy started without it",
-        "a [detection.ner.llm] table the startup file held with NER off (a dormant table)",
+        "a [detection.ner.llm] table the startup file held while the backend did not run"
+        f" ({_DORMANT}: a dormant table)",
         "the loopback defaults",
         "every scanned string then goes to that server, unredacted",
     ):

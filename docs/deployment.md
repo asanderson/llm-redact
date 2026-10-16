@@ -334,8 +334,9 @@ dotted path (`detection.ner.llm.url`): whoever can change `[detection]` can
 neither move where that backend sends scanned text nor change the variable
 its key is read from, and a reload starts that backend only at the values the
 proxy started with, also on a proxy started without it (a
-`[detection.ner.llm]` table its startup file held with NER off, or the
-defaults); any other start is refused, the running configuration kept
+`[detection.ner.llm]` table its startup file held while the backend did
+not run — NER off, or `"llm"` not among `[detection.ner] backends` —, or
+the defaults); any other start is refused, the running configuration kept
 ([detection.md](detection.md#a-model-server-you-run-the-llm-backend)).
 A broken config file is logged and ignored — the running config
 stays live. There is deliberately no HTTP reload endpoint (it would be a

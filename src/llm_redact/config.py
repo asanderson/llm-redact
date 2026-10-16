@@ -1915,8 +1915,9 @@ def pin_restart_only_paths(fresh: Config, running: Config) -> tuple[Config, list
     backends, NER switched on, its section added) — only at those values:
     when ``fresh`` names the running value of every restart-only key. That
     holds whether the process started running the backend (a reload
-    stopped it since) or not (its startup file held the table with NER
-    off — a dormant table — or held none: the defaults): a start sends
+    stopped it since) or not (its startup file held the table while the
+    backend did not run — NER off, or "llm" not among the backends: a
+    dormant table — or held none: the defaults): a start sends
     scanned text, and the value of the variable the startup named, only to
     the server the startup configuration names. The build then reads the
     key's variable and checks that server as at startup. ConfigError,

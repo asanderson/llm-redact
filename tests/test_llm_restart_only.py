@@ -12,8 +12,8 @@ its startup configuration does not name. A reload keeps the running values
 restart-required ones. A reload STARTS the backend (added to the backends,
 NER switched on, re-added after a reload removed it) only at those values:
 on a proxy started running it, and on one started without it, where they
-are those of a table its startup file held dormant (NER off), or the
-defaults. One that would start it with any of them changed, or that the
+are those of a table its startup file held dormant (NER off, or "llm" not
+among the backends), or the defaults. One that would start it with any of them changed, or that the
 kept values make invalid, is refused with the running configuration kept.
 The editor's dry run (validate_config) and prepared build (prepare_config)
 agree with the apply.
@@ -52,7 +52,15 @@ from llm_redact.config import (
 from llm_redact.detection.engine import DetectionConfig, LlmNerConfig, NerConfig, ner_backend_stats
 from llm_redact.proxy import ProxyState, create_app
 from llm_redact.realtime import RealtimeRelay
-from ner_fakes import LLM_DIGEST, LLM_MODEL, FakeModelServer, install_llm, llm_ner_config
+from ner_fakes import (
+    LLM_DIGEST,
+    LLM_MODEL,
+    FakeModelServer,
+    FakeSpacy,
+    install_llm,
+    install_spacy,
+    llm_ner_config,
+)
 from test_llm_ner import LLM_TOML, NAME, PROXY, _app, _chat, _Upstream
 
 NAMES = [restart_only_name(path) for path in RESTART_ONLY_PATHS]
@@ -239,7 +247,8 @@ def _dormant(ner: NerConfig) -> Config:
 
 # A proxy started WITHOUT the backend running: a reload starts it at the
 # values its startup configuration holds — the defaults, or a table its
-# file held dormant — and nowhere else.
+# file held dormant (NER off, or NER on with "llm" not among its backends:
+# a reload adding "llm" beside them starts it there) — and nowhere else.
 _NOT_RUNNING = {
     "the defaults (NER off, no table)": Config(),
     "llm the backend, NER off": _dormant(llm_ner_config()),
@@ -251,6 +260,15 @@ _NOT_RUNNING = {
     "its table naming a key, NER off": _dormant(llm_ner_config(api_key_env=KEY_VAR)),
     "its table on a remote server with a key, NER off": _dormant(
         llm_ner_config(url=STARTED_REMOTE, allow_remote=True, api_key_env=KEY_VAR)
+    ),
+    "its table on a remote server with a key, NER on, spacy the backend": Config(
+        detection=DetectionConfig(
+            ner=NerConfig(
+                enabled=True,
+                backends=("spacy",),
+                llm=llm_ner_config(url=STARTED_REMOTE, allow_remote=True, api_key_env=KEY_VAR).llm,
+            )
+        )
     ),
 }
 
@@ -290,11 +308,28 @@ def _destination(config: Config) -> tuple[str, bool, str | None]:
 
 
 def _started(config: Config) -> Config:
-    """``config`` with only the llm backend running, at ``config``'s own
-    url, allow_remote and api_key_env."""
+    """``config`` with the llm backend running at ``config``'s own url,
+    allow_remote and api_key_env: ``"llm"`` added to the backends it runs
+    (its own table kept), else the llm backend alone."""
+    ner = config.detection.ner
+    if ner.enabled:
+        started = dataclasses.replace(ner, backends=(*ner.active_backends(), "llm"))
+        return dataclasses.replace(
+            config, detection=dataclasses.replace(config.detection, ner=started)
+        )
     url, allow_remote, api_key_env = _destination(config)
-    ner = llm_ner_config(url=url, allow_remote=allow_remote, api_key_env=api_key_env)
-    return dataclasses.replace(config, detection=DetectionConfig(ner=ner))
+    alone = llm_ner_config(url=url, allow_remote=allow_remote, api_key_env=api_key_env)
+    return dataclasses.replace(config, detection=DetectionConfig(ner=alone))
+
+
+def _running(state: ProxyState) -> list[str]:
+    """The NER backends among the proxy's live detectors, in build order."""
+    return [name for name, _detector, _stats in ner_backend_stats(state.detectors)]
+
+
+def _llm(state: ProxyState) -> list[Any]:
+    """The llm backend among the proxy's live detectors (none, or one)."""
+    return [d for name, d, _stats in ner_backend_stats(state.detectors) if name == "llm"]
 
 
 def _refusals(state: ProxyState, fresh: Config) -> list[str]:
@@ -316,22 +351,26 @@ _VALUES = (REMOTE, STARTED_REMOTE, "elsewhere", "llm.started", OTHER_VAR, KEY_VA
 def test_a_reload_starts_the_backend_on_a_proxy_started_without_it_at_the_startup_values(
     monkeypatch: pytest.MonkeyPatch, start: str
 ) -> None:
-    """At the url, allow_remote and key variable a dormant table names, or
-    at the defaults: the start sends scanned text, and the key, to the
-    server the startup configuration names — nowhere else. The dry run and
-    the prepared build agree with the apply, and each build reads the key's
+    """At the url, allow_remote and key variable a dormant table names —
+    with NER off, or beside another backend the startup runs —, or at the
+    defaults: the start sends scanned text, and the key, to the server the
+    startup configuration names — nowhere else. The dry run and the
+    prepared build agree with the apply, and each build reads the key's
     variable and checks the server as the startup does."""
     monkeypatch.setenv(KEY_VAR, KEY_VALUE)
+    install_spacy(monkeypatch, FakeSpacy([]))
     server = install_llm(monkeypatch, FakeModelServer([(NAME, "person")]))
     state = ProxyState(_NOT_RUNNING[start], None)
     startup = state.config
-    assert not ner_backend_stats(state.detectors) and server.requests == []
+    others = _running(state)
+    assert "llm" not in others and server.requests == []
     fresh = _started(startup)
     state.validate_config(fresh)  # the dry run agrees, and changes nothing
-    assert not ner_backend_stats(state.detectors) and state.config is startup
+    assert _running(state) == others and state.config is startup
     # The editor's save: built off the loop, adopted by the apply.
     assert state.apply_config(fresh, prepared=state.prepare_config(fresh)) == []
-    ((_n, started, _s),) = ner_backend_stats(state.detectors)
+    assert _running(state) == [*others, "llm"]  # beside what ran, if anything
+    (started,) = _llm(state)
     url = _destination(startup)[0]
     assert started.server == url and _destination(state.config) == _destination(startup)
     # The dry run and the prepared build each checked the server the startup
@@ -356,6 +395,7 @@ def test_a_start_at_other_values_on_a_proxy_started_without_it_is_refused(
     the changed keys, never a value."""
     monkeypatch.setenv(KEY_VAR, KEY_VALUE)
     monkeypatch.setenv(OTHER_VAR, OTHER_VALUE)
+    install_spacy(monkeypatch, FakeSpacy([]))
     server = install_llm(monkeypatch, FakeModelServer([(NAME, "person")]))
     state = ProxyState(_NOT_RUNNING[start], None)
     before = (state.config, state.detectors)
@@ -930,9 +970,14 @@ def test_a_start_at_the_running_values_needs_no_startup_fact() -> None:
     # The running values are the startup ones, so they are all a start is
     # compared with: whether the backend ran at startup is not asked (the
     # pinning takes no such fact), and a start at them is applied over a
-    # dormant table and over the defaults alike — at any other, refused.
+    # dormant table (NER off, or "llm" not among the backends) and over the
+    # defaults alike — at any other, refused.
     assert list(inspect.signature(pin_restart_only_paths).parameters) == ["fresh", "running"]
-    for running in (_dormant(llm_ner_config(api_key_env=KEY_VAR)), Config()):
+    for running in (
+        _dormant(llm_ner_config(api_key_env=KEY_VAR)),
+        _NOT_RUNNING["its table on a remote server with a key, NER on, spacy the backend"],
+        Config(),
+    ):
         fresh = _started(running)
         assert pin_restart_only_paths(fresh, running) == (fresh, [])
         elsewhere = re.escape(f"{_REFUSAL}detection.ner.llm.api_key_env changed (")

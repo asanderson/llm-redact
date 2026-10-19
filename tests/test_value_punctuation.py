@@ -13,6 +13,7 @@ countries. A value glued into a longer token is still not one. That nothing
 """
 
 import json
+import sys
 import time
 from collections.abc import Callable
 
@@ -243,19 +244,24 @@ ADVERSARIAL = (
 def _seconds(scan: Callable[[str], object], unit: str, size: int = SIZE) -> float:
     # These scans are synchronous CPU work. Wall time includes shared-runner
     # descheduling, which can dwarf a sub-millisecond rejection scan.
+    # Windows' CPU accounting can tick in 15.6ms steps (CPython gh-135304),
+    # so retain its existing high-resolution wall clock.
+    clock = time.perf_counter if sys.platform == "win32" else time.thread_time
     text = unit * (size // len(unit) + 1)
     best = float("inf")
     for _ in range(3):
-        started = time.thread_time()
+        started = clock()
         scan(text)
-        best = min(best, time.thread_time() - started)
+        best = min(best, clock() - started)
     return best
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
 @pytest.mark.parametrize("power", [1, 2], ids=["linear", "quadratic"])
 def test_cost_measurement_excludes_descheduling(
-    monkeypatch: pytest.MonkeyPatch, power: int
+    monkeypatch: pytest.MonkeyPatch, power: int, platform: str
 ) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
     clocks = {"cpu": 0.0, "wall": 0.0}
     monkeypatch.setattr(time, "thread_time", lambda: clocks["cpu"])
     monkeypatch.setattr(time, "perf_counter", lambda: clocks["wall"])
@@ -270,6 +276,19 @@ def test_cost_measurement_excludes_descheduling(
     # Scheduling delays must not reject linear work; quadratic CPU growth
     # must still breach the existing security bound.
     assert (large < 30 * max(small, 1e-4)) is (power == 1), (small, large)
+
+
+def test_cost_measurement_handles_coarse_windows_cpu_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(time, "thread_time", lambda: 0.0)
+    wall = 0.0
+    monkeypatch.setattr(time, "perf_counter", lambda: wall)
+
+    def scan(text: str) -> None:
+        nonlocal wall
+        wall += len(text) * 1e-4
+
+    assert _seconds(scan, "x", 10) == pytest.approx(0.0011)
 
 
 def test_no_adversarial_input_costs_more_than_1_12_0s_worst() -> None:

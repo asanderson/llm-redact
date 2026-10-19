@@ -1,0 +1,10 @@
+{
+    admin off
+    auto_https off
+}
+
+:8080 {
+    reverse_proxy open-webui:8080 {
+        flush_interval -1
+    }
+}

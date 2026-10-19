@@ -8,6 +8,7 @@ agent plugins, Python dependencies, and default demo stay unchanged.
 
 This recipe is for **one trusted local user and text chat**. It uses the
 official, unmodified Open WebUI **v0.12.3** image and llm-redact **1.12.1**.
+The local HTTP frontend is the official **Caddy 2.11.7-alpine** image.
 Keep Open WebUI's branding and notices; its
 [license](https://github.com/open-webui/open-webui/blob/v0.12.3/LICENSE)
 has branding conditions. Upgrading either image needs another smoke run.
@@ -140,7 +141,7 @@ Pro encryption and identity features.
 | Control | Behavior in this recipe |
 | --- | --- |
 | Optionality | Only the explicit Compose file/profile starts WebUI. |
-| Network | WebUI is on an internal network; only the proxy also has provider egress. |
+| Network | WebUI is on an internal network. The proxy has provider egress; a fixed Caddy frontend connects the browser to WebUI. |
 | Host exposure | UI `127.0.0.1:3000`; proxy `127.0.0.1:8787`. Change the numeric ports in the private env file if occupied. |
 | Configuration | `ENABLE_PERSISTENT_CONFIG=false` prevents old database settings from replacing supplied defaults after restart. It is not a runtime admin lock. |
 | Other model paths | Direct connections and the separate Ollama connector are disabled. |
@@ -152,6 +153,10 @@ Pro encryption and identity features.
 the backend egress restriction. It does not firewall the user's browser,
 authenticate arbitrary local software, or make the proxy a multiuser
 service. Other trusted containers on that network can reach the proxy.
+Docker does not publish host ports for internal-only endpoints. Caddy
+publishes the loopback UI port on a separate access network and forwards
+only to `open-webui:8080`, including streaming and WebSockets. It does not
+provide a general outbound HTTP proxy. Its administrative API is disabled.
 The image's wider bind is confined to its container namespace; do not
 publish its port on all host interfaces. Native/remote proxy serving
 still follows the [mTLS bind policy](deployment.md#choose-a-bind-and-know-what-it-costs).
@@ -225,3 +230,5 @@ Primary references: [provider connection](https://docs.openwebui.com/getting-sta
 [environment settings](https://docs.openwebui.com/reference/env-configuration/),
 [offline operation](https://docs.openwebui.com/tutorials/maintenance/offline-mode/),
 and [Compose profiles](https://docs.docker.com/compose/how-tos/profiles/).
+The internal-network publishing limitation is tracked by
+[Docker/Moby](https://github.com/moby/moby/issues/36174).

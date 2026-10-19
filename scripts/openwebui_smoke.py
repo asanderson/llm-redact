@@ -156,7 +156,7 @@ def main() -> None:
         try:
             compose("config", "--quiet")
             compose("up", "-d", "--no-build")
-            base = address("open-webui", "8080")
+            base = address("webui-http", "8080")
             proxy = address("proxy", "8787")
             wait_ready(base + "/health")
             credentials = {
@@ -220,8 +220,11 @@ def main() -> None:
                 raise RuntimeError("WebUI succeeded with its proxy stopped")
             check_upstream(compose("logs", "--no-color", "fake-upstream"))
             print("PASS: no direct egress and no fallback when proxy is stopped", flush=True)
-        except Exception:
+        except Exception as error:
             # Only this disposable synthetic stack; never print compose config/secrets.
+            if isinstance(error, subprocess.CalledProcessError):
+                print(error.stdout)
+            print(compose("ps", "--all", check=False))
             print(compose("logs", "--no-color", "--tail", "40", check=False))
             raise
         finally:

@@ -688,7 +688,7 @@ jobs:
   container-docker:
     name: container (docker)
     runs-on: ubuntu-latest
-    needs: test
+    # Independent integration gate: start image checks alongside the test matrix.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

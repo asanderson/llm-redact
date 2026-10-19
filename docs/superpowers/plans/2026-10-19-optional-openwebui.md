@@ -4,7 +4,7 @@
 
 **Goal:** Add an optional local text-chat frontend that sends model traffic through llm-redact.
 
-**Architecture:** A standalone Compose profile runs the unmodified, version-pinned Open WebUI image and the existing proxy. WebUI's backend has only an internal network; the proxy also has provider egress. A fake OpenAI-compatible upstream and an actual WebUI API smoke test prove discovery, redaction, restoration, persistence, and failure behavior without cloud keys.
+**Architecture:** A standalone Compose profile runs the unmodified, version-pinned Open WebUI image and the existing proxy. WebUI's backend has only an internal network; the proxy also has provider egress. A fixed Caddy HTTP frontend supplies loopback browser access because Docker does not publish internal-only endpoints. A fake OpenAI-compatible upstream and an actual WebUI API smoke test prove discovery, redaction, restoration, persistence, and failure behavior without cloud keys.
 
 **Tech Stack:** Docker Compose, existing Python/Starlette/httpx test dependencies, stdlib smoke client.
 

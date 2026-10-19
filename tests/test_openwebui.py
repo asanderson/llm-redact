@@ -144,7 +144,13 @@ def test_optional_stack_confines_backend_and_provider_configuration() -> None:
     webui = services["open-webui"]
     proxy = services["proxy"]
     assert webui["profiles"] == proxy["profiles"] == ["webui"]
-    assert webui["ports"] == ["127.0.0.1:${OPENWEBUI_PORT:-3000}:8080"]
+    # Docker does not publish ports on internal-only endpoints. A fixed HTTP
+    # frontend accepts loopback traffic while WebUI retains no external route.
+    assert "ports" not in webui
+    frontend = services["webui-http"]
+    assert frontend["ports"] == ["127.0.0.1:${OPENWEBUI_PORT:-3000}:8080"]
+    assert frontend["profiles"] == ["webui"]
+    assert frontend["networks"] == ["webui-access", "webui-internal"]
     assert proxy["ports"] == ["127.0.0.1:${OPENWEBUI_PROXY_PORT:-8787}:8787"]
     assert webui["networks"] == ["webui-internal"]
     assert stack["networks"]["webui-internal"]["internal"] is True
@@ -166,3 +172,10 @@ def test_optional_stack_confines_backend_and_provider_configuration() -> None:
     # This is a separate opt-in stack; default startup still runs the original demo.
     default = yaml.safe_load((ROOT / "compose.yaml").read_text())
     assert "open-webui" not in default["services"]
+
+
+def test_webui_http_frontend_has_a_fixed_streaming_upstream() -> None:
+    config = (ROOT / "examples/openwebui.Caddyfile").read_text()
+    assert "reverse_proxy open-webui:8080" in config
+    assert "flush_interval -1" in config
+    assert "admin off" in config

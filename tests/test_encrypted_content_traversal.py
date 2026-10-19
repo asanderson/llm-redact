@@ -30,6 +30,72 @@ def _redactor(vault: InMemoryVault, enabled: bool = False) -> Redactor:
     )
 
 
+def test_walker_scans_encrypted_content_when_option_is_omitted() -> None:
+    assert transform_strings({"encrypted_content": BAIT}, str.upper) == {
+        "encrypted_content": BAIT.upper()
+    }
+
+
+def test_redactor_scans_encrypted_content_when_option_is_omitted(vault: InMemoryVault) -> None:
+    config = DetectionConfig()
+    redactor = Redactor(build_detectors(config), vault, build_allowlist(config))
+    result = redactor.redact_json({"encrypted_content": BAIT, "text": BAIT})
+    assert "AKIAIOSFODNN7EXAMPLE" not in str(result)
+    assert result["encrypted_content"] == result["text"]
+
+
+def test_rehydrator_restores_encrypted_content_when_option_is_omitted(
+    vault: InMemoryVault,
+) -> None:
+    original = "jane@corp.example"
+    token = vault.placeholder_for("EMAIL", original)
+    assert Rehydrator(vault).rehydrate_json({"encrypted_content": token}) == {
+        "encrypted_content": original
+    }
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_direct_json_restore_obeys_instance_policy(vault: InMemoryVault, enabled: bool) -> None:
+    original = "jane@corp.example"
+    token = vault.placeholder_for("EMAIL", original)
+    body = {
+        "encrypted_content": token,
+        "text": token,
+        "metadata": {"encrypted_content": token},
+    }
+    assert Rehydrator(vault, encrypted_content_passthrough=enabled).rehydrate_json(body) == {
+        "encrypted_content": token if enabled else original,
+        "text": original,
+        "metadata": {"encrypted_content": original},
+    }
+
+
+def test_stream_pool_restores_encrypted_content_when_option_is_omitted(
+    vault: InMemoryVault,
+) -> None:
+    original = "jane@corp.example"
+    token = vault.placeholder_for("EMAIL", original)
+    event = SSEEvent(
+        event="response.output_item.done",
+        data=json.dumps(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "reasoning",
+                    "encrypted_content": token,
+                    "summary": [{"text": token}],
+                },
+            }
+        ),
+    )
+    restored = OpenAIResponsesAdapter().rehydrate_event(event, RehydratorPool(vault))
+    assert json.loads(restored[0].data)["item"] == {
+        "type": "reasoning",
+        "encrypted_content": original,
+        "summary": [{"text": original}],
+    }
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 def test_protocol_scalar_and_siblings(vault: InMemoryVault, enabled: bool) -> None:
     redactor = _redactor(vault, enabled)

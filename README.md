@@ -349,7 +349,7 @@ docker run -d -p 127.0.0.1:8787:8787 \
 docker compose up   # demo stack: proxy + bundled fake upstream
 ```
 
-For an optional local chat frontend, see [Open WebUI setup](docs/openwebui.md):
+For an optional local chat frontend, see [Open WebUI setup](https://github.com/asanderson/llm-redact/blob/main/docs/openwebui.md):
 a separate opt-in Compose profile, a no-key synthetic demo, and a real-provider
 recipe. WebUI's backend sends text chat through the proxy and is confined to
 an internal network. This is a single-user setup; WebUI history and backups

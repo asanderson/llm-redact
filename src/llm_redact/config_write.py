@@ -16,12 +16,14 @@ Comments from a hand-edited file are NOT preserved; the editor keeps one
 import json
 import os
 import re
+import textwrap
 from collections.abc import Mapping
 from pathlib import Path
 
 from llm_redact.config import (
     CONFIDENCE_BACKENDS,
     DEFAULT_MAP_WRITE_WAIT_SECONDS,
+    ENCRYPTED_CONTENT_RISK_WARNING,
     EXTRACTION_CLASSES,
     EXTRACTION_DEFAULT_SERVICE_FORMATS,
     EXTRACTION_FORMATS,
@@ -420,6 +422,18 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
             if detection.binary_uploads == "forward"
             else ""
         )
+    )
+
+    lines.extend("# " + line for line in textwrap.wrap(ENCRYPTED_CONTENT_RISK_WARNING, width=96))
+    lines.append(
+        f"encrypted_content_passthrough = {_toml_value(detection.encrypted_content_passthrough)}"
+    )
+    lines.append(
+        "# Explicit acceptance of the scan-bypass risk described above; --yes is not consent."
+    )
+    lines.append(
+        "acknowledge_encrypted_content_risk = "
+        + _toml_value(detection.acknowledge_encrypted_content_risk)
     )
 
     if detection.mcp_exempt_servers:

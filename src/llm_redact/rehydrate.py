@@ -121,11 +121,17 @@ class Rehydrator:
     """Whole-text restoration for non-streaming bodies."""
 
     def __init__(
-        self, vault: Vault, *, fuzzy: bool = False, counts: "Counter[str] | None" = None
+        self,
+        vault: Vault,
+        *,
+        fuzzy: bool = False,
+        counts: "Counter[str] | None" = None,
+        encrypted_content_passthrough: bool = False,
     ) -> None:
         self._vault = vault
         self._fuzzy = fuzzy
         self._counts = counts
+        self.encrypted_content_passthrough = encrypted_content_passthrough
 
     def rehydrate_text(self, text: str) -> str:
         return substitute_tokens(
@@ -133,7 +139,11 @@ class Rehydrator:
         )
 
     def rehydrate_json(self, obj: Any) -> Any:
-        return transform_strings(obj, self.rehydrate_text)
+        return transform_strings(
+            obj,
+            self.rehydrate_text,
+            encrypted_content_passthrough=self.encrypted_content_passthrough,
+        )
 
     def rehydrate_json_source_text(self, text: str) -> str:
         """Restore placeholders inside a string that is raw JSON source
@@ -228,9 +238,12 @@ class StreamingRehydrator:
 class RehydratorPool:
     """Lazily creates one StreamingRehydrator per stream channel."""
 
-    def __init__(self, vault: Vault, *, fuzzy: bool = False) -> None:
+    def __init__(
+        self, vault: Vault, *, fuzzy: bool = False, encrypted_content_passthrough: bool = False
+    ) -> None:
         self._vault = vault
         self._fuzzy = fuzzy
+        self.encrypted_content_passthrough = encrypted_content_passthrough
         self._channels: dict[Hashable, StreamingRehydrator] = {}
         # Successful restores by type across all channels of this request.
         self.counts: Counter[str] = Counter()

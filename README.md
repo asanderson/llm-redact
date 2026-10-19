@@ -140,6 +140,14 @@ that cannot cover:
   so does an approved refusal override
   ([docs/overrides.md](https://github.com/asanderson/llm-redact/blob/main/docs/overrides.md); off by default, opt in with
   `[overrides] enabled = true`) for the value, body or file it lets through.
+  The paired `[detection]` options `encrypted_content_passthrough` and
+  `acknowledge_encrypted_content_risk` (both default `false`) also exempt
+  scalar `encrypted_content` fields in protocol JSON so opaque values can
+  survive replay. Plaintext under that name can bypass detection and scan
+  capture; the proxy does not authenticate its origin or verify encryption.
+  Known caller-data contexts stay scanned. Without this opt-in, detector
+  collisions may still affect ciphertext. See
+  [the exemption and its boundaries](https://github.com/asanderson/llm-redact/blob/main/docs/detection.md#encrypted-content-passthrough-opt-in).
   Every such opt-out is surfaced in `/status`, `llm-redact status`, and
   `doctor` — never silent.
 
@@ -221,6 +229,9 @@ Then:
 
 - `llm-redact init` — writes a starter config interactively and prints
   the env exports for your tools.
+  `init --encrypted-content-passthrough` warns and requires explicit
+  interactive risk acceptance; headless setup additionally requires
+  `--accept-encrypted-content-risk` (`--yes` alone cannot consent).
 - `llm-redact service install` — runs the proxy at login
   (launchd/systemd user unit).
 - `llm-redact plugin install claude|codex|opencode|cursor` — the

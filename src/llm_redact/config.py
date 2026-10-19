@@ -1141,6 +1141,31 @@ class ConfigError(ValueError):
     pass
 
 
+ENCRYPTED_CONTENT_RISK_WARNING = (
+    "WARNING: encrypted_content_passthrough globally skips scalar values named"
+    " encrypted_content outside protected arbitrary-user-data contexts. This forwards possible"
+    " plaintext unscanned and bypasses regex, NER, deny, block, and warn handling for those"
+    " values. The field name does not prove encryption or origin. The provider can decrypt"
+    " genuine encrypted state."
+)
+
+
+def validate_encrypted_content_passthrough(detection: DetectionConfig) -> None:
+    """Require real booleans and explicit consent before this scan opt-out activates.
+
+    Shared with startup so programmatically constructed configs cannot bypass
+    the file parser's consent gate. Errors never include the supplied values.
+    """
+    for key in ("encrypted_content_passthrough", "acknowledge_encrypted_content_risk"):
+        if not isinstance(getattr(detection, key), bool):
+            raise ConfigError(f"[detection] {key} must be a boolean (true/false, unquoted)")
+    if detection.encrypted_content_passthrough and not detection.acknowledge_encrypted_content_risk:
+        raise ConfigError(
+            ENCRYPTED_CONTENT_RISK_WARNING
+            + " Set [detection] acknowledge_encrypted_content_risk = true to accept this risk."
+        )
+
+
 _CUSTOM_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}\Z")
 
 
@@ -2783,6 +2808,8 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
             "deny_strings",
             "mcp",
             "binary_uploads",
+            "encrypted_content_passthrough",
+            "acknowledge_encrypted_content_risk",
         },
         "[detection]",
     )
@@ -2984,7 +3011,12 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         deny_strings=deny_strings,
         mcp_exempt_servers=mcp_exempt_servers,
         binary_uploads=binary_uploads,
+        encrypted_content_passthrough=detection_raw.get("encrypted_content_passthrough", False),
+        acknowledge_encrypted_content_risk=detection_raw.get(
+            "acknowledge_encrypted_content_risk", False
+        ),
     )
+    validate_encrypted_content_passthrough(detection)
 
     rehydration_raw = raw.get("rehydration", {})
     _require_keys(rehydration_raw, {"fuzzy"}, "[rehydration]")

@@ -302,6 +302,10 @@ class DetectionConfig:
     # logged; "refuse" answers 400. Under a credential the proxy holds a
     # binary file part is always refused.
     binary_uploads: str = "forward"
+    # Global scalar-field scan opt-out; acknowledgement is checked before
+    # activation because a field name cannot establish encryption or origin.
+    encrypted_content_passthrough: bool = False
+    acknowledge_encrypted_content_risk: bool = False
 
 
 BINARY_UPLOAD_MODES = ("forward", "refuse")

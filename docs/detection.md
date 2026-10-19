@@ -7,6 +7,44 @@ models. The full, current rule list with per-rule comments is in
 scored and gated is in [assurance.md](assurance.md) and the benchmark
 section of the [README](../README.md#benchmark-and-live-validation).
 
+## Encrypted-content passthrough (opt-in)
+
+By default, `encrypted_content` strings are scanned like other content.
+Detector collisions can therefore rewrite ciphertext or refuse a request
+that carries it. To preserve opaque protocol fields when replaying provider
+responses, you can opt into a structural-key exemption:
+
+```toml
+[detection]
+# WARNING: plaintext under this key can bypass detection and scan capture.
+# Enable only after accepting the risk described below; both default false.
+# encrypted_content_passthrough = true
+# acknowledge_encrypted_content_risk = true
+```
+
+Both settings must be `true` to enable it. For a new configuration,
+`llm-redact init --encrypted-content-passthrough` displays the warning and
+requires explicit interactive acceptance. Headless setup also requires
+`--accept-encrypted-content-risk`; `--yes` alone cannot give consent.
+
+The exemption is equivalent to adding `encrypted_content` to the scalar
+structural-key skip policy across supported JSON protocol walks. Skipped
+values are preserved on replay and bypass regex rules, NER, deny strings,
+block/warn policy and scan capture. The exemption is selected by field name alone:
+the proxy does not authenticate provider origin or verify encryption
+with a key. Plaintext placed under that name can therefore reach the
+provider unscanned.
+
+Known caller-data contexts such as `metadata`, tool results and documents
+still scan every string, including `encrypted_content`. Objects and arrays
+under that key still recurse; outside protected caller-data contexts, a
+nested scalar also named `encrypted_content` is skipped. Uploaded DATA
+(full-string upload content) keeps its scan. This option does not establish
+that a value is valid Fernet or any other encryption format.
+
+While enabled, the coverage opt-out remains visible at startup, in
+`/status`, `llm-redact status` and `llm-redact doctor`.
+
 ## The built-in rules
 
 Emails, IPv4 and IPv6 addresses (both parser-validated; IPv6 additionally

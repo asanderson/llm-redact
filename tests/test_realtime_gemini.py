@@ -233,7 +233,9 @@ def test_snake_case_messages_skip_enums_and_take_the_note() -> None:
         seen.append(text)
         return str(ctx.redactor.redact_text(text))
 
-    spying = SimpleNamespace(redactor=SimpleNamespace(redact_text=spy))
+    spying = SimpleNamespace(
+        redactor=SimpleNamespace(redact_text=spy, encrypted_content_passthrough=False)
+    )
     message = {
         "setup": {
             "model": "projects/p/locations/l/publishers/google/models/m",

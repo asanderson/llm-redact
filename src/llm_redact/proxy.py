@@ -73,6 +73,7 @@ from llm_redact.authorization import (
 )
 from llm_redact.config import (
     DEFAULT_MAP_WRITE_WAIT_SECONDS,
+    ENCRYPTED_CONTENT_RISK_WARNING,
     RDBMS_BACKENDS,
     RESTART_ONLY_KEYS,
     Config,
@@ -90,6 +91,7 @@ from llm_redact.config import (
     resolve_config_path,
     resolve_credentials,
     unsupported_plugin_capabilities,
+    validate_encrypted_content_passthrough,
 )
 from llm_redact.connections import CAUSES as CONNECTION_CLOSE_CAUSES
 from llm_redact.connections import EventStream, LiveConnections, recheck_interval
@@ -894,6 +896,7 @@ def _build_detection(
     that may download model files). Raises what the builds raise (an unknown
     rule name, a bad custom regex, a missing NER extra, a model the model
     policy refuses) and touches no state of the proxy: safe on any thread."""
+    validate_encrypted_content_passthrough(detection)
     if startup:
         detectors = build_detectors(detection, startup=True, model_policy=model_policy)
     else:
@@ -1021,6 +1024,7 @@ class ProxyState:
         upstream_transport: httpx.AsyncBaseTransport | None,
         config_path: Path | None = None,
     ) -> None:
+        validate_encrypted_content_passthrough(config.detection)
         self.config = config
         self.config_path = config_path
         self.started_at = time.time()
@@ -1061,6 +1065,8 @@ class ProxyState:
             config.detection, startup=True, model_policy=self.model_policy
         )
         _log_ner_warnings(config.detection, self.detection_snapshot.detectors)
+        if config.detection.encrypted_content_passthrough:
+            logger.warning("%s", ENCRYPTED_CONTENT_RISK_WARNING)
         # Whether this process started running the llm backend: the one
         # startup fact a reload may need that the running config does not
         # keep (a reload may stop the backend). Written here only, read by
@@ -1147,9 +1153,13 @@ class ProxyState:
             counts=self.detection_counts,
             modes=self.detection_snapshot.modes,
             warn_counts=self.warn_counts,
+            encrypted_content_passthrough=config.detection.encrypted_content_passthrough,
         )
         self.rehydrator = Rehydrator(
-            self.vault, fuzzy=config.rehydration.fuzzy, counts=self.rehydration_counts
+            self.vault,
+            fuzzy=config.rehydration.fuzzy,
+            counts=self.rehydration_counts,
+            encrypted_content_passthrough=config.detection.encrypted_content_passthrough,
         )
         # A vault manager without a durable response map (the in-memory one)
         # passes no lookup: a lookup that always answers "unknown" would be
@@ -1537,9 +1547,13 @@ class ProxyState:
             warn_counts=self.warn_counts,
             added_deny=overlay.deny if overlay is not None else None,
             final_blocks=overlay.final_blocks if overlay is not None else frozenset(),
+            encrypted_content_passthrough=detection.detection.encrypted_content_passthrough,
         )
         rehydrator = Rehydrator(
-            vault, fuzzy=self.config.rehydration.fuzzy, counts=self.rehydration_counts
+            vault,
+            fuzzy=self.config.rehydration.fuzzy,
+            counts=self.rehydration_counts,
+            encrypted_content_passthrough=detection.detection.encrypted_content_passthrough,
         )
         return RequestContext(session_id, vault, redactor, rehydrator, sealed=sealed)
 
@@ -1560,6 +1574,7 @@ class ProxyState:
             warn_counts=self.warn_counts,
             added_deny=overlay.deny,
             final_blocks=overlay.final_blocks,
+            encrypted_content_passthrough=detection.detection.encrypted_content_passthrough,
         )
         return RequestContext(ctx.session_id, ctx.vault, redactor, ctx.rehydrator)
 
@@ -1827,7 +1842,9 @@ class ProxyState:
                 return candidate
         return None
 
-    def listing_restorers(self, object_ids: Sequence[str]) -> dict[str, Rehydrator | None]:
+    def listing_restorers(
+        self, object_ids: Sequence[str], *, encrypted_content_passthrough: bool = False
+    ) -> dict[str, Rehydrator | None]:
         """How each listed object is delivered, for one listing: an id ABSENT
         from the answer stays as this request's own session delivers it (the
         router named no session for it); ``None`` — the item is delivered
@@ -1839,7 +1856,9 @@ class ProxyState:
         session the durable map records the object in (a session pruned
         since the object was created and recreated with new values: its
         placeholders are not the object's — or the check itself failed); a
-        rehydrator — restored in the named session."""
+        rehydrator — restored in the named session. The passthrough policy
+        belongs to the request, not the live config: a reload while it
+        awaits upstream must not change how its opaque fields are delivered."""
         named, unanswered = self._listing_sessions(object_ids)
         restorers: dict[str, Rehydrator | None] = dict.fromkeys(unanswered)
         if not named:
@@ -1852,7 +1871,9 @@ class ProxyState:
                 continue
             if session_id not in rehydrators:
                 try:
-                    rehydrators[session_id] = self._existing_session_rehydrator(session_id)
+                    rehydrators[session_id] = self._existing_session_rehydrator(
+                        session_id, encrypted_content_passthrough=encrypted_content_passthrough
+                    )
                 except Exception as exc:  # noqa: BLE001 — a vault read that failed
                     # The named owner's session cannot be read: its items go
                     # out as the provider sent them, never what this
@@ -1935,7 +1956,9 @@ class ProxyState:
             )
             return {}
 
-    def _existing_session_rehydrator(self, session_id: str) -> Rehydrator | None:
+    def _existing_session_rehydrator(
+        self, session_id: str, *, encrypted_content_passthrough: bool = False
+    ) -> Rehydrator | None:
         """A rehydrator over ``session_id`` when it exists and holds
         mappings, else None — never creating it."""
         has_session = getattr(self.vault_manager, "has_session", None)
@@ -1945,7 +1968,10 @@ class ProxyState:
         if len(vault) == 0:
             return None
         return Rehydrator(
-            vault, fuzzy=self.config.rehydration.fuzzy, counts=self.rehydration_counts
+            vault,
+            fuzzy=self.config.rehydration.fuzzy,
+            counts=self.rehydration_counts,
+            encrypted_content_passthrough=encrypted_content_passthrough,
         )
 
     # The running detection objects, read through the snapshot: one
@@ -2206,6 +2232,7 @@ class ProxyState:
         # Spent first thing; adopted below only as the build of the
         # [detection] this apply runs (``effective``'s, not ``fresh``'s).
         taken = _spend_prepared(prepared)
+        validate_encrypted_content_passthrough(fresh.detection)
         # Keys inside a hot section that are restart-only all the same (where
         # the llm backend sends scanned text, and its key): kept from the
         # running configuration, or the reload refused. Every restart-only
@@ -2236,9 +2263,13 @@ class ProxyState:
             counts=self.detection_counts,
             modes=detection.modes,
             warn_counts=self.warn_counts,
+            encrypted_content_passthrough=detection.detection.encrypted_content_passthrough,
         )
         rehydrator = Rehydrator(
-            self.vault, fuzzy=effective.rehydration.fuzzy, counts=self.rehydration_counts
+            self.vault,
+            fuzzy=effective.rehydration.fuzzy,
+            counts=self.rehydration_counts,
+            encrypted_content_passthrough=detection.detection.encrypted_content_passthrough,
         )
 
         adapters = self.adapters
@@ -2315,6 +2346,8 @@ class ProxyState:
         _close_upstream_auths(displaced_auths)
         for warning in effective.routing.warnings:
             logger.warning("routing: %s", warning)
+        if effective.detection.encrypted_content_passthrough:
+            logger.warning("%s", ENCRYPTED_CONTENT_RISK_WARNING)
         logger.info("config reloaded (%d detection rules)", len(detection.detectors))
         # A SIGHUP reload that failed before this apply no longer describes
         # what runs (/status config_reload ``last.superseded``).
@@ -3092,7 +3125,11 @@ async def _stream_rehydrated(
 ) -> AsyncIterator[bytes]:
     method, path, started, detections, warned, audit_token = request_meta
     parser = SSEParser()
-    pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
+    pool = RehydratorPool(
+        ctx.vault,
+        fuzzy=state.config.rehydration.fuzzy,
+        encrypted_content_passthrough=ctx.rehydrator.encrypted_content_passthrough,
+    )
     response_id_seen = False
     objects = (
         _StreamedObjects(object_tracker, method, path, request_body)
@@ -3288,7 +3325,11 @@ async def _stream_rehydrated_eventstream(
     """
     method, path, started, detections, warned, audit_token = request_meta
     parser = EventStreamParser(max_frame_bytes=state.config.max_body_bytes)
-    pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
+    pool = RehydratorPool(
+        ctx.vault,
+        fuzzy=state.config.rehydration.fuzzy,
+        encrypted_content_passthrough=ctx.rehydrator.encrypted_content_passthrough,
+    )
     degraded = False
     status = upstream.status_code  # 502 when the proxy itself cut the stream
     cut = False  # whether it did (a delivery_fault local refusal)
@@ -3615,6 +3656,10 @@ async def _handle_local(
                 "allowed_origins": len(config.allowed_origins),
                 "detection": {
                     "enabled_rules": list(config.detection.enabled),
+                    "encrypted_content_passthrough": config.detection.encrypted_content_passthrough,
+                    "acknowledge_encrypted_content_risk": (
+                        config.detection.acknowledge_encrypted_content_risk
+                    ),
                     # None = all languages; otherwise the active scope and
                     # the enabled rules it leaves unbuilt.
                     "languages": (
@@ -4171,7 +4216,11 @@ async def _stream_rehydrated_ndjson(
     point, so leftovers normally never reach stream close."""
     method, path, started, detections, warned, audit_token = request_meta
     parser = NDJSONParser()
-    pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
+    pool = RehydratorPool(
+        ctx.vault,
+        fuzzy=state.config.rehydration.fuzzy,
+        encrypted_content_passthrough=ctx.rehydrator.encrypted_content_passthrough,
+    )
     status = upstream.status_code  # 502 when the proxy itself cut the stream
     cut = False  # whether it did (a delivery_fault local refusal)
     try:
@@ -5288,6 +5337,7 @@ async def _prefetch_json(
         parsed,
         limit=limit,
         mcp_exempt=frozenset(state.config.detection.mcp_exempt_servers),
+        encrypted_content_passthrough=state.redactor.encrypted_content_passthrough,
     )
     return plan, await prefetch(plan, strings)
 
@@ -5323,6 +5373,7 @@ async def _prefetch_upload(
             forward_binary=_ignore_binary,
         ),
         limit=limit,
+        encrypted_content_passthrough=redactor.encrypted_content_passthrough,
     )
     return plan, await prefetch(plan, strings)
 
@@ -5420,7 +5471,10 @@ async def _inspect_upload(
     if redactor.blocks:
         # The inspector may send a file to a service: a block-mode value in
         # another part or a file name refuses the request before that.
-        reading.require_unblocked(_block_check(redactor, max_body_strings))
+        reading.require_unblocked(
+            _block_check(redactor, max_body_strings),
+            encrypted_content_passthrough=redactor.encrypted_content_passthrough,
+        )
     # A request refused anyway never sends a file to the inspector (which may
     # send it off the machine): no upstream configured, a routed local
     # refusal, a START row [audit] required cannot commit.
@@ -7943,7 +7997,13 @@ def _restore_buffered(
         # session each listed object was created in (its owner's own
         # listing), so those items are restored there; the rest keep what
         # this request's session made of them. Never recorded as ownership.
-        restored = _restore_listing(state, lister, received, raw)
+        restored = _restore_listing(
+            state,
+            lister,
+            received,
+            raw,
+            encrypted_content_passthrough=ctx.rehydrator.encrypted_content_passthrough,
+        )
         if restored is not None:
             raw = restored
 
@@ -8399,7 +8459,12 @@ def _unscanned_body_refused(
 
 
 def _restore_listing(
-    state: ProxyState, lister: ProviderAdapter, upstream_raw: bytes, raw: bytes
+    state: ProxyState,
+    lister: ProviderAdapter,
+    upstream_raw: bytes,
+    raw: bytes,
+    *,
+    encrypted_content_passthrough: bool = False,
 ) -> bytes | None:
     """Restore each listed stored object in the session the router names
     for it (``listing_item_session``); an item the router named no session
@@ -8424,7 +8489,10 @@ def _restore_listing(
         for index, object_id in enumerate(map(lister.listing_item_id, items))
         if object_id is not None
     }
-    by_id = state.listing_restorers(list(dict.fromkeys(listed.values())))
+    by_id = state.listing_restorers(
+        list(dict.fromkeys(listed.values())),
+        encrypted_content_passthrough=encrypted_content_passthrough,
+    )
     restorers = {
         index: by_id[object_id] for index, object_id in listed.items() if object_id in by_id
     }

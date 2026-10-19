@@ -335,6 +335,7 @@ class Redactor:
         final_blocks: frozenset[str] = frozenset(),
         precomputed: PrecomputedTable | None = None,
         recorder: DetectionRecorder | None = None,
+        encrypted_content_passthrough: bool = False,
     ) -> None:
         # The detector list compiled for string-at-a-time detection (same
         # output, gated per string), taken as it is now: plan_for shares the
@@ -381,6 +382,7 @@ class Redactor:
         # detections (with_recorder: a registered scan sink's capture,
         # scan_capture); None records nothing and detects as before.
         self._recorder = recorder
+        self.encrypted_content_passthrough = encrypted_content_passthrough
 
     @property
     def plan(self) -> DetectorPlan:
@@ -452,6 +454,7 @@ class Redactor:
             final_blocks=self._final_blocks,
             precomputed=self._precomputed,
             recorder=self._recorder,
+            encrypted_content_passthrough=self.encrypted_content_passthrough,
         )
 
     def _detect(self, text: str) -> list[Detection]:
@@ -820,4 +823,8 @@ class Redactor:
         return None
 
     def redact_json(self, obj: Any) -> Any:
-        return transform_strings(obj, self.redact_text)
+        return transform_strings(
+            obj,
+            self.redact_text,
+            encrypted_content_passthrough=self.encrypted_content_passthrough,
+        )

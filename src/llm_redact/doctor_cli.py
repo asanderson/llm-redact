@@ -996,6 +996,12 @@ def _check_posture(report: _Report, config: Config) -> None:
 
     opted_out = False
 
+    if config.detection.encrypted_content_passthrough:
+        from llm_redact.config import ENCRYPTED_CONTENT_RISK_WARNING
+
+        opted_out = True
+        report.line("WARN", "posture", ENCRYPTED_CONTENT_RISK_WARNING)
+
     warn_rules = sorted(name for name, mode in config.detection.modes if mode == "warn")
     if warn_rules:
         opted_out = True

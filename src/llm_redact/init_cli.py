@@ -12,12 +12,14 @@ import argparse
 import sys
 
 from llm_redact.config import (
+    ENCRYPTED_CONTENT_RISK_WARNING,
     Config,
     VaultConfig,
     default_config_path,
     resolve_config_path,
 )
 from llm_redact.config_write import emit_config_toml, write_config_atomic
+from llm_redact.detection.engine import DetectionConfig
 
 TOOL_EXPORTS: dict[str, tuple[str, str]] = {
     # tool name -> (env var, one-line description). Shared with the
@@ -60,6 +62,21 @@ def _ask_yes_no(prompt: str, default: bool) -> bool:
 
 def run_init(args: argparse.Namespace) -> int:
     interactive = not args.yes and sys.stdin.isatty()
+    encrypted_content_passthrough = getattr(args, "encrypted_content_passthrough", False)
+    if encrypted_content_passthrough:
+        print(ENCRYPTED_CONTENT_RISK_WARNING)
+        accepted = getattr(args, "accept_encrypted_content_risk", False)
+        if not accepted and interactive:
+            try:
+                accepted = _ask_yes_no("Accept this encrypted_content scan-bypass risk?", False)
+            except EOFError:
+                accepted = False
+        if not accepted:
+            print(
+                "Risk not accepted; no config written. Pass --accept-encrypted-content-risk"
+                " only after reviewing the warning."
+            )
+            return 1
 
     tools = [t.strip() for t in (args.tools or "").split(",") if t.strip()]
     unknown = [t for t in tools if t not in TOOL_EXPORTS]
@@ -129,6 +146,10 @@ def run_init(args: argparse.Namespace) -> int:
 
     config = Config(
         port=port,
+        detection=DetectionConfig(
+            encrypted_content_passthrough=encrypted_content_passthrough,
+            acknowledge_encrypted_content_risk=encrypted_content_passthrough,
+        ),
         vault=VaultConfig(backend=vault, encryption=encryption),
     )
 

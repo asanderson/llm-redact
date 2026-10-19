@@ -488,7 +488,10 @@ class OpenAIRealtimeWs(WsAdapter):
         # the provider must receive unredacted — stripped before the walk,
         # restored after (nothing in them is counted).
         redacted = transform_strings(
-            strip_mcp_tools(payload), ctx.redactor.redact_text, skip_keys=_REALTIME_STRUCTURAL_KEYS
+            strip_mcp_tools(payload),
+            ctx.redactor.redact_text,
+            skip_keys=_REALTIME_STRUCTURAL_KEYS,
+            encrypted_content_passthrough=ctx.redactor.encrypted_content_passthrough,
         )
         redacted = restore_mcp_tools(payload, redacted)
         if inject_note:
@@ -547,6 +550,7 @@ class OpenAIRealtimeWs(WsAdapter):
         return transform_strings(
             obj,
             pool.rehydrate_whole,
+            encrypted_content_passthrough=pool.encrypted_content_passthrough,
             key_overrides={"arguments": lambda s: pool.rehydrate_whole(s, json_source=True)},
         )
 
@@ -747,7 +751,10 @@ class GeminiLiveWs(WsAdapter):
             return _unparsed_frame(data, require_json)
         payload, was_binary = parsed
         redacted = transform_strings(
-            payload, ctx.redactor.redact_text, skip_keys=_GEMINI_LIVE_STRUCTURAL_KEYS
+            payload,
+            ctx.redactor.redact_text,
+            skip_keys=_GEMINI_LIVE_STRUCTURAL_KEYS,
+            encrypted_content_passthrough=ctx.redactor.encrypted_content_passthrough,
         )
         if inject_note:
             self._inject_note(redacted)
@@ -860,12 +867,25 @@ class GeminiLiveWs(WsAdapter):
         # walk and fed to their channels.
         if not isinstance(payload.get("serverContent"), dict):
             if isinstance(payload.get("toolCall"), dict):
-                return [_dump_frame(transform_strings(payload, pool.rehydrate_whole), was_binary)]
+                return [
+                    _dump_frame(
+                        transform_strings(
+                            payload,
+                            pool.rehydrate_whole,
+                            encrypted_content_passthrough=pool.encrypted_content_passthrough,
+                        ),
+                        was_binary,
+                    )
+                ]
             # setupComplete / usageMetadata / goAway / sessionResumptionUpdate
             # and unknown shapes: pass through.
             return [data]
 
-        walked = transform_strings(self._hold_streamed(payload), pool.rehydrate_whole)
+        walked = transform_strings(
+            self._hold_streamed(payload),
+            pool.rehydrate_whole,
+            encrypted_content_passthrough=pool.encrypted_content_passthrough,
+        )
         server_content = walked["serverContent"]
         model_turn = server_content.get("modelTurn")
         if isinstance(model_turn, dict):
@@ -1187,6 +1207,7 @@ class RealtimeRelay:
         "close_code",
         "close_reason",
         "detectors",
+        "encrypted_content_passthrough",
         "grant",
         "modes",
         "provider",
@@ -1209,6 +1230,7 @@ class RealtimeRelay:
         subject: str | None = None,
         grant: str | None = None,
         recheck: "ConnectionRecheck | None" = None,
+        encrypted_content_passthrough: bool = False,
     ) -> None:
         self.provider = provider
         self.provider_config = provider_config
@@ -1216,6 +1238,7 @@ class RealtimeRelay:
         self.detectors = detectors
         self.allowlist = allowlist
         self.modes = modes
+        self.encrypted_content_passthrough = encrypted_content_passthrough
         self.subject = subject
         self.grant = grant
         self.recheck = recheck
@@ -1247,6 +1270,8 @@ class RealtimeRelay:
             detection.detectors is not self.detectors
             or detection.allowlist is not self.allowlist
             or detection.modes is not self.modes
+            or detection.detection.encrypted_content_passthrough
+            != self.encrypted_content_passthrough
         ):
             return "[detection] policy"
         return None
@@ -1561,6 +1586,7 @@ async def ws_handle(websocket: WebSocket) -> None:
         subject=admission.subject,
         grant=getattr(admission, "grant", None),
         recheck=getattr(admission, "recheck", None),
+        encrypted_content_passthrough=detection.detection.encrypted_content_passthrough,
     )
     state.realtime_relays.add(relay)
     state.connections.track(relay)
@@ -1685,10 +1711,15 @@ async def _relay(
             warn_counts=state.warn_counts,
             added_deny=overlay.deny if overlay is not None else None,
             final_blocks=overlay.final_blocks if overlay is not None else frozenset(),
+            encrypted_content_passthrough=relay.encrypted_content_passthrough,
         ),
         static_ctx.rehydrator,
     )
-    pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
+    pool = RehydratorPool(
+        ctx.vault,
+        fuzzy=state.config.rehydration.fuzzy,
+        encrypted_content_passthrough=relay.encrypted_content_passthrough,
+    )
 
     upstream_path = _request_path(websocket.scope, path)
     http_url = _upstream_http_url(
@@ -2376,6 +2407,7 @@ async def _prefetch_frame(
             require_json=require_json,
         ),
         limit=limit,
+        encrypted_content_passthrough=ctx.redactor.encrypted_content_passthrough,
     )
     return plan, await prefetch(plan, strings)
 

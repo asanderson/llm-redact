@@ -318,7 +318,11 @@ def _request_line_keys(path: str, parsed: multipart.Multipart) -> frozenset[str]
 
 
 def _redact_line(
-    obj: dict[str, Any], redact: Callable[[str], str], request_keys: frozenset[str]
+    obj: dict[str, Any],
+    redact: Callable[[str], str],
+    request_keys: frozenset[str],
+    *,
+    encrypted_content_passthrough: bool = False,
 ) -> Any:
     """One uploaded JSONL line redacted string by string (``redact``: the
     redactor's ``redact_text``, or the proxy's block check ahead of it):
@@ -326,7 +330,9 @@ def _redact_line(
     request walk, ``Redactor.redact_json``), every other value as data (no
     skip set). Keys are never touched."""
     return {
-        key: transform_strings({key: value}, redact)[key]
+        key: transform_strings(
+            {key: value}, redact, encrypted_content_passthrough=encrypted_content_passthrough
+        )[key]
         if key in request_keys
         else transform_all_strings(value, redact)
         for key, value in obj.items()
@@ -480,7 +486,9 @@ class PartsReading(NamedTuple):
             ):
                 raise UnredactableRequest(_LINE_NOT_OBJECT)
 
-    def require_unblocked(self, check: Callable[[str], str]) -> None:
+    def require_unblocked(
+        self, check: Callable[[str], str], *, encrypted_content_passthrough: bool = False
+    ) -> None:
         """``check`` — the proxy's: it raises BlockedRequest for what a
         block-mode rule refuses, or TooManyStrings — run over every string
         the part loop will redact, as it reads them: each part's file names,
@@ -501,7 +509,12 @@ class PartsReading(NamedTuple):
                 for line in part.content.split(b"\n"):
                     obj = _parse_request_line(line)[0]
                     if obj is not None:
-                        _redact_line(obj, check, self.request_keys)
+                        _redact_line(
+                            obj,
+                            check,
+                            self.request_keys,
+                            encrypted_content_passthrough=encrypted_content_passthrough,
+                        )
             elif reading.metadata is not None:
                 transform_all_strings(reading.metadata.metadata, check)
 
@@ -1263,6 +1276,7 @@ class OpenAIAdapter(ProviderAdapter):
         restored = transform_strings(
             body,
             rehydrator.rehydrate_text,
+            encrypted_content_passthrough=rehydrator.encrypted_content_passthrough,
             key_overrides={"arguments": rehydrator.rehydrate_json_source_text},
         )
         # A vector store's or container's `name`, and a fine-tuning job's
@@ -1506,7 +1520,12 @@ class OpenAIAdapter(ProviderAdapter):
                     raise UnredactableRequest(_LINE_NOT_OBJECT)
                 out.append(line)  # blank/binary/unparseable: byte-identical
                 continue
-            redacted = _redact_line(obj, redactor.redact_text, request_keys)
+            redacted = _redact_line(
+                obj,
+                redactor.redact_text,
+                request_keys,
+                encrypted_content_passthrough=redactor.encrypted_content_passthrough,
+            )
             changed = redacted != obj
             if not changed and not duplicate_keys:
                 # Unchanged — and no repeated key whose earlier occurrence

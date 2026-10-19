@@ -196,6 +196,9 @@ own answer decides whether the page may read a response).
   top-level `instances`/`parameters` (arbitrary custom-model input) — a
   metadata label or a feature column named `id`, `name` or `type` is the
   caller's data, not protocol.
+  The opt-in `encrypted_content` exemption below adds that name to the
+  scalar structural skip policy; the protected caller-data contexts and
+  object/array recursion still apply.
 - A request path with a `.`/`..` segment or an empty segment (`//`), in
   any spelling, is refused 400 before admission and any upstream contact,
   and another spelling of a recognized route (a trailing `/`, another
@@ -605,6 +608,24 @@ conscious decision, and each is surfaced rather than silent:
   report its reading incomplete then — was never scanned; the inspector
   (and any extraction service it uses) sees the file. Anything not read
   completely keeps the rules above.
+- `[detection] encrypted_content_passthrough = true` together with
+  `acknowledge_encrypted_content_risk = true` exempts scalar
+  `encrypted_content` values across supported JSON protocol walks. Both
+  default to `false`: without the opt-in, detector collisions can still
+  rewrite ciphertext or refuse a request containing it. Enabling preserves
+  the opaque field on replay, but also lets plaintext under that name
+  bypass regex/NER detection, deny strings, block/warn policy and scan
+  capture. The proxy neither authenticates the provider origin of the
+  field nor verifies encryption with a key (including Fernet validity).
+  Known caller-data contexts (`metadata`, tool results, documents, …)
+  remain fully scanned, and an object or array under the name is still
+  walked; a nested scalar with the same name outside those protected
+  contexts remains exempt. Uploaded DATA retains its full-string scan.
+  The warning remains visible at startup, in `/status`, `llm-redact status`
+  and `doctor`. `init --encrypted-content-passthrough` requires explicit
+  interactive acceptance, or `--accept-encrypted-content-risk` for
+  headless setup; `--yes` alone does not accept this risk. See
+  [detection.md](detection.md#encrypted-content-passthrough-opt-in).
 - `[detection.mcp] exempt_servers` exempts MCP content blocks addressed
   to named servers. Result blocks that cannot be correlated to an exempt
   server stay redacted (fail-closed).

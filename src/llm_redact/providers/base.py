@@ -432,7 +432,9 @@ class UploadReading(Protocol):
         """Each BINARY file part, with its position among the parts."""
         ...
 
-    def require_unblocked(self, check: Callable[[str], str]) -> None:
+    def require_unblocked(
+        self, check: Callable[[str], str], *, encrypted_content_passthrough: bool = False
+    ) -> None:
         """``check`` run over every string ``redact_multipart`` will
         redact, as it reads them (it raises what refuses the request: a
         block-mode value) — before any binary part is inspected."""

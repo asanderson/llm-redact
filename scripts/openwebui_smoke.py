@@ -8,6 +8,7 @@ that project's containers/volumes. Uses stdlib; no WebUI dependency in the wheel
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import secrets
@@ -25,6 +26,25 @@ ROOT = Path(__file__).resolve().parents[1]
 EMAIL = "jane.doe@corp.example"
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def seed_stale_provider(database: str) -> None:
+    """Seed the pinned WebUI config schema in this disposable test project only."""
+    import json
+    import sqlite3
+
+    stale = ["http://fake-upstream:9999/v1"]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO config (key, value, updated_at) VALUES (?, ?, 1) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            ("openai.api_base_urls", json.dumps(stale)),
+        )
+        saved = connection.execute(
+            "SELECT value FROM config WHERE key = ?", ("openai.api_base_urls",)
+        ).fetchone()
+        if saved is None or json.loads(saved[0]) != stale:
+            raise RuntimeError("The stale provider URL was not saved in WebUI's database")
 
 
 def read_sse(lines: Iterable[bytes]) -> str:
@@ -102,6 +122,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--proxy-image", default="llm-redact:ci")
     parser.add_argument("--fake-image", default="llm-redact-fake:ci")
+    parser.add_argument(
+        "--browser", action="store_true", help="Also exercise Chromium (Playwright required)"
+    )
+    parser.add_argument("--artifacts-dir", type=Path, help="Synthetic-only browser screenshots")
     args = parser.parse_args()
     if shutil.which("docker") is None:
         parser.error("Docker with Compose v2 is required")
@@ -193,13 +217,34 @@ def main() -> None:
             proxy = address("proxy", "8787")
             wait_ready(proxy + "/__llm-redact/healthz")
             check_reply(completion(base, token, "Repeat «EMAIL_001» and «AWS_KEY_001»", False))
+            # A reachable direct-provider URL would bypass redaction if persisted
+            # configuration incorrectly displaced the supplied environment policy.
+            compose(
+                "exec",
+                "-T",
+                "open-webui",
+                "python",
+                "-c",
+                inspect.getsource(seed_stale_provider)
+                + "\nseed_stale_provider('/app/backend/data/webui.db')",
+            )
             compose("restart", "open-webui")
             wait_ready(base + "/health")
             token = request_json(base + "/api/v1/auths/signin", credentials)["token"]
+            provider_config = request_json(base + "/openai/config", token=token)
+            if provider_config["OPENAI_API_BASE_URLS"] != ["http://proxy:8787/v1"]:
+                raise RuntimeError("A saved provider URL bypassed the configured proxy")
             if request_json(base + "/api/v1/tasks/config", token=token)["ENABLE_TITLE_GENERATION"]:
                 raise RuntimeError("A runtime setting overrode environment policy after restart")
             check_reply(completion(base, token, prompt, False))
-            print("PASS: generated task, persistent vault, restart configuration", flush=True)
+            check_upstream(compose("logs", "--no-color", "fake-upstream"))
+            print("PASS: generated task, persistent vault, stale provider URL ignored", flush=True)
+
+            if args.browser:
+                from openwebui_browser_smoke import run_browser_smoke
+
+                run_browser_smoke(base, credentials, prompt, (EMAIL, AWS_KEY), args.artifacts_dir)
+                check_upstream(compose("logs", "--no-color", "fake-upstream"))
 
             # OFFLINE_MODE is not a firewall: verify the internal-only network too.
             compose(

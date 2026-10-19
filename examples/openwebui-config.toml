@@ -1,0 +1,14 @@
+# Local, single-user Open WebUI: the backend sends /v1/... to this upstream.
+# For a local OpenAI-compatible server, change this root URL. From a
+# container, 127.0.0.1 is NOT the host or a different model container.
+[providers.openai]
+upstream_base_url = "https://api.openai.com"
+
+[vault]
+backend = "sqlite"
+session = "openwebui-local"
+session_mode = "static"
+
+[detection]
+# This recipe supports text chat, not opaque binary uploads.
+binary_uploads = "refuse"

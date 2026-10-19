@@ -2193,6 +2193,11 @@ providers refuse to start.
 
 ### Added
 
+- Optional local Open WebUI text-chat deployment: a standalone Compose
+  profile, isolated backend network, synthetic OpenAI-compatible demo,
+  installation/privacy guide, and real-WebUI container smoke coverage.
+  Core runtime dependencies and default startup are unchanged.
+
 - `allowed_origins` (top-level, restart-only, default empty): exact browser origins
   the proxy serves across origins, over HTTP and realtime WebSockets. A listed page
   can read restored values back and spend the proxy's credentials, so `doctor` warns

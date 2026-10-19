@@ -688,7 +688,7 @@ jobs:
   container-docker:
     name: container (docker)
     runs-on: ubuntu-latest
-    needs: test
+    # Independent integration gate: start image checks alongside the test matrix.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -696,6 +696,9 @@ jobs:
       - run: docker build --target runtime -t llm-redact:ci .
       - run: docker build --target fake-upstream -t llm-redact-fake:ci .
       - run: ./scripts/container_smoke.sh docker llm-redact:ci llm-redact-fake:ci
+      - name: Optional Open WebUI (synthetic data, real backend)
+        timeout-minutes: 15
+        run: python3 scripts/openwebui_smoke.py
 
   container-ner:
     # The -ner image (stock image + the hf and gliner extras on a CPU-only

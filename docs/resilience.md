@@ -21,6 +21,14 @@ secret.* Under fault that becomes three commitments, in priority order:
 These are enforced, not aspirational — each row below names the suite that
 pins it.
 
+The optional [Open WebUI recipe](openwebui.md) adds a client-side failure
+boundary: a stopped proxy must make a new chat fail, without a direct
+provider fallback. Its container smoke checks that behavior and seeds an
+old direct-provider URL in WebUI's database before restart; the supplied
+environment must still select the proxy. Backend JSON/SSE and rendered
+browser streaming are exercised separately. This does not make WebUI's
+raw history or backups part of the proxy's metadata-only outputs.
+
 ## Upstream transport faults
 
 | Fault | Behavior | Pinned by |

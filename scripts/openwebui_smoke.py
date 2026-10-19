@@ -225,7 +225,11 @@ def main() -> None:
                 "open-webui",
                 "python",
                 "-c",
-                inspect.getsource(seed_stale_provider)
+                "import json, urllib.request\n"
+                "inventory = json.load(urllib.request.urlopen("
+                "'http://fake-upstream:9999/v1/models', timeout=5))\n"
+                "assert inventory['data'][0]['id'] == 'fake-openwebui'\n"
+                + inspect.getsource(seed_stale_provider)
                 + "\nseed_stale_provider('/app/backend/data/webui.db')",
             )
             compose("restart", "open-webui")

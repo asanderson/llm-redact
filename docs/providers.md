@@ -25,6 +25,23 @@ selected by rules with fallback chains, cooldowns and monthly budgets
 is the routing layer of the llm-redact-pro package (the llm-redact-pro
 routing guide).
 
+## Optional Open WebUI client
+
+The [Open WebUI recipe](openwebui.md) uses its backend as an
+OpenAI-compatible Chat Completions client: `http://proxy:8787/v1`, model
+discovery through `/v1/models`, and JSON/SSE chat through
+`/v1/chat/completions`. The backend holds the provider key and sends it
+through the proxy; browser direct connections and the separate Ollama
+connector stay disabled. No `allowed_origins` grant is needed.
+
+For a local model server, change the proxy's upstream root URL rather
+than WebUI's proxy connection; see the recipe's
+[container addressing guidance](openwebui.md#local-openai-compatible-models).
+Manual model IDs can replace discovery, but neither discovery nor the
+proxy's wider provider matrix proves that WebUI supports a provider's
+native API, hostname-based conversions, or other API modes. Verify the
+selected model and text-chat path on your deployment.
+
 ## Anthropic, OpenAI, Gemini, Ollama (env-var providers)
 
 These need no configuration — point the tool's base-URL variable at the

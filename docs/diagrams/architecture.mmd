@@ -1,4 +1,6 @@
 %% System data flow: what leaves the machine and what never does.
+%% Optional Open WebUI is a separate third-party backend client with raw local
+%% history. Its browser/Caddy hop and container networks are in openwebui.mmd.
 %% The dashed "Pro" boxes mark what the separately-installed llm-redact-pro
 %% package supplies: the browser dashboard, the access gate (named users,
 %% per-user keys, seats — the core has no authentication code) and offline
@@ -17,7 +19,7 @@
 flowchart LR
     subgraph machine["Your machine — the proxy binds 127.0.0.1 by default"]
         direction LR
-        subgraph tool["Agentic tool — Claude Code, Codex CLI, OpenCode,<br/>Cursor, or anything speaking a provider API"]
+        subgraph tool["Client — tool or optional Open WebUI backend<br/>Agent plugins apply to tools only"]
             plugins["llm-redact plugin<br/>slash commands:<br/>/llm-redact:status · :recent ·<br/>:preview · :config-edit · ..."]
         end
         models[("NER model files — local<br/>Hugging Face cache or folders<br/>from llm-redact models pull")]
@@ -35,7 +37,7 @@ flowchart LR
         s3[("audit log + object-store sinks<br/>[audit.s3] aws / MinIO / Ceph / GCS,<br/>[audit.azure] Azure Blob — default off;<br/>metadata rows only")]
     end
 
-    tool -- "① request<br/>(may contain secrets)" ---> proxy
+    tool -- "① raw request" ---> proxy
     proxy == "② placeholders only" ==> provider
     provider == "③ response with<br/>placeholders" ==> proxy
     proxy -- "④ restored response" ---> tool

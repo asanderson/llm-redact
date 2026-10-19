@@ -113,6 +113,31 @@ attached to the index (no `.sig` tag), so it takes a cosign release that
 verifies Sigstore bundle signatures: cosign 3 verifies it as shown; cosign
 2.6 needs `--new-bundle-format` added.
 
+### Optional local Open WebUI
+
+The separate [Open WebUI recipe](openwebui.md) adds text chat for one
+trusted local user. It starts only with `compose.openwebui.yaml` and the
+explicit `webui` profile; the default demo, native services and Helm
+manifests do not start it.
+
+A fixed Caddy frontend publishes `127.0.0.1:3000` and forwards HTTP and
+WebSockets to the internal-only WebUI backend. The backend calls
+`http://proxy:8787/v1`; only the proxy joins the provider-egress network.
+The proxy's own host port remains loopback-only. The
+[topology diagram](openwebui.md#deployment-topology) shows both networks
+and the separate WebUI/vault volumes. WebUI receives raw prompts and
+restored answers: include both volumes in private backup/retention plans.
+The example pins images, disables persisted connection defaults and
+alternate integrations, and refuses binary uploads; it supplies no
+multiuser proxy isolation. Do not add a browser `allowed_origins`
+exception: model requests originate from the WebUI backend.
+
+Follow the recipe's [target-machine acceptance checks](openwebui.md#verify-your-deployment)
+before connecting a real provider, and rerun the
+[backend/browser smoke](openwebui.md#automated-verification) when changing
+images or network/connection settings. A new image may migrate WebUI's
+database, so back up both volumes and restore matching data for rollback.
+
 ### Health probes
 
 Orchestrators should probe the DB-free liveness endpoint, not `/status`

@@ -264,6 +264,25 @@ only. The NER bench's `--latency` run is report only too until a
 configuration records `[<config>.latency]` ceilings, and none does: a
 model's time per string depends on the CPU the report names ([ner-bench.md](ner-bench.md#latency---latency)).
 
+## Optional frontend deployment evidence
+
+The optional [Open WebUI harness](security-testing.md#optional-open-webui-integration)
+checks an integration boundary outside the proxy's core mutation scope.
+It observes both sides of a synthetic chat: the rendered browser answer
+must contain restored canaries and the fake provider's request log must
+contain only their placeholders. Backend JSON/SSE checks independently
+exercise the HTTP API, tasks and restart persistence.
+
+The stale-configuration case starts from an actual database row naming a
+reachable direct provider, then checks restart still uses the proxy. A
+stopped-proxy case checks no completion falls back to that provider.
+A network probe checks backend egress confinement and a browser checks
+the WebUI Socket.IO upgrade through Caddy. These are fixture deployment
+claims, not a guarantee about every WebUI integration, every image, a
+real provider account, or a user's machine. Run the
+[target-machine acceptance checks](openwebui.md#verify-your-deployment)
+before using real data and repeat the smoke when pins or topology change.
+
 ## Reproducible builds
 
 Two builds of the same tree under a pinned `SOURCE_DATE_EPOCH` produce

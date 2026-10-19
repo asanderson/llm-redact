@@ -51,6 +51,13 @@ redacted content from surrounding text; length/timing side channels;
 base64-encoded media contents; detection misses on value shapes the rules
 deliberately exclude (bare-digit phone numbers, street addresses).
 
+The optional [Open WebUI recipe](openwebui.md) supports one trusted local
+user's text chat. A recipe regression that sends covered chat directly to
+a provider is within the documented integration boundary. WebUI's own
+history and backups intentionally contain originals, and its account
+login does not supply proxy user isolation; do not treat those as
+metadata-only proxy stores.
+
 ## Hardening quickstart
 
 - Keep the proxy on `127.0.0.1` (the default). Do not bind it to other

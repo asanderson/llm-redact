@@ -10,6 +10,12 @@ llm-redact serve --check   # serve's full startup, minus the socket
 If doctor is green and `serve --check` exits 0, serve will start and a
 `kill -HUP` reload will apply.
 
+For optional Open WebUI login, missing models, ephemeral admin settings,
+container addressing, and browser/streaming checks, start with the
+[WebUI operations guide](openwebui.md#operations-and-troubleshooting).
+Use its synthetic demo to separate frontend/Compose problems from proxy
+or real-provider problems.
+
 ## "the {name} provider is disabled in llm-redact config"
 
 A 502 from the proxy itself (never the upstream): the request matched a

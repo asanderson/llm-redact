@@ -13,6 +13,15 @@ Keep Open WebUI's branding and notices; its
 [license](https://github.com/open-webui/open-webui/blob/v0.12.3/LICENSE)
 has branding conditions. Upgrading either image needs another smoke run.
 
+## Deployment topology
+
+![Optional Open WebUI topology: the browser reaches a fixed loopback Caddy frontend; the internal-only WebUI backend sends raw text to the proxy, which alone has provider egress and returns restored answers; WebUI history and the local vault are sensitive stores](diagrams/openwebui.png)
+
+Static [PNG](diagrams/openwebui.png) · [Mermaid source](diagrams/openwebui.mmd).
+The browser's HTTP and Socket.IO/WebSocket connection ends at WebUI through
+Caddy. The backend's model requests are separate HTTP JSON/SSE requests to
+the proxy; this does not enable the proxy's provider realtime APIs.
+
 ## Prerequisites and first setup
 
 Use Docker with Compose v2 and Linux containers (Linux or Docker Desktop
@@ -143,7 +152,7 @@ Pro encryption and identity features.
 | Optionality | Only the explicit Compose file/profile starts WebUI. |
 | Network | WebUI is on an internal network. The proxy has provider egress; a fixed Caddy frontend connects the browser to WebUI. |
 | Host exposure | UI `127.0.0.1:3000`; proxy `127.0.0.1:8787`. Change the numeric ports in the private env file if occupied. |
-| Configuration | `ENABLE_PERSISTENT_CONFIG=false` prevents old database settings from replacing supplied defaults after restart. It is not a runtime admin lock. |
+| Configuration | `ENABLE_PERSISTENT_CONFIG=false` makes startup use the supplied environment even when the WebUI database contains an old direct-provider URL. It is not a runtime admin lock. |
 | Other model paths | Direct connections and the separate Ollama connector are disabled. |
 | Extra integrations | Plugins/tools, web search, image/code features, community sharing, and generated-title/tag/follow-up tasks are disabled. |
 | Identity forwarding | Off; review custom headers separately if you add any. |
@@ -202,14 +211,53 @@ Before upgrading, back up both and record image digests. An image-only
 rollback may fail after a WebUI database migration; restore the matching
 backup too. Removing the optional stack does not affect the core wheel.
 
+## Verify your deployment
+
+Run the synthetic demo on the machine where you intend to use WebUI before
+adding a real key. Check these acceptance conditions:
+
+1. Sign in at `http://localhost:3000`, select **fake-openwebui**, and send
+   the synthetic email/key example above. The rendered answer must contain
+   the originals while the fake provider log contains only their tokens.
+2. In the browser's network tools, confirm the chat completes and the
+   Socket.IO connection through Caddy upgrades to WebSocket (status 101).
+   These are WebUI UI events, separate from provider realtime APIs.
+3. Restart `proxy` and `open-webui` with the same Compose arguments and
+   `restart proxy open-webui`; sign in again if needed and repeat the chat.
+   The existing account/history and vault mappings should survive.
+4. Stop only `proxy` with those Compose arguments and `stop proxy`. A new
+   chat must fail and the fake provider must receive no new completion.
+   Bring the proxy back with `start proxy` before continuing.
+
+Use synthetic text until these checks pass. Your host's Docker networking,
+browser, model server and real provider account are not validated by a CI
+run. Provider-specific modes, manual model IDs and local host gateways need
+their own check on that deployment. Keep the fake provider restricted to
+the demo; its body logging is unsuitable for private prompts.
+
 ## Automated verification
 
-The normal Python suite uses the real proxy and fake OpenAI routes to
-check model inventory, JSON/SSE, mangled-token restoration, and SQLite
-persistence. The container CI step additionally boots the **real WebUI**,
-signs in, discovers the fake model through the proxy, submits JSON/SSE
-chats, exercises a generated-title task, restarts services, checks backend
-egress, and stops the proxy to prove failure without direct fallback.
+The normal Python suite (`tests/test_openwebui.py`) uses the real proxy
+and fake OpenAI routes to check model inventory, JSON/SSE, mangled-token
+restoration, and SQLite persistence. Deployment-contract tests check the
+optional profile, loopback publication, connection settings, and network
+membership without starting Docker.
+
+The container smoke boots the **real pinned WebUI**, signs in, discovers
+the fake model through the proxy, submits JSON/SSE chats, exercises a
+generated-title task, and restarts services. It seeds WebUI's actual config
+database with an old direct URL to the reachable fake provider, verifies
+the row exists, then checks that restart still selects the proxy and
+provider logs contain no original canaries. This tests the dangerous
+persisted state rather than only checking the environment variable. It
+also checks blocked backend egress and stops the proxy to prove failure
+without direct fallback.
+
+With `--browser`, a Playwright Chromium session additionally signs in,
+selects the model, submits chat and checks restored text in the rendered
+UI, including streaming. It checks the Socket.IO WebSocket handshake
+through Caddy. Browser coverage uses synthetic data and the same disposable
+stack; it does not expand the supported text-chat scope.
 
 Run the same container smoke test locally from the checkout:
 
@@ -219,12 +267,33 @@ docker build --target fake-upstream -t llm-redact-fake:ci .
 python3 scripts/openwebui_smoke.py
 ```
 
+For browser coverage, install the CI-pinned development tool in a
+throwaway environment, then run the same smoke with `--browser`:
+
+```bash
+python3 -m venv /tmp/llm-redact-webui-browser
+/tmp/llm-redact-webui-browser/bin/pip install playwright==1.64.0
+/tmp/llm-redact-webui-browser/bin/python -m playwright install --with-deps chromium
+/tmp/llm-redact-webui-browser/bin/python scripts/openwebui_smoke.py \
+  --browser --artifacts-dir /tmp/llm-redact-webui-evidence
+```
+
+The CI container step runs this browser-enabled form and uploads synthetic
+browser evidence as the `openwebui-browser` artifact. Playwright is a
+smoke-test tool only; it is not a proxy runtime dependency.
 The script uses only synthetic canaries and a fresh random project with
 ephemeral ports and credentials. It removes **only its own** test
 containers/volumes afterward; it does not load your private env file.
-It exercises WebUI's HTTP backend, not browser rendering. No cloud key
-or paid feature is required. The fake service's logging is for this demo
-and test only.
+No cloud key or paid feature is required. A successful run validates this
+fixture stack and the exercised browser/backend paths, not all WebUI
+features, another image version, or a user's target machine.
+
+Recorded fixture evidence: [the 2026-10-19 Docker CI run](https://github.com/asanderson/llm-redact/actions/runs/39314225475/job/118271398736)
+passed backend discovery/JSON/SSE, task and restart checks, the seeded
+stale-provider regression, Chromium sign-in/model selection/restored
+streaming text, the Socket.IO WebSocket handshake, backend egress denial
+and failure with the proxy stopped. It used the pinned images and
+synthetic canaries, with no cloud credentials.
 
 Primary references: [provider connection](https://docs.openwebui.com/getting-started/quick-start/connect-a-provider/starting-with-openai-compatible/),
 [environment settings](https://docs.openwebui.com/reference/env-configuration/),

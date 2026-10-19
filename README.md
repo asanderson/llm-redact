@@ -8,7 +8,7 @@
 
 Large Language Model (LLM) information redactor that prevents private information from being sent to LLMs from agentic tools by substituting placeholders for private information on outgoing requests and then replaces the placeholders on the incoming responses seamlessly for the agentic tool users.
 
-![System data flow: agentic tool (with the llm-redact plugin slash commands inside it), proxy, local vault and local NER model files on your machine; only placeholder tokens reach the LLM provider, and the Hugging Face Hub is reached only by an opt-in startup download of pinned model weights. Dashed boxes mark as Pro the browser dashboard, the access gate and the offline model bundles with their AI-BOM and model policy (Team and above) on your machine, and the audit log with its object-store sinks, plus the flows into each](https://raw.githubusercontent.com/asanderson/llm-redact/main/docs/diagrams/architecture.png)
+![System data flow: agentic tool (with the llm-redact plugin slash commands inside it) or optional local Open WebUI backend, proxy, local vault and local NER model files on your machine; only placeholder tokens reach the LLM provider, and the Hugging Face Hub is reached only by an opt-in startup download of pinned model weights. Dashed boxes mark as Pro the browser dashboard, the access gate and the offline model bundles with their AI-BOM and model policy (Team and above) on your machine, and the audit log with its object-store sinks, plus the flows into each](https://raw.githubusercontent.com/asanderson/llm-redact/main/docs/diagrams/architecture.png)
 
 *Animated version: [SVG](https://github.com/asanderson/llm-redact/blob/main/docs/diagrams/architecture.svg) · [GIF](https://github.com/asanderson/llm-redact/blob/main/docs/diagrams/architecture.gif) — the request and response flow moves.*
 
@@ -22,6 +22,7 @@ NER model bundles with their AI bill of materials and the `[models]`
 model-load policy (Team and above), and the audit subsystem (the audit
 log, its object-store sinks, and the audit-row flow into them). Vault at-rest encryption, the server
 RDBMS vault backends, and upstream routing are Pro too but not drawn;
+the optional Open WebUI frontend is separate third-party software, and
 everything else pictured is part of this repository's **FOSS core**
 (matrix in [docs/editions.md](https://github.com/asanderson/llm-redact/blob/main/docs/editions.md)). The full
 documentation set — quickstart, deployment, security, engineering
@@ -134,6 +135,9 @@ that cannot cover:
   a cloud OCR service — scans as text first: a value found refuses the
   upload (or, opt-in, sends its redacted text instead of the file), a
   complete clean reading sends the file.
+- **Client history.** Tools and the optional Open WebUI frontend see raw
+  prompts and restored answers. Their histories, exports and backups may
+  retain originals; provider-bound redaction does not sanitize them.
 - **Anything you opt out of.** Warn-mode rules observe and *forward*
   the matched value; `[providers.NAME] detection = false`, MCP server
   exemptions, and language scoping likewise forward what they exempt, and
@@ -351,9 +355,13 @@ docker compose up   # demo stack: proxy + bundled fake upstream
 
 For an optional local chat frontend, see [Open WebUI setup](https://github.com/asanderson/llm-redact/blob/main/docs/openwebui.md):
 a separate opt-in Compose profile, a no-key synthetic demo, and a real-provider
-recipe. WebUI's backend sends text chat through the proxy and is confined to
-an internal network. This is a single-user setup; WebUI history and backups
-can contain original prompts and restored answers.
+recipe. A fixed loopback Caddy frontend serves the browser; WebUI's backend
+sends JSON/SSE chat through the proxy and is confined to an internal network.
+The [topology and verification guide](https://github.com/asanderson/llm-redact/blob/main/docs/openwebui.md#deployment-topology)
+covers browser/WebSocket checks, stale provider settings and fail-closed
+behavior. This is for one trusted local user; WebUI history/backups and
+the vault contain sensitive data. WebUI login does not isolate proxy users
+or chats, and the optional frontend is separate from the Pro ops dashboard.
 
 The sqlite vault and audit log live under `/data` — mount a volume to
 persist sessions across container restarts.

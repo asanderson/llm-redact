@@ -16,6 +16,15 @@ running it.
 - **The vault** — the mapping between placeholder tokens and your real
   values. It exists so responses can be restored, it is written with
   owner-only file permissions, and it never leaves your machine.
+- **Open WebUI data, if you opt into that separate frontend.** WebUI
+  receives raw prompts and restored answers. Its history, account data,
+  exports, uploads, caches, logs and backups may contain private content;
+  redaction protects the provider-bound request, not those stores. The
+  [local text-chat recipe](openwebui.md) uses a separate persistent volume
+  and disables optional integrations and telemetry exports. Protect that
+  volume and the vault together with suitable storage encryption,
+  backups and retention. WebUI is third-party software; this project's
+  no-telemetry statement is about llm-redact.
 - **The audit log (optional, off by default)** — metadata only: request
   paths, detection *types and counts*, durations. Never the detected
   values, never message content.

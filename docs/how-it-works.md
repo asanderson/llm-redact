@@ -16,6 +16,15 @@ namespaces.
 
 ## The request round trip
 
+The client may be an agentic tool or the optional
+[Open WebUI backend](openwebui.md). In the latter case the browser talks
+to WebUI through the loopback Caddy frontend; WebUI sends recognized
+OpenAI-compatible model requests to the proxy. The browser-facing
+Socket.IO/WebSocket connection is a separate hop from the backend's
+JSON/SSE provider requests. WebUI's history contains raw prompts and
+restored replies; the proxy's vault does not sanitize that history.
+See the [deployment topology](openwebui.md#deployment-topology).
+
 A request round trip, using an email as the private value:
 
 ![Sequence diagram of a non-streaming request: collect the strings to scan, run NER on a worker thread, detect and issue vault tokens in one transaction, forward placeholders, reverse-lookup on the response](diagrams/sequence-chat.svg)

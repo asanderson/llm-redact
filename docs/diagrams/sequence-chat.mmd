@@ -1,17 +1,19 @@
 %% Non-streaming request round trip. The provider only ever sees the
-%% placeholder; the tool only ever sees the real value.
+%% placeholder; the client receives the restored real value. Optional Open WebUI
+%% is a backend HTTP client, with a separate browser/Caddy hop and raw history.
 %% Render: scripts/render_diagrams.sh (PNG committed next to this source).
 %% animate: the request/response flow moves; scripts/animate_diagrams.py renders the
 %% animated SVG + GIF committed next to this source (a '%% animate' marker opts in).
 sequenceDiagram
     autonumber
-    participant T as Agentic tool
+    participant T as Tool / WebUI backend
     participant P as llm-redact proxy
     participant W as NER worker thread
     participant V as Vault (local)
     participant L as LLM provider
 
-    T->>P: POST /v1/messages<br/>"…email jane@corp.example…"
+    Note left of T: Optional WebUI: browser → Caddy → backend<br/>raw prompts and restored replies stay in history
+    T->>P: POST recognized chat route<br/>"…email jane@corp.example…"
     activate P
     P->>P: collect the strings the redaction<br/>will scan (every JSON string value)
     P->>W: [detection.ner] only: NER on a worker<br/>thread — off the event loop
@@ -27,4 +29,4 @@ sequenceDiagram
     V-->>P: jane@corp.example
     P-->>T: "Sure, I drafted the email to jane@corp.example"
     deactivate P
-    Note over T,L: Auth headers pass through untouched. Unrecognized<br/>traffic forwards verbatim. Oversized redactable bodies → 413.
+    Note over T,L: Tools may use /v1/messages, WebUI uses /v1/chat/completions.<br/>Client-key auth passes through, oversized redactable bodies → 413.

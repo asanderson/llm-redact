@@ -22,6 +22,7 @@ def test_sources_exist() -> None:
         "ner-bench",
         "ner-pipeline",
         "ner-prefetch",
+        "openwebui",
         "security-gates",
         "sequence-chat",
     }

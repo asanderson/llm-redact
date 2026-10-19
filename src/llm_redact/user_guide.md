@@ -11,7 +11,8 @@ This guide covers the **command line** and the **agent plugin
 commands**, which are part of the free core, and the **web dashboard**
 (with its config editor and redaction preview), which is part of the
 separately installed llm-redact-pro package. The deeper design documents
-live in the repository's `docs/` directory.
+live in the repository's `docs/` directory. The optional Open WebUI
+text-chat recipe has its own section below.
 
 ## Quick start
 
@@ -35,6 +36,23 @@ Point everything at it with `LLM_REDACT_PROXY_URL` — `run`, `status`, and
 the plugin commands all honor it, and
 `llm-redact plugin install <tool> --proxy-url URL` sets it up for you.
 Plain http is loopback-only; a remote proxy must be https.
+
+## Optional Open WebUI text chat
+
+A separate Docker Compose recipe provides Open WebUI for one trusted local
+user's text chat. It is opt-in and does not require llm-redact-pro. See
+`docs/openwebui.md` in the repository for the synthetic no-key demo,
+provider setup, topology and backend/browser verification commands.
+
+The browser reaches a fixed loopback Caddy frontend; WebUI's internal-only
+backend sends model discovery and JSON/SSE chat to the proxy at
+`http://proxy:8787/v1`. Browser direct connections and extra integrations
+stay disabled. WebUI holds the provider key, raw prompts and restored
+answers; its history and backups are sensitive, as is the local vault.
+All chats use one static proxy namespace. WebUI account login supplies no
+proxy user isolation, and WebUI is separate from the Pro ops dashboard.
+Run the synthetic acceptance checks on your machine before adding a real
+provider key; CI fixture coverage does not validate your host or account.
 
 ## The web dashboard (llm-redact-pro)
 
@@ -255,7 +273,7 @@ counted in `llm-redact status`'s posture block.
 
 In the repository: `README.md` (overview), `docs/editions.md` (editions
 and the tier matrix), `docs/quickstart.md`, `docs/troubleshooting.md`,
-`docs/deployment.md`,
+`docs/deployment.md`, `docs/openwebui.md`,
 `docs/threat-model.md`, and `docs/plugins.md`. Paid-feature guides (server
 database vaults, named users, the paid deployment surface, and the
 routing guide `docs/routing.md`) and the full licensing reference live

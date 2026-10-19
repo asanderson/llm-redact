@@ -31,6 +31,12 @@ proprietary **`llm-redact-pro`** package.
 | Offline NER model bundles with an AI bill of materials (`llm-redact bundle build\|verify`: pinned model files with their SHA-256, a NOTICE with licenses and attributions, a CycloneDX AI-BOM) and the `[models]` policy (allowed licenses, denied lineage, models only from a verified bundle), asked through the core's model-load policy seam. The core's own `llm-redact models pull --to` and `models verify --dir` (portable folders with a SHA-256 manifest) stay free | | | ✓ | ✓ |
 | Team deployment kit: one installer for a shared mutual-TLS team server on Docker, Podman and Kubernetes (its own Helm chart), with named users, an encrypted vault and a tamper-evident audit log | | | ✓ | ✓ |
 
+The optional [Open WebUI chat recipe](openwebui.md) works with the free
+core. Its third-party frontend is separate from the Pro browser dashboard
+in the table: its account login does not add proxy users, seats or isolated
+chat vaults. The recipe documents the pinned upstream image's branding and
+license conditions.
+
 ## How keys work
 
 - **The core never asks for one.** A key matters only to the pro

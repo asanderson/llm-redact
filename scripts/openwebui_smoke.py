@@ -217,8 +217,13 @@ def main() -> None:
             except urllib.error.HTTPError as error:
                 if error.code < 400:
                     raise
+            except TimeoutError:
+                # A stopped container can blackhole an existing upstream route.
+                # No answer is still fail-closed; verify WebUI itself is alive.
+                pass
             else:
                 raise RuntimeError("WebUI succeeded with its proxy stopped")
+            request_json(base + "/health")
             check_upstream(compose("logs", "--no-color", "fake-upstream"))
             print("PASS: no direct egress and no fallback when proxy is stopped", flush=True)
         except Exception as error:

@@ -241,13 +241,35 @@ ADVERSARIAL = (
 
 
 def _seconds(scan: Callable[[str], object], unit: str, size: int = SIZE) -> float:
+    # These scans are synchronous CPU work. Wall time includes shared-runner
+    # descheduling, which can dwarf a sub-millisecond rejection scan.
     text = unit * (size // len(unit) + 1)
     best = float("inf")
     for _ in range(3):
-        started = time.perf_counter()
+        started = time.thread_time()
         scan(text)
-        best = min(best, time.perf_counter() - started)
+        best = min(best, time.thread_time() - started)
     return best
+
+
+@pytest.mark.parametrize("power", [1, 2], ids=["linear", "quadratic"])
+def test_cost_measurement_excludes_descheduling(
+    monkeypatch: pytest.MonkeyPatch, power: int
+) -> None:
+    clocks = {"cpu": 0.0, "wall": 0.0}
+    monkeypatch.setattr(time, "thread_time", lambda: clocks["cpu"])
+    monkeypatch.setattr(time, "perf_counter", lambda: clocks["wall"])
+
+    def scan(text: str) -> None:
+        work = len(text) ** power * 1e-4
+        clocks["cpu"] += work
+        # Every large-input trial loses a second to other runnable work.
+        clocks["wall"] += work + (1.0 if len(text) > 20 else 0.0)
+
+    small, large = _seconds(scan, "x", 10), _seconds(scan, "x", 100)
+    # Scheduling delays must not reject linear work; quadratic CPU growth
+    # must still breach the existing security bound.
+    assert (large < 30 * max(small, 1e-4)) is (power == 1), (small, large)
 
 
 def test_no_adversarial_input_costs_more_than_1_12_0s_worst() -> None:

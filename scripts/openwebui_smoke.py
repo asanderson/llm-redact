@@ -157,7 +157,6 @@ def main() -> None:
             compose("config", "--quiet")
             compose("up", "-d", "--no-build")
             base = address("webui-http", "8080")
-            proxy = address("proxy", "8787")
             wait_ready(base + "/health")
             credentials = {
                 "email": env["WEBUI_ADMIN_EMAIL"],
@@ -190,6 +189,8 @@ def main() -> None:
             check_upstream(compose("logs", "--no-color", "fake-upstream"))
 
             compose("restart", "proxy")
+            # Docker can assign a new ephemeral host port when it restarts.
+            proxy = address("proxy", "8787")
             wait_ready(proxy + "/__llm-redact/healthz")
             check_reply(completion(base, token, "Repeat «EMAIL_001» and «AWS_KEY_001»", False))
             compose("restart", "open-webui")

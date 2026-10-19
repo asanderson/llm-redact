@@ -1,0 +1,11 @@
+# Synthetic data only: the fake upstream logs the bodies it receives.
+[providers.openai]
+upstream_base_url = "http://fake-upstream:9999"
+
+[vault]
+backend = "sqlite"
+session = "openwebui-local"
+session_mode = "static"
+
+[detection]
+binary_uploads = "refuse"

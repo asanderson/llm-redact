@@ -1,0 +1,15 @@
+# Combine with compose.openwebui.yaml; paths are relative to that FIRST file.
+services:
+  proxy:
+    volumes:
+      - ./examples/openwebui-demo-config.toml:/etc/llm-redact/config.toml:ro
+    depends_on:
+      fake-upstream:
+        condition: service_started
+  fake-upstream:
+    image: ${LLM_REDACT_FAKE_IMAGE:-llm-redact-openwebui-fake:local}
+    profiles: [webui]
+    build:
+      context: .
+      target: fake-upstream
+    networks: [webui-internal]

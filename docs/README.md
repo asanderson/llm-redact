@@ -12,6 +12,7 @@ read [src/llm_redact/user_guide.md](../src/llm_redact/user_guide.md).
 | Doc | What it covers |
 | --- | --- |
 | [quickstart.md](quickstart.md) | Redacting your first session in five minutes: install, init, run, verify. |
+| [openwebui.md](openwebui.md) | Optional local Open WebUI text chat: synthetic demo, real-provider setup, privacy boundaries, and container verification. |
 | [how-it-works.md](how-it-works.md) | The mechanism end to end: the round-trip diagrams, a worked example (placeholder body, vault rows, audit row), persistence and fuzzy token restoration, and session isolation. |
 | [providers.md](providers.md) | Per-provider setup: Azure/Vertex/Bedrock/Ollama/custom upstreams, embeddings, batch APIs, the realtime relay, and the opt-out switches. |
 | [detection.md](detection.md) | The full detection reference: built-in rules, deny strings, per-rule modes, allowlists, and the person-name NER backends — how they run (windows, label policy; the `ner-pipeline` diagram), where their models come from (the `model-supply-chain` diagram) and their coverage counters. |

@@ -1,6 +1,7 @@
 """Runnable fake LLM upstream for manual end-to-end verification.
 
-Serves Anthropic-shaped /v1/messages (streaming and non-streaming) and
+Serves OpenAI-shaped /v1/models and /v1/chat/completions, Anthropic-shaped
+/v1/messages (streaming and non-streaming), and
 Bedrock-shaped /model/{id}/converse[-stream] — the streaming form emits
 real binary event-stream frames. It logs every request body it receives —
 so you can verify that only «TYPE_NNN» placeholders arrive — and echoes
@@ -70,6 +71,67 @@ async def messages(request: Request) -> Response:
             )
         yield b'event: content_block_stop\ndata: {"type": "content_block_stop", "index": 0}\n\n'
         yield b'event: message_stop\ndata: {"type": "message_stop"}\n\n'
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+async def openai_models(request: Request) -> Response:
+    return JSONResponse(
+        {
+            "object": "list",
+            "data": [
+                {
+                    "id": "fake-openwebui",
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "llm-redact-demo",
+                }
+            ],
+        }
+    )
+
+
+async def openai_chat(request: Request) -> Response:
+    body = await request.json()
+    print("--- OpenAI request body received by upstream ---")
+    print(json.dumps(body, indent=2, ensure_ascii=False))
+    # The proxy's injected system note contains EXAMPLE tokens, not vault entries.
+    messages = [message for message in body.get("messages", []) if message.get("role") != "system"]
+    tokens = re.findall("«[A-Z0-9_]+»", json.dumps(messages, ensure_ascii=False))
+    if MANGLE:
+        tokens = [_mangle(token) for token in tokens]
+    reply = "Upstream saw " + (" and ".join(tokens) if tokens else "no placeholders") + "."
+    common = {"id": "chatcmpl_fake", "created": 0, "model": "fake-openwebui"}
+    if not body.get("stream"):
+        return JSONResponse(
+            {
+                **common,
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": reply},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        )
+
+    def chunk(delta: dict[str, str], finish_reason: str | None = None) -> bytes:
+        payload = {
+            **common,
+            "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+        return b"data: " + json.dumps(payload, ensure_ascii=False).encode() + b"\n\n"
+
+    async def stream() -> Any:
+        yield chunk({"role": "assistant", "content": ""})
+        # Seven-character deltas force tokens to cross SSE event boundaries.
+        for start in range(0, len(reply), 7):
+            yield chunk({"content": reply[start : start + 7]})
+        yield chunk({}, "stop")
+        yield b"data: [DONE]\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -264,18 +326,11 @@ async def openai_batch_create(request: Request) -> Response:
     return JSONResponse({"id": "batch_fake", "status": "validating"})
 
 
-def main() -> None:
-    global MANGLE
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=9999)
-    parser.add_argument("--host", default="127.0.0.1", help="bind address (0.0.0.0 in containers)")
-    parser.add_argument(
-        "--mangle", action="store_true", help="echo placeholders mangled (lowercase/hyphens)"
-    )
-    args = parser.parse_args()
-    MANGLE = args.mangle
-    app = Starlette(
+def create_app() -> Starlette:
+    return Starlette(
         routes=[
+            Route("/v1/models", openai_models, methods=["GET"]),
+            Route("/v1/chat/completions", openai_chat, methods=["POST"]),
             Route("/v1/messages", messages, methods=["POST"]),
             Route("/v1/messages/batches", anthropic_batch_create, methods=["POST"]),
             Route("/v1/messages/batches/msgbatch_fake", anthropic_batch_poll, methods=["GET"]),
@@ -294,7 +349,19 @@ def main() -> None:
             WebSocketRoute("/v1/realtime", realtime_ws),
         ]
     )
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+
+
+def main() -> None:
+    global MANGLE
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=9999)
+    parser.add_argument("--host", default="127.0.0.1", help="bind address (0.0.0.0 in containers)")
+    parser.add_argument(
+        "--mangle", action="store_true", help="echo placeholders mangled (lowercase/hyphens)"
+    )
+    args = parser.parse_args()
+    MANGLE = args.mangle
+    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

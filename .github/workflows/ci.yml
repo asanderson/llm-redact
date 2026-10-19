@@ -696,6 +696,9 @@ jobs:
       - run: docker build --target runtime -t llm-redact:ci .
       - run: docker build --target fake-upstream -t llm-redact-fake:ci .
       - run: ./scripts/container_smoke.sh docker llm-redact:ci llm-redact-fake:ci
+      - name: Optional Open WebUI (synthetic data, real backend)
+        timeout-minutes: 15
+        run: python3 scripts/openwebui_smoke.py
 
   container-ner:
     # The -ner image (stock image + the hf and gliner extras on a CPU-only

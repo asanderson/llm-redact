@@ -1,0 +1,75 @@
+# Optional local text chat. See docs/openwebui.md; the default demo is unchanged.
+services:
+  proxy:
+    image: ${LLM_REDACT_IMAGE:-ghcr.io/asanderson/llm-redact:1.12.1}
+    profiles: [webui]
+    command: [serve, --config, /etc/llm-redact/config.toml]
+    ports:
+      - "127.0.0.1:${OPENWEBUI_PROXY_PORT:-8787}:8787"
+    volumes:
+      - ./examples/openwebui-config.toml:/etc/llm-redact/config.toml:ro
+      - llm-redact-data:/data
+    networks: [webui-internal, provider-egress]
+    stop_grace_period: 90s
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8787/__llm-redact/healthz')"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.12.3
+    profiles: [webui]
+    ports:
+      - "127.0.0.1:${OPENWEBUI_PORT:-3000}:8080"
+    volumes:
+      - openwebui-data:/app/backend/data
+    networks: [webui-internal]
+    depends_on:
+      proxy:
+        condition: service_healthy
+    environment:
+      WEBUI_AUTH: "true"
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?Set WEBUI_SECRET_KEY in your private env file}
+      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:?Set WEBUI_ADMIN_EMAIL in your private env file}
+      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:?Set WEBUI_ADMIN_PASSWORD in your private env file}
+      ENABLE_SIGNUP: "false"
+      ENABLE_PERSISTENT_CONFIG: "false"
+      ENABLE_OPENAI_API: "true"
+      OPENAI_API_BASE_URLS: http://proxy:8787/v1
+      OPENAI_API_KEYS: ${OPENAI_API_KEY:?Set OPENAI_API_KEY (use an unused dummy value for a local no-key server)}
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_DIRECT_CONNECTIONS: "false"
+      ENABLE_DIRECT_INTEGRATIONS: "false"
+      ENABLE_FORWARD_USER_INFO_HEADERS: "false"
+      ENABLE_OPENAI_API_PASSTHROUGH: "false"
+      ENABLE_PLUGINS: "false"
+      ENABLE_COMMUNITY_SHARING: "false"
+      ENABLE_WEB_SEARCH: "false"
+      ENABLE_IMAGE_GENERATION: "false"
+      ENABLE_IMAGE_EDIT: "false"
+      ENABLE_CODE_EXECUTION: "false"
+      ENABLE_CODE_INTERPRETER: "false"
+      USER_PERMISSIONS_CHAT_FILE_UPLOAD: "false"
+      USER_PERMISSIONS_CHAT_WEB_UPLOAD: "false"
+      USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS: "false"
+      USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS: "false"
+      ENABLE_TITLE_GENERATION: "false"
+      ENABLE_TAGS_GENERATION: "false"
+      ENABLE_FOLLOW_UP_GENERATION: "false"
+      ENABLE_AUTOCOMPLETE_GENERATION: "false"
+      OFFLINE_MODE: "true"
+      ENABLE_OTEL: "false"
+      ENABLE_OTEL_TRACES: "false"
+      ENABLE_OTEL_METRICS: "false"
+      ENABLE_OTEL_LOGS: "false"
+      AUDIT_LOG_LEVEL: NONE
+
+networks:
+  webui-internal:
+    internal: true
+  provider-egress: {}
+
+volumes:
+  llm-redact-data:
+  openwebui-data:

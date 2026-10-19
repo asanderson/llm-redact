@@ -154,6 +154,7 @@ activemq-data/
 
 # Environments
 .env
+.env.openwebui*
 .envrc
 .venv
 env/

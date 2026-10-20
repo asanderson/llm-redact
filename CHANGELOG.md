@@ -278,6 +278,13 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   model server fails.
 
 ### Fixed
+- The main architecture diagram now draws optional Open WebUI as a separate
+  third-party group: browser, loopback Caddy frontend, WebUI backend and sensitive
+  local history, with explicit request/response links to the proxy. It no longer
+  represents WebUI only as an alternative name on the agent-tool box. The README
+  caption and committed PNG, animated SVG and GIF show the same components.
+  Bidirectional links animate both directions, and the GIF captures the complete
+  request/response loop; one-way animation keeps its existing timing.
 - A SIGHUP during the proxy's shutdown — a terminal closing, a reload racing a stop — could end
   the process in the middle of the audit sinks' final flush (up to 45 seconds), before the audit
   database and the vault closed: the shutdown removed the SIGHUP handler first, which restores

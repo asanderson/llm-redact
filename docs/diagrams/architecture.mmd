@@ -1,26 +1,38 @@
 %% System data flow: what leaves the machine and what never does.
-%% Optional Open WebUI is a separate third-party backend client with raw local
-%% history. Its browser/Caddy hop and container networks are in openwebui.mmd.
+%% Optional Open WebUI has its own third-party client group, separate from the
+%% agentic tool and its plugin. It holds raw local history; container-network
+%% detail is in openwebui.mmd. Only the proxy has provider egress in that recipe.
 %% The dashed "Pro" boxes mark what the separately-installed llm-redact-pro
 %% package supplies: the browser dashboard, the access gate (named users,
 %% per-user keys, seats — the core has no authentication code) and offline
 %% model bundles with their AI-BOM and the [models] policy (Team and above;
 %% asked through the core's model-load policy seam) on your machine, and the
-%% audit log + object-store sinks; everything else is the FOSS core. The Hugging Face Hub edge is opt-in: NER model weights, fetched
+%% audit log + object-store sinks; Open WebUI and Caddy are optional third-party
+%% software, and everything else is the FOSS core. The Hugging Face Hub edge is opt-in: NER model weights, fetched
 %% at startup only and only with allow_download (docs/detection.md "Model sources";
 %% docs/diagrams/model-supply-chain.mmd).
 %% Render: scripts/render_diagrams.sh (PNG committed next to this source).
-%% padding: the extra node padding keeps the ① label clear of the plugin box
-%% and the tool box inside "Your machine" under mermaid-cli 11.x; the ① and ④
-%% links are one rank longer (--->) so their labels stay clear of the plugin's.
+%% Bidirectional component links pair the raw request (①) with the restored
+%% response (④), and provider-bound placeholders (②) with their response (③).
+%% Explicit client nodes keep every traffic link attached to its actual endpoint.
 %% animate: the request/response flow moves; scripts/animate_diagrams.py renders the
 %% animated SVG + GIF committed next to this source (a '%% animate' marker opts in).
 %%{init: {"flowchart": {"padding": 30}}}%%
 flowchart LR
     subgraph machine["Your machine — the proxy binds 127.0.0.1 by default"]
         direction LR
-        subgraph tool["Client — tool or optional Open WebUI backend<br/>Agent plugins apply to tools only"]
+        subgraph tool["Agentic tool — CLI / IDE"]
+            agent["Agentic tool client<br/>raw requests · restored answers"]
             plugins["llm-redact plugin<br/>slash commands:<br/>/llm-redact:status · :recent ·<br/>:preview · :config-edit · ..."]
+        end
+        subgraph optionalWebui["Optional Open WebUI — third-party software<br/>One trusted local user · text chat"]
+            browser["Chat browser<br/>raw prompts · restored answers"]
+            caddy["Caddy frontend<br/>127.0.0.1:3000<br/>fixed HTTP / Socket.IO forwarding"]
+            webui["Open WebUI backend<br/>provider key held here<br/>no direct provider egress"]
+            history[("WebUI data volume<br/>raw chats · accounts · caches")]
+            browser <-- "local HTTP / WebSocket" --> caddy
+            caddy <-- "only open-webui:8080" --> webui
+            webui --- history
         end
         models[("NER model files — local<br/>Hugging Face cache or folders<br/>from llm-redact models pull")]
         proxy["llm-redact proxy<br/><br/>outbound: detection (regex rules +<br/>checksum validators, optional local<br/>NER models: windowed, off the event loop),<br/>redactor substitutes placeholders<br/><br/>inbound: rehydrator restores values,<br/>streaming-safe across chunk splits<br/>(SSE / NDJSON / eventstream / WS)"]
@@ -37,10 +49,9 @@ flowchart LR
         s3[("audit log + object-store sinks<br/>[audit.s3] aws / MinIO / Ceph / GCS,<br/>[audit.azure] Azure Blob — default off;<br/>metadata rows only")]
     end
 
-    tool -- "① raw request" ---> proxy
-    proxy == "② placeholders only" ==> provider
-    provider == "③ response with<br/>placeholders" ==> proxy
-    proxy -- "④ restored response" ---> tool
+    agent <-- "① raw request<br/>④ restored response" --> proxy
+    webui <-- "① raw chat request<br/>④ restored chat response<br/>HTTP /v1 chat JSON/SSE" --> proxy
+    proxy <== "② placeholders outbound<br/>③ response with placeholders" ==> provider
     vault -. "issue deterministic tokens,<br/>reverse lookups" .- proxy
     models -. "loaded at startup: local,<br/>pinned, no model code" .- proxy
     proxy -. "startup only, opt-in<br/>(allow_download): pinned<br/>model weights; never<br/>request content" .-> hub
@@ -56,9 +67,11 @@ flowchart LR
     classDef pluginBox fill:#eaeef2,stroke:#57606a,stroke-width:1px;
     classDef toolBox fill:#ffffff,stroke:#57606a,stroke-width:1px;
     classDef proBox fill:none,stroke:#8250df,stroke-width:1.5px,stroke-dasharray:6 4;
+    classDef optionalBox fill:#f0fdfa,stroke:#0f766e,stroke-width:1.5px,stroke-dasharray:6 4;
     class machine boundary;
-    class vault,models vaultBox;
+    class vault,models,history vaultBox;
     class provider,s3,hub upstream;
-    class plugins,dashboard,gate,bundles pluginBox;
+    class agent,plugins,dashboard,gate,bundles,browser,caddy,webui pluginBox;
     class tool toolBox;
     class pro,proLocal proBox;
+    class optionalWebui optionalBox;

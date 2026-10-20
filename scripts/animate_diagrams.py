@@ -10,7 +10,8 @@ version and background as the PNGs), then rewrites it:
 - flowcharts: every DIRECTED edge that does not end at a refusal node
   (Mermaid class ``refuse``) gets an overlay path with a travelling dash —
   the request/response flow — on top of the untouched original edge, so the
-  static appearance is unchanged and the arrowheads stay;
+  static appearance is unchanged and the arrowheads stay. Bidirectional
+  links alternate direction; their GIF captures the full round trip;
 - sequence diagrams: messages, their numbers, activations and notes appear
   in chronological order (top to bottom), each arrow drawing itself, then
   the finished diagram holds before the loop restarts.
@@ -110,6 +111,7 @@ def _edge_target(edge_id: str, nodes: dict[str, set[str]]) -> str | None:
 def animate_flowchart(svg: str) -> tuple[str, float]:
     nodes = _node_classes(svg)
     overlays = 0
+    has_roundtrip = False
 
     def overlay(match: re.Match[str]) -> str:
         tag = match.group(0)
@@ -119,11 +121,16 @@ def animate_flowchart(svg: str) -> tuple[str, float]:
         target = _edge_target(edge_id, nodes)
         if target is not None and "refuse" in nodes.get(target, set()):
             return tag  # refusals do not carry the flow onward
-        nonlocal overlays
+        nonlocal overlays, has_roundtrip
         overlays += 1
         thick = "edge-thickness-thick" in _classes(tag)
+        roundtrip = "marker-start=" in tag
+        has_roundtrip |= roundtrip
         d = _attr(tag, "d") or ""
-        return f'{tag}<path d="{d}" class="anim-flow{" anim-thick" if thick else ""}"/>'
+        return (
+            f'{tag}<path d="{d}" class="anim-flow{" anim-thick" if thick else ""}'
+            f'{" anim-roundtrip" if roundtrip else ""}"/>'
+        )
 
     svg = re.sub(r'<path\b[^>]*class="[^"]*flowchart-link[^"]*"[^>]*/?>', overlay, svg)
     if overlays == 0:
@@ -134,11 +141,12 @@ def animate_flowchart(svg: str) -> tuple[str, float]:
         "pointer-events:none}"
         ".anim-flow.anim-thick{stroke-width:4px;stroke-dasharray:8 20;"
         f"animation-name:llmr-flow-thick}}"
+        ".anim-flow.anim-roundtrip{animation-direction:alternate}"
         "@keyframes llmr-flow{to{stroke-dashoffset:-24}}"
         "@keyframes llmr-flow-thick{to{stroke-dashoffset:-28}}"
         "@media (prefers-reduced-motion: reduce){.anim-flow{display:none}}"
     )
-    return _inject_style(svg, css), FLOW_PERIOD_S
+    return _inject_style(svg, css), FLOW_PERIOD_S * (2 if has_roundtrip else 1)
 
 
 # --- sequence diagrams ------------------------------------------------------------

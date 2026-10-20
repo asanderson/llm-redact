@@ -3,7 +3,7 @@
 Start with the repository [README](../README.md) (what the proxy does, the
 full configuration surface, the provider matrix) — then come here to find
 the right deep-dive. The packaged **user guide** (CLI and agent plugin
-commands, plus the llm-redact-pro dashboard and config editor) is a
+commands, the optional Open WebUI recipe, plus the llm-redact-pro dashboard and config editor) is a
 separate document that ships inside the wheel: run `llm-redact guide`, open `/__llm-redact/guide` on a running proxy, or
 read [src/llm_redact/user_guide.md](../src/llm_redact/user_guide.md).
 
@@ -12,7 +12,7 @@ read [src/llm_redact/user_guide.md](../src/llm_redact/user_guide.md).
 | Doc | What it covers |
 | --- | --- |
 | [quickstart.md](quickstart.md) | Redacting your first session in five minutes: install, init, run, verify. |
-| [openwebui.md](openwebui.md) | Optional local Open WebUI text chat: synthetic demo, real-provider setup, privacy boundaries, and container verification. |
+| [openwebui.md](openwebui.md) | Optional local Open WebUI text chat: topology, synthetic demo, real-provider setup, sensitive stores, target-machine checks and backend/browser container verification. |
 | [how-it-works.md](how-it-works.md) | The mechanism end to end: the round-trip diagrams, a worked example (placeholder body, vault rows, audit row), persistence and fuzzy token restoration, and session isolation. |
 | [providers.md](providers.md) | Per-provider setup: Azure/Vertex/Bedrock/Ollama/custom upstreams, embeddings, batch APIs, the realtime relay, and the opt-out switches. |
 | [detection.md](detection.md) | The full detection reference: built-in rules, deny strings, per-rule modes, allowlists, and the person-name NER backends — how they run (windows, label policy; the `ner-pipeline` diagram), where their models come from (the `model-supply-chain` diagram) and their coverage counters. |
@@ -58,7 +58,7 @@ reference and enforcement internals ship with it.
 | [privacy.md](privacy.md) | The privacy policy: no telemetry or phone-home; what stays on your machine (vault, metadata-only audit) and what leaves it (redacted provider traffic, opt-outs you configure). |
 | [threat-model.md](threat-model.md) | What the proxy defends against, what it deliberately does not, and why loopback is the default — including what a PII model does and does not add for contextual values, long-text coverage and the model supply chain. |
 | [security-dataflows.md](security-dataflows.md) | The request-path trust boundaries with each policy decision/enforcement point mapped to code. |
-| [security-testing.md](security-testing.md) | The red-team boundary suite, canary leak harness, and differential fuzzing. |
+| [security-testing.md](security-testing.md) | The red-team boundary suite, canary leak harness, differential fuzzing, and optional WebUI backend/browser and stale-configuration checks. |
 | [security-review.md](security-review.md) | The adversarial security review record and the fixes it produced. |
 | [fips.md](fips.md) | FIPS 140-3 posture: approved-algorithm selection, and why validation belongs to the host. |
 | [history-hygiene.md](history-hygiene.md) | Auditing all git history with the production detectors. |

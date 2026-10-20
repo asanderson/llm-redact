@@ -5,8 +5,8 @@
 %% animate: the request/response flow moves; scripts/animate_diagrams.py renders the
 %% animated SVG + GIF committed next to this source (a '%% animate' marker opts in).
 flowchart TB
-    conn([client connection]) --> g1{"① bind policy<br/>loopback, or full mTLS?"}
-    g1 -- "non-loopback without mTLS:<br/>serve refuses to start" --> r1([no socket at all])
+    conn([tool / WebUI backend connection]) --> g1{"① bind policy<br/>native: loopback or full mTLS<br/>container netns: explicit exception,<br/>operator publishes loopback only"}
+    g1 -- "non-loopback without mTLS<br/>outside the confined container:<br/>serve refuses to start" --> r1([no socket at all])
     g1 -- accepted --> route{"reserved path<br/>/__llm-redact/* ?"}
 
     route -- yes --> gd{"dashboard admission<br/>(llm-redact-pro gate, opt-in):<br/>signed-in admin? Probes and the<br/>gate's sign-in/SCIM paths exempt"}
@@ -31,7 +31,7 @@ flowchart TB
     g5 -. "warn mode: counted but the<br/>VALUE IS FORWARDED — observation,<br/>not protection" .-> up
     g4 -. "[providers.NAME] detection = false:<br/>⑤ SKIPPED — forwarded UNREDACTED<br/>(deliberate per-provider opt-out;<br/>logged + surfaced in /status)" .-> up
     up --> resp["response rehydrated locally<br/>(vault reverse lookup)"]
-    resp --> out([client receives real values])
+    resp --> out([client receives real values<br/>WebUI history can retain them])
     resp -. "audit copies (opt-in): local DB +<br/>optional S3/GCS/Azure sinks — types and<br/>counts, never values; [audit] required<br/>spools sinks at-least-once" .-> sink[("⑧ audit sinks")]
 
     vault[("⑦ vault<br/>0600/0700 · optional Fernet at rest ·<br/>wrong/missing key fails closed AT OPEN ·<br/>strict per-session isolation")]

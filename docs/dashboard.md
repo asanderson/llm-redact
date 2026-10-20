@@ -8,6 +8,12 @@ refusal-override approve/revoke POSTs (`/__llm-redact/overrides/approve`,
 dashboard in a browser — docs/overrides.md), and every reply is hardened with a strict CSP and framing/sniffing
 headers.
 
+The optional [Open WebUI frontend](openwebui.md) is a separate text-chat
+client at `http://localhost:3000`. It holds raw prompts and restored
+answers in its own history. The ops dashboard below is supplied by
+llm-redact-pro and serves proxy controls; installing the WebUI recipe
+does not install that dashboard or add user isolation to the core proxy.
+
 - **Browser dashboard (llm-redact-pro)**: the web page at
   <http://127.0.0.1:8787/__llm-redact/> — live status pills, detection
   and restore totals, upstreams, the recent-request table, vault

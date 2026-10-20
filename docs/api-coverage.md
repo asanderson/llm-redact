@@ -12,6 +12,11 @@ other in both directions), so an endpoint silently drifting to
 pass-through fails CI. Live drift tests additionally assert observed
 stream event names ⊆ the adapters' known sets.
 
+The optional [Open WebUI recipe](openwebui.md) exercises `/v1/models` and
+Chat Completions JSON/SSE through its backend. This proxy endpoint matrix
+does not imply WebUI supports every provider-native API, file/RAG flow,
+tool or realtime feature; that recipe's supported scope is local text chat.
+
 Classifications:
 
 - **chat** — request redacted AND response rehydrated (streaming included)

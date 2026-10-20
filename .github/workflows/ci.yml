@@ -696,9 +696,22 @@ jobs:
       - run: docker build --target runtime -t llm-redact:ci .
       - run: docker build --target fake-upstream -t llm-redact-fake:ci .
       - run: ./scripts/container_smoke.sh docker llm-redact:ci llm-redact-fake:ci
+      - name: Install isolated browser test tools
+        run: |
+          python3 -m venv "$RUNNER_TEMP/webui-browser"
+          "$RUNNER_TEMP/webui-browser/bin/python" -m pip install playwright==1.64.0
+          "$RUNNER_TEMP/webui-browser/bin/python" -m playwright install --with-deps chromium
       - name: Optional Open WebUI (synthetic data, real backend)
         timeout-minutes: 15
-        run: python3 scripts/openwebui_smoke.py
+        run: |
+          "$RUNNER_TEMP/webui-browser/bin/python" scripts/openwebui_smoke.py \
+            --browser --artifacts-dir "$RUNNER_TEMP/openwebui-smoke"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: openwebui-browser
+          path: ${{ runner.temp }}/openwebui-smoke/
+          if-no-files-found: ignore
 
   container-ner:
     # The -ner image (stock image + the hf and gliner extras on a CPU-only

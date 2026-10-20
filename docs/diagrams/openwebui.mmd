@@ -1,0 +1,30 @@
+%% Optional local text-chat deployment: separate third-party frontend, no core auth.
+%% Structural topology stays static; raw data remains in the client stores and vault.
+%% Render: scripts/render_diagrams.sh (PNG committed next to this source).
+flowchart TB
+    subgraph machine["Trusted local machine · one user"]
+        browser["Browser<br/>raw prompts · restored answers"]
+        subgraph internal["webui-internal · Docker internal network"]
+            caddy["Caddy frontend<br/>127.0.0.1:3000<br/>also on webui-access<br/>fixed HTTP / WebSocket forwarding"]
+            webui["Open WebUI backend<br/>internal network only<br/>provider key held here"]
+            proxy["llm-redact proxy<br/>127.0.0.1:8787 published<br/>also on provider-egress network"]
+        end
+        history[("WebUI data volume<br/>raw history · accounts · caches")]
+        vault[("Proxy data volume<br/>placeholder ↔ real value vault")]
+        browser <-- "local HTTP / Socket.IO" --> caddy
+        caddy <-- "only open-webui:8080" --> webui
+        webui <-- "HTTP /v1/models · chat JSON/SSE<br/>raw request / restored answer" --> proxy
+        webui --- history
+        proxy --- vault
+    end
+    provider["Configured LLM provider"]
+    proxy -- "recognized values → placeholders" --> provider
+    provider -- "answer with placeholders" --> proxy
+    classDef client fill:#eaeef2,stroke:#57606a,stroke-width:1px;
+    classDef sensitive fill:#fff8c5,stroke:#9a6700,stroke-width:1.5px;
+    classDef upstream fill:#ddf4ff,stroke:#0969da,stroke-width:1px;
+    classDef boundary fill:#f6f8fa,stroke:#57606a,stroke-width:1px;
+    class browser,caddy,webui client;
+    class history,vault sensitive;
+    class proxy,provider upstream;
+    class machine,internal boundary;

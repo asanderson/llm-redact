@@ -20,6 +20,25 @@ defines what counts as a vulnerability against them.
 
 *Animated: the flow along the accepted path moves; refusals are static. Static [PNG](diagrams/security-gates.png) · [GIF](diagrams/security-gates.gif) · Mermaid source: [diagrams/security-gates.mmd](diagrams/security-gates.mmd).*
 
+## Optional Open WebUI client boundary
+
+The [Open WebUI topology](openwebui.md#deployment-topology) adds a
+client-side hop before the proxy's gates: browser → fixed loopback Caddy
+frontend → internal-only WebUI backend → proxy. The backend's HTTP
+JSON/SSE model requests enter the same proxy gates as any tool request.
+The browser's Socket.IO/WebSocket connection terminates at WebUI; it does
+not bypass the proxy or enable the provider realtime relay.
+
+The Compose network membership enforces backend egress confinement;
+`OFFLINE_MODE` does not. The environment fixes the startup model URL to
+`http://proxy:8787/v1` and ignores old persistent connection settings.
+WebUI remains a trusted local client, holding its provider key and raw
+history, while its separate data volume and the vault hold sensitive
+state. Login to WebUI is not a proxy identity or per-chat vault boundary.
+These deployment controls do not change a proxy gate or require an
+`allowed_origins` exception. See [security-testing.md](security-testing.md#optional-open-webui-integration)
+for the backend, stale-configuration and browser checks.
+
 ## The gates
 
 In llm-redact the PDP and PEP of each gate are deliberately colocated in
@@ -78,6 +97,7 @@ deliberate scope decisions rather than gaps:
 
 | Channel | Carries | Never carries |
 |---|---|---|
+| Optional WebUI browser ↔ Caddy ↔ backend (local) | raw prompts, restored answers and WebUI UI events; its data volume/backups can retain originals | — (this trusted client sees originals by design) |
 | Upstream request (gate ⑤ output) | placeholders, plus warn-mode values (documented above), plus everything sent to a provider with `detection = false` or inside an exempt MCP server's blocks — both deliberate opt-outs | redacted originals |
 | Logs (text or JSON) | path, status, detection counts | values, headers, bodies, URLs with query strings (`?key=` auth) |
 | `/__llm-redact/*` (incl. `/recent`, `/events`, and the llm-redact-pro dashboard) | detector types + counts, session metadata | values, placeholder ids, allowlist contents (the llm-redact-pro config-editor GET is the documented exception, behind gate ②) |

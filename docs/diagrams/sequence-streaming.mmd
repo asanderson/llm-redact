@@ -6,9 +6,9 @@
 %% animate: the request/response flow moves; scripts/animate_diagrams.py renders the
 %% animated SVG + GIF committed next to this source (a '%% animate' marker opts in).
 sequenceDiagram
-    participant L as Provider (SSE)
+    participant L as Provider (Anthropic SSE example)
     participant P as Proxy — StreamingRehydrator
-    participant T as Agentic tool
+    participant T as Tool / WebUI backend
 
     L-->>P: delta "Sent it to «EM"
     Note right of P: "«EM" is a viable token prefix —<br/>hold it back, forward the rest
@@ -21,4 +21,4 @@ sequenceDiagram
     L-->>P: content_block_stop
     Note right of P: any held-back leftover flushes as a<br/>synthetic delta BEFORE the stop event
     P-->>T: content_block_stop
-    Note over L,T: Chunk-split sweeps test every possible split offset:<br/>streamed output must equal non-streaming output, byte for byte.
+    Note over L,T: Chunk-split sweeps test every possible split offset:<br/>streamed output must equal non-streaming output, byte for byte.<br/>WebUI uses OpenAI Chat Completions SSE, with a separate browser Socket.IO hop.

@@ -21,6 +21,13 @@ machine-readable records live. Three layers:
   dependencies, and torch as the PyTorch CPU index's `+cpu` build with the
   wheel digests `scripts/cpu_torch.py` records).
 
+The optional [Open WebUI deployment](openwebui.md) also runs third-party
+WebUI and Caddy images. Their dependencies belong to those images' own
+inventories, not the llm-redact wheel/runtime CycloneDX closure. Record
+those image digests with deployment backups and review their upstream
+licenses and updates separately. Playwright used for the browser smoke
+is a separate development tool, outside the proxy runtime closure.
+
 Exact pinned versions are deliberately not repeated here — they live in
 [`uv.lock`](../uv.lock) (the committed resolution) and in each
 release's CycloneDX asset. Regenerate the runtime closure locally with:

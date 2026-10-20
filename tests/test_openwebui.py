@@ -3,6 +3,9 @@
 import importlib.util
 import io
 import json
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -16,6 +19,34 @@ from llm_redact.proxy import create_app
 ROOT = Path(__file__).resolve().parents[1]
 EMAIL = "jane.doe@corp.example"
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
+
+
+def test_stale_provider_fixture_seeds_a_real_webui_config_row(tmp_path: Path) -> None:
+    database = tmp_path / "webui.db"
+    with sqlite3.connect(database) as connection:
+        # Open WebUI v0.12.3's per-key config table, including an unrelated row.
+        connection.execute(
+            "CREATE TABLE config (key TEXT PRIMARY KEY, value JSON NOT NULL, updated_at BIGINT)"
+        )
+        connection.execute("INSERT INTO config VALUES ('unrelated', 'true', 1)")
+    smoke = _smoke()
+    smoke.seed_stale_provider(str(database))
+    smoke.seed_stale_provider(str(database))
+    with sqlite3.connect(database) as connection:
+        rows = dict(connection.execute("SELECT key, value FROM config"))
+    assert json.loads(rows["openai.api_base_urls"]) == ["http://fake-upstream:9999/v1"]
+    assert rows["unrelated"] == "true"
+
+
+def test_browser_verification_is_an_explicit_smoke_option() -> None:
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/openwebui_smoke.py"), "--help"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--browser" in result.stdout
+    assert "--artifacts-dir" in result.stdout
 
 
 def _smoke() -> ModuleType:

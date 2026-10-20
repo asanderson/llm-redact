@@ -61,6 +61,32 @@ All three run in the default `uv run pytest` sweep and in CI. They need no
 extras, no network, and no secrets — the canaries and fuzz inputs are
 synthetic.
 
+## Optional Open WebUI integration
+
+The [local text-chat recipe](openwebui.md) has deployment checks beyond
+the core request-origin and ops-surface guards. `tests/test_openwebui.py`
+checks real-proxy/fake-provider JSON and SSE round trips and SQLite
+persistence; deployment-contract tests check the optional profile,
+loopback ports, internal-only backend network and connection settings.
+
+`scripts/openwebui_smoke.py` starts the pinned WebUI and Caddy images with
+a synthetic fake provider. It exercises authenticated discovery, JSON/SSE
+chat and a title task through WebUI's real HTTP API; checks logs for
+original canaries; tests restarts, blocked backend egress, and a stopped
+proxy with no direct fallback. It writes an old direct-provider URL into
+WebUI's actual config database, verifies the row exists, then restarts
+and checks both the effective proxy URL and redacted upstream traffic.
+A reachable fake-provider sentinel would expose a restored direct path.
+
+The same smoke with `--browser` adds Chromium sign-in, model selection,
+rendered chat/streaming restoration and the Socket.IO WebSocket handshake
+through Caddy. The container CI step runs this browser-enabled form;
+[local commands](openwebui.md#automated-verification) install its pinned
+Playwright tool separately from the proxy. No cloud keys are required.
+These checks cover the exercised text-chat paths; WebUI history still
+contains originals, one static vault serves all chats, and untested
+features or a user's own host/provider need separate validation.
+
 ## What these tests deliberately do *not* cover
 
 The [threat model's out-of-scope table](threat-model.md#explicitly-out-of-scope)

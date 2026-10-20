@@ -2208,6 +2208,9 @@ providers refuse to start.
   profile, isolated backend network, synthetic OpenAI-compatible demo,
   installation/privacy guide, and real-WebUI container smoke coverage.
   Core runtime dependencies and default startup are unchanged.
+  Follow-up coverage adds actual Chromium login/chat/WebSocket checks,
+  a seeded stale-provider database regression, and updated architecture,
+  deployment, privacy, operations, testing documentation and diagrams.
 
 - `allowed_origins` (top-level, restart-only, default empty): exact browser origins
   the proxy serves across origins, over HTTP and realtime WebSockets. A listed page

@@ -99,6 +99,23 @@ Other conventions worth knowing before writing tests:
   that needs a real-looking home builds one under `tmp_path`
   (`isolation_root` is the session's).
 
+### Optional Open WebUI checks
+
+Changes to the optional frontend recipe also need its
+[backend/browser container smoke](openwebui.md#automated-verification).
+The ordinary suite's `tests/test_openwebui.py` checks the real proxy with
+fake provider traffic, and deployment-contract tests pin the Compose
+settings. The container smoke additionally boots the official WebUI and
+Caddy images, seeds stale provider configuration in WebUI's database,
+checks egress/fail-closed behavior, and with `--browser` verifies rendered
+chat/streaming and the Socket.IO WebSocket upgrade.
+
+Use only synthetic prompts and disposable credentials; the fake provider
+logs request bodies. Playwright is installed in a separate development
+environment, not added to the proxy's runtime closure. A successful
+fixture run does not validate untested WebUI features or a user's own
+machine/provider; record those limits with the result.
+
 ## Adding a detection rule
 
 1. Write the rule in `src/llm_redact/detection/` — prefix-anchored for

@@ -7,6 +7,12 @@ page is the human-readable half: every direct dependency and the reason
 it is here. `tests/test_dependencies_doc.py` diffs this page against
 pyproject.toml in both directions, so it cannot go stale silently.
 
+The optional [Open WebUI recipe](openwebui.md) runs official WebUI and
+Caddy images as separate services, not Python dependencies of the proxy.
+Its browser smoke uses a separately installed, pinned Playwright tool.
+Image pins, branding/license conditions and upgrade verification live in
+that recipe; none changes the runtime dependency ceiling below.
+
 ## Runtime (deliberately exactly three)
 
 | Package | Why chosen |

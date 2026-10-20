@@ -32,7 +32,10 @@ refused, not forwarded unscanned).
    in the vault, and in whatever the proxy writes to disk.
 2. **The vault mapping** (placeholder ↔ value). Equivalent in sensitivity
    to the values: anyone holding it can reverse every past redaction.
-3. **Traffic metadata** (what tools were used when, which detector types
+3. **Optional WebUI state** — raw prompts, restored answers, accounts,
+   exports and caches in the separate frontend's storage and backups.
+   Provider-bound redaction does not sanitize client-side state.
+4. **Traffic metadata** (what tools were used when, which detector types
    fired). Lower sensitivity, still guarded: opt-in audit, counts only.
 
 ## Trust boundaries and assumptions
@@ -64,6 +67,32 @@ refused, not forwarded unscanned).
   127.0.0.1. This is the one boundary where an active network attacker is
   in scope — see "Requests from web pages" and the local ops surface
   below.
+
+### Optional Open WebUI deployment
+
+The [Open WebUI recipe](openwebui.md) remains within the single trusted
+local-user assumption. Its browser UI reaches a fixed loopback Caddy
+frontend; the WebUI backend has only an internal Docker network and
+calls the proxy over HTTP. The proxy additionally joins the provider
+egress network. Caddy forwards only to WebUI, including its Socket.IO
+WebSocket connection; it is not an outbound forward proxy.
+
+WebUI is a trusted client that holds the provider key and sees originals
+and restored answers. Its account login does not identify a proxy user:
+all chats share the recipe's static vault namespace. Other containers on
+the internal network are trusted too. This is confinement of a local
+backend, not remote access authorization or protection from arbitrary
+local software. The user's browser is not firewalled by that network.
+
+Direct browser connections, the separate Ollama connector, tools, search,
+file/RAG ingestion and audio are disabled or outside supported scope.
+`ENABLE_PERSISTENT_CONFIG=false` stops an old database provider URL
+replacing the supplied proxy URL at startup; an administrator can still
+change runtime settings. Offline mode and UI permission flags are not
+network enforcement. The [verification harness](openwebui.md#automated-verification)
+checks a seeded direct-provider URL, blocked backend egress, restored UI
+text and failure without a live proxy. Its synthetic fixture coverage is
+not assurance for untested integrations or a different image.
 
 ## Defenses at each boundary
 

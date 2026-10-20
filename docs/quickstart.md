@@ -4,6 +4,11 @@ llm-redact is a local proxy: your agentic tool talks to it, it swaps
 private values for `«EMAIL_001»`-style tokens before anything leaves your
 machine, and it swaps them back in the responses. The tool never notices.
 
+Prefer a local browser chat? The optional [Open WebUI recipe](openwebui.md)
+provides a separate Docker Compose setup and a synthetic no-key demo.
+It is for one trusted local user and text chat; WebUI stores raw prompts
+and restored answers. The CLI setup below does not require it.
+
 ## 1. Install
 
 ```bash

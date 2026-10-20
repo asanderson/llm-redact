@@ -31,26 +31,36 @@
 
 **Files:** scripts/fake_upstream.py; tests/test_openwebui.py.
 **Interface:** GET /v1/models and POST /v1/chat/completions return deterministic OpenAI-shaped responses.
-- [ ] Write tests for discovery, nonstream replies, SSE framing, mangle mode, and proxy round trips with synthetic canaries.
-- [ ] Run the tests to establish failure before adding the handlers.
-- [ ] Add only the missing fixture handlers and register the routes.
-- [ ] Run focused tests.
+- [x] Write tests for discovery, nonstream replies, SSE framing, mangle mode, and proxy round trips with synthetic canaries.
+- [x] Run the tests to establish failure before adding the handlers.
+- [x] Add only the missing fixture handlers and register the routes.
+- [x] Run focused tests.
 
 ### Task 2: Optional deployment and executable smoke test
 
 **Files:** compose.openwebui.yaml; examples/openwebui-config.toml; examples/openwebui.env.example; examples/openwebui-demo.compose.yaml; examples/openwebui-demo-config.toml; scripts/openwebui_smoke.py; .github/workflows/ci.yml; .gitignore.
 **Interface:** docker compose -f compose.openwebui.yaml --env-file .env.openwebui --profile webui up -d; smoke script manages an isolated temporary demo project.
-- [ ] Add focused deployment-contract checks for optionality, loopback exposure, backend network isolation, credentials, and persisted configuration.
-- [ ] Run those checks before adding the stack.
-- [ ] Add the standalone stack and no-key demo overlay.
-- [ ] Add a stdlib smoke client using a disposable WebUI admin, then exercise authenticated model discovery and nonstream/SSE completions through the real WebUI backend.
-- [ ] Check fixture logs for upstream canaries, proxy restart persistence, proxy failure, internal-network egress, and cleanup.
-- [ ] Add a container CI job to execute the smoke test; local container execution is unavailable unless an engine is discovered.
+- [x] Add focused deployment-contract checks for optionality, loopback exposure, backend network isolation, credentials, and persisted configuration.
+- [x] Run those checks before adding the stack.
+- [x] Add the standalone stack and no-key demo overlay.
+- [x] Add a stdlib smoke client using a disposable WebUI admin, then exercise authenticated model discovery and nonstream/SSE completions through the real WebUI backend.
+- [x] Check fixture logs for upstream canaries, proxy restart persistence, proxy failure, internal-network egress, and cleanup.
+- [x] Add a container CI job to execute the smoke test; local container execution is unavailable unless an engine is discovered.
 
 ### Task 3: Documentation and final verification
 
 **Files:** docs/openwebui.md; docs/README.md; README.md.
-- [ ] Document demo and real-provider setup, first admin, supported scope, key ownership, local model addressing, troubleshooting, backups, and version/license conditions.
-- [ ] Run ruff, mypy, full pytest, and deterministic benchmark gates.
-- [ ] Obtain an independent whole-branch review and resolve material findings.
-- [ ] Push only the feature branch, open a PR, inspect CI, and report exact tested/untested scope.
+- [x] Document demo and real-provider setup, first admin, supported scope, key ownership, local model addressing, troubleshooting, backups, and version/license conditions.
+- [x] Run ruff, mypy, full pytest, and deterministic benchmark gates.
+- [x] Obtain an independent whole-branch review and resolve material findings.
+- [x] Push only the feature branch, open a PR, inspect CI, and report exact tested/untested scope.
+
+## Completion record
+
+All original implementation tasks were completed and merged through
+[PR #120](https://github.com/asanderson/llm-redact/pull/120). All 24 original
+PR CI checks passed, including the Docker smoke against WebUI's actual HTTP
+API. Earlier pending-CI notes are superseded by that completed run. The
+follow-up adds browser rendering/WebSocket coverage, a seeded stale-provider
+database regression, target-machine acceptance guidance and updated diagrams;
+those checks are separate evidence from the original PR.

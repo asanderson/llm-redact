@@ -186,6 +186,7 @@ def transform_strings(
     *,
     skip_keys: frozenset[str] = STRUCTURAL_KEYS,
     key_overrides: dict[str, Callable[[str], str]] | None = None,
+    encrypted_content_passthrough: bool = False,
 ) -> Any:
     """Apply ``fn`` to every string value in a JSON tree.
 
@@ -194,7 +195,13 @@ def transform_strings(
     keys to a different transform for their string values — used for fields
     that carry raw JSON source (tool-call ``arguments``) and need
     escape-aware handling.
+
+    ``encrypted_content_passthrough`` explicitly treats scalar values under
+    that name as protocol ciphertext. Opaque user maps still scan every
+    string, and objects or arrays under the name are still walked.
     """
+    if encrypted_content_passthrough:
+        skip_keys = skip_keys | {"encrypted_content"}
     return _walk(obj, fn, skip_keys, key_overrides, None)
 
 

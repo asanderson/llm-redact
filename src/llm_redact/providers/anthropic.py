@@ -456,7 +456,11 @@ class AnthropicAdapter(ProviderAdapter):
             return line
         if not isinstance(payload, dict):
             return line
-        rehydrated = transform_strings(payload, pool.rehydrate_whole)
+        rehydrated = transform_strings(
+            payload,
+            pool.rehydrate_whole,
+            encrypted_content_passthrough=pool.encrypted_content_passthrough,
+        )
         if rehydrated == payload:
             return line
         return json_bytes(rehydrated)

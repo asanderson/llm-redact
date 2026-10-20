@@ -115,6 +115,7 @@ class CohereAdapter(ProviderAdapter):
         return transform_strings(
             body,
             rehydrator.rehydrate_text,
+            encrypted_content_passthrough=rehydrator.encrypted_content_passthrough,
             key_overrides={"arguments": rehydrator.rehydrate_json_source_text},
         )
 

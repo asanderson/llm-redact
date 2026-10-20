@@ -55,12 +55,19 @@ class CollectingRedactor(Redactor):
     # Deliberately not Redactor.__init__: a collector holds no plan, vault
     # or counters of the proxy's. Every Redactor member an adapter uses is
     # overridden below or reads only the attributes set here.
-    def __init__(self, limit: int, strings: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        limit: int,
+        strings: list[str] | None = None,
+        *,
+        encrypted_content_passthrough: bool = False,
+    ) -> None:
         self.strings: list[str] = strings if strings is not None else []
         self._limit = limit
         self._budget = StringBudget(limit)
         self.counts: Counter[str] = Counter()
         self.warn_counts: Counter[str] = Counter()
+        self.encrypted_content_passthrough = encrypted_content_passthrough
 
     def redact_text(self, text: str) -> str:
         self.charge(1)
@@ -87,21 +94,32 @@ class CollectingRedactor(Redactor):
         return self
 
     def with_budget(self, limit: int) -> "CollectingRedactor":
-        return CollectingRedactor(limit, self.strings)
+        return CollectingRedactor(
+            limit,
+            self.strings,
+            encrypted_content_passthrough=self.encrypted_content_passthrough,
+        )
 
     def with_overrides(self, overrides: Any) -> "CollectingRedactor":
         # Overrides decide refusals; a collector refuses nothing.
         return self
 
 
-def collect(run: Callable[[CollectingRedactor], object], *, limit: int) -> list[str]:
+def collect(
+    run: Callable[[CollectingRedactor], object],
+    *,
+    limit: int,
+    encrypted_content_passthrough: bool = False,
+) -> list[str]:
     """The strings ``run`` — one redaction pass, given a collector in its
     redactor's place — hands to detection, in order (duplicates kept): up
     to where it raised, when it raises anything at all. The request's real
     pass then refuses the body (or not) on its own, after scanning those
     strings first; a string it scans that the collector never reached is
     detected inline (counted, ``prefetch_misses``)."""
-    collector = CollectingRedactor(limit)
+    collector = CollectingRedactor(
+        limit, encrypted_content_passthrough=encrypted_content_passthrough
+    )
     # Contained by design: the real pass decides.
     with contextlib.suppress(Exception):
         run(collector)
@@ -116,6 +134,7 @@ def collect_request_strings(
     *,
     limit: int,
     mcp_exempt: frozenset[str] = frozenset(),
+    encrypted_content_passthrough: bool = False,
 ) -> list[str]:
     """The strings the redaction of this JSON request body will scan
     (``providers.base.prepare_route_request``, the proxy's entry point: the
@@ -137,6 +156,7 @@ def collect_request_strings(
             exempt_blocks=[0],
         ),
         limit=limit,
+        encrypted_content_passthrough=encrypted_content_passthrough,
     )
 
 

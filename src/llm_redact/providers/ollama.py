@@ -138,7 +138,11 @@ class OllamaAdapter(ProviderAdapter):
         if "tool_calls" in message:
             # Parsed objects, complete in one line: whole-string restoration
             # (restores through the pool so counts flow into audit/status).
-            new_calls = transform_strings(message["tool_calls"], pool.rehydrate_whole)
+            new_calls = transform_strings(
+                message["tool_calls"],
+                pool.rehydrate_whole,
+                encrypted_content_passthrough=pool.encrypted_content_passthrough,
+            )
             if new_calls != message["tool_calls"]:
                 new_message["tool_calls"] = new_calls
                 changed = True

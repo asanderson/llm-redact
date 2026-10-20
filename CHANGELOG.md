@@ -111,6 +111,17 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   once landed at 150.3 ms on an unchanged hot path. docs/assurance.md lists the ceilings.
 
 ### Added
+- Opt-in encrypted-content passthrough: `[detection] encrypted_content_passthrough`
+  and `acknowledge_encrypted_content_risk` must both be `true` (both default `false`).
+  Scalar `encrypted_content` values are preserved across supported JSON protocol
+  walks and replay, bypassing detection, block/warn policy and scan capture. The
+  field name does not prove provider origin or encryption; plaintext can bypass
+  these controls. Known caller-data contexts and uploaded DATA full-string scans
+  remain scanned. `init --encrypted-content-passthrough` warns and requires explicit
+  interactive acceptance, or `--accept-encrypted-content-risk` for headless setup
+  (`--yes` alone cannot consent). Startup, `/status`, `status` and `doctor` keep
+  the warning visible. Without the opt-in, detector collisions can still affect
+  ciphertext. See docs/detection.md for the exemption's boundaries.
 - A configuration that loads the `hf` default without naming it and asks for an entity the
   previous default emitted but the new one cannot is refused at every detector build (startup,
   `serve --check`, a reload, the config editor's check) instead of redacting less, decided by the

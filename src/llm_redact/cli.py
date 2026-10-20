@@ -143,6 +143,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true", help="non-interactive; defaults for unset flags"
     )
     init.add_argument("--force", action="store_true", help="overwrite an existing config file")
+    init.add_argument(
+        "--encrypted-content-passthrough",
+        action="store_true",
+        help="opt in to global encrypted_content scalar passthrough (requires risk acceptance)",
+    )
+    init.add_argument(
+        "--accept-encrypted-content-risk",
+        action="store_true",
+        help="explicitly accept the privacy risk of --encrypted-content-passthrough;"
+        " --yes alone does not accept it",
+    )
 
     service = subparsers.add_parser("service", help="run the proxy at login (launchd/systemd)")
     service_sub = service.add_subparsers(dest="service_command", required=True)
@@ -909,6 +920,12 @@ def _print_posture(payload: dict[str, Any]) -> None:
     exempt = payload.get("mcp_exempt_servers") or 0
     if exempt:
         lines.append(f"MCP exempt servers: {exempt} (their blocks forwarded unredacted)")
+    if (payload.get("detection") or {}).get("encrypted_content_passthrough"):
+        lines.append(
+            "encrypted_content passthrough ON: scalar values outside protected user-data"
+            " contexts are forwarded UNSCANNED, including possible plaintext secrets"
+            " (explicit risk accepted)"
+        )
     unscanned = payload.get("unscanned_uploads_total") or {}
     if unscanned:
         seen = " ".join(f"{k}×{v}" for k, v in sorted(unscanned.items()))

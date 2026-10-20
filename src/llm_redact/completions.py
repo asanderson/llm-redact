@@ -19,7 +19,19 @@ COMMANDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("--config", "--db", "--yes", "--force"),
     ),
     "audit": (("verify", "decrypt"), ("--config", "--json", "--out")),
-    "init": ((), ("--tools", "--vault", "--encryption", "--port", "--yes", "--force")),
+    "init": (
+        (),
+        (
+            "--tools",
+            "--vault",
+            "--encryption",
+            "--port",
+            "--yes",
+            "--force",
+            "--encrypted-content-passthrough",
+            "--accept-encrypted-content-risk",
+        ),
+    ),
     "service": (("install", "uninstall", "status"), ("--print-only",)),
     "plugin": (
         ("install", "uninstall", "status"),

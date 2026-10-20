@@ -300,6 +300,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         return transform_strings(
             body,
             rehydrator.rehydrate_text,
+            encrypted_content_passthrough=rehydrator.encrypted_content_passthrough,
             key_overrides={"arguments": rehydrator.rehydrate_json_source_text},
         )
 
@@ -307,6 +308,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         return transform_strings(
             obj,
             pool.rehydrate_whole,
+            encrypted_content_passthrough=pool.encrypted_content_passthrough,
             key_overrides={
                 "arguments": lambda s: pool.rehydrate_whole(s, json_source=True),
             },

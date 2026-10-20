@@ -534,6 +534,7 @@ class GeminiAdapter(ProviderAdapter):
             feed=lambda key, text: pool.get(key).feed(text),
             flush=lambda key: pool.flush(key),
             whole=pool.rehydrate_whole,
+            encrypted_content_passthrough=pool.encrypted_content_passthrough,
         )
         if rehydrated != payload:  # else the provider's own bytes go out
             event.data = json_text(rehydrated)
@@ -580,6 +581,7 @@ def _rehydrate_chunk(
     feed: Callable[[_ChannelKey, str], str],
     flush: Callable[[_ChannelKey], str],
     whole: Callable[[str], str],
+    encrypted_content_passthrough: bool = False,
 ) -> Any:
     """One stream chunk, restored exactly as the buffered response walk
     restores it — function-call args at their opaque position (a tool's own
@@ -589,8 +591,12 @@ def _rehydrate_chunk(
     «TOKEN» can straddle chunks) and flush on finishReason. Returns a new
     tree; ``chunk`` is not modified."""
     if not isinstance(chunk, dict) or not isinstance(chunk.get("candidates"), list):
-        return transform_strings(chunk, whole)
-    walked = transform_strings(_hold_text_parts(chunk), whole)
+        return transform_strings(
+            chunk, whole, encrypted_content_passthrough=encrypted_content_passthrough
+        )
+    walked = transform_strings(
+        _hold_text_parts(chunk), whole, encrypted_content_passthrough=encrypted_content_passthrough
+    )
     for candidate in walked["candidates"]:
         if not isinstance(candidate, dict):
             continue
@@ -654,7 +660,13 @@ def _rehydrate_chunk_list(chunks: list[Any], rehydrator: Rehydrator) -> list[Any
     out: list[Any] = []
     last_candidate: dict[int, dict[str, Any]] = {}
     for chunk in chunks:
-        walked = _rehydrate_chunk(chunk, feed=feed, flush=flush, whole=rehydrator.rehydrate_text)
+        walked = _rehydrate_chunk(
+            chunk,
+            feed=feed,
+            flush=flush,
+            whole=rehydrator.rehydrate_text,
+            encrypted_content_passthrough=rehydrator.encrypted_content_passthrough,
+        )
         out.append(walked)
         candidates = walked.get("candidates") if isinstance(walked, dict) else None
         for candidate in candidates if isinstance(candidates, list) else ():

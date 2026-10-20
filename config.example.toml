@@ -226,6 +226,13 @@ fuzzy = true
 # path = "/var/lib/llm-redact/overrides.db"
 
 [detection]
+# WARNING: this opt-in skips scalar `encrypted_content` values in protocol
+# JSON, including plaintext under that key, bypassing detection and capture.
+# The field's provider origin is not authenticated; encryption is not verified.
+# Both settings must be true to enable; both default false. See docs/detection.md.
+# encrypted_content_passthrough = true
+# acknowledge_encrypted_content_risk = true
+
 # Languages your traffic is written in (ISO 639-1 codes). Omit to run every
 # rule (the default). When set, national-id rules for OTHER languages are
 # not built at all — e.g. languages = ["en"] skips french_nir, spanish_dni,

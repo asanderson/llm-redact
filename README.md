@@ -8,12 +8,12 @@
 
 Large Language Model (LLM) information redactor that prevents private information from being sent to LLMs from agentic tools by substituting placeholders for private information on outgoing requests and then replaces the placeholders on the incoming responses seamlessly for the agentic tool users.
 
-![System data flow: agentic tool (with the llm-redact plugin slash commands inside it) or optional local Open WebUI backend, proxy, local vault and local NER model files on your machine; only placeholder tokens reach the LLM provider, and the Hugging Face Hub is reached only by an opt-in startup download of pinned model weights. Dashed boxes mark as Pro the browser dashboard, the access gate and the offline model bundles with their AI-BOM and model policy (Team and above) on your machine, and the audit log with its object-store sinks, plus the flows into each](https://raw.githubusercontent.com/asanderson/llm-redact/main/docs/diagrams/architecture.png)
+![System data flow: an agentic tool with the llm-redact plugin and a separate optional Open WebUI group containing the chat browser, loopback Caddy frontend, WebUI backend and sensitive raw-history volume. Both clients send raw requests to the local proxy and receive restored responses; only the proxy connects to the LLM provider. The local vault and NER models stay on your machine, and the Hugging Face Hub is reached only by an opt-in startup model download. Purple dashed boxes mark Pro features; the teal dashed box marks optional third-party software](https://raw.githubusercontent.com/asanderson/llm-redact/main/docs/diagrams/architecture.png)
 
 *Animated version: [SVG](https://github.com/asanderson/llm-redact/blob/main/docs/diagrams/architecture.svg) · [GIF](https://github.com/asanderson/llm-redact/blob/main/docs/diagrams/architecture.gif) — the request and response flow moves.*
 
 Only placeholder tokens cross the trust boundary; the vault mapping never
-leaves your machine. The dashed boxes mark what is **Pro** — supplied by
+leaves your machine. The purple dashed boxes mark what is **Pro** — supplied by
 the proprietary `llm-redact-pro` package: the browser dashboard at
 `/__llm-redact/` (live status view, config editor, redaction preview —
 it stays on your machine and reads the same metadata-only APIs the core
@@ -22,7 +22,13 @@ NER model bundles with their AI bill of materials and the `[models]`
 model-load policy (Team and above), and the audit subsystem (the audit
 log, its object-store sinks, and the audit-row flow into them). Vault at-rest encryption, the server
 RDBMS vault backends, and upstream routing are Pro too but not drawn;
-the optional Open WebUI frontend is separate third-party software, and
+the teal dashed **Optional Open WebUI** group is separate third-party
+software: browser → loopback Caddy frontend → WebUI backend → proxy,
+with raw chat history kept in its local WebUI data volume. Its
+[deployment topology](https://github.com/asanderson/llm-redact/blob/main/docs/openwebui.md#deployment-topology)
+shows the container networks and ports. The agent plugins apply to the
+agentic tool; WebUI uses the proxy's HTTP API. Apart from those third-party
+components,
 everything else pictured is part of this repository's **FOSS core**
 (matrix in [docs/editions.md](https://github.com/asanderson/llm-redact/blob/main/docs/editions.md)). The full
 documentation set — quickstart, deployment, security, engineering

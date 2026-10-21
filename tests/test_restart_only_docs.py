@@ -108,7 +108,7 @@ _DORMANT = 'NER off, or "llm" not among [detection.ner] backends'
 _NER_OFF_ALONE = re.compile(r"(?:held|left here) with NER off")
 
 
-@pytest.mark.parametrize("doc", [doc for doc in _START_RULE_DOCS if not doc.startswith("plugins/")])
+@pytest.mark.parametrize("doc", _START_RULE_DOCS)
 def test_docs_say_a_table_lies_dormant_whenever_the_backend_does_not_run(doc: str) -> None:
     prose = _prose((ROOT / doc).read_text())
     assert _DORMANT in prose, f"{doc}: does not say {_DORMANT!r}"
@@ -139,5 +139,13 @@ def test_the_threat_model_states_the_residual_of_a_start_by_reload() -> None:
         f" ({_DORMANT}: a dormant table)",
         "the loopback defaults",
         "every scanned string then goes to that server, unredacted",
+        # A save that turns NER on while the file's backends hold "llm"
+        # starts it too, unseen in an editor that does not show it; what
+        # says so is the start's WARNING and doctor's dormant-table row.
+        "also by a config editor save that only switches NER on while the file's backends"
+        ' hold "llm"',
+        "a start by reload is logged once applied (a WARNING naming the server's origin)",
+        "llm-redact doctor WARNs about a dormant table naming a server off loopback or a key"
+        " variable",
     ):
         assert phrase in residual, phrase

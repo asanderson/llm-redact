@@ -83,6 +83,7 @@ from llm_redact.config import (
     apply_env_overrides,
     default_config_path,
     identity_upstream_problem,
+    llm_backend_runs,
     load_config,
     map_writes_mode,
     normalize_origin,
@@ -2190,7 +2191,9 @@ class ProxyState:
         running values, the ones the process started with, also on a
         process started without it —, or one they make invalid) is a
         ConfigError before anything is logged or built: the running
-        configuration stays.
+        configuration stays. An apply that starts the llm backend says so
+        once it is live: a WARNING naming the model server's origin (an
+        editor save that only switched NER on may start it).
 
         ``prepared`` (``prepare_config``'s answer, built off the event loop
         for the candidate ``fresh`` came from): a changed ``[detection]`` is
@@ -2214,6 +2217,12 @@ class ProxyState:
         # change is named (and logged) before anything is built.
         fresh, restart_required = self._restart_required(fresh)
         effective = _kept_restart_only(fresh, self.config)
+        # A start of the llm backend (pin_restart_only_paths let it through:
+        # at the startup values) is said once applied — a save that only
+        # switched NER on may start it without the editor showing it.
+        starts_llm = llm_backend_runs(effective.detection.ner) and not llm_backend_runs(
+            self.config.detection.ner
+        )
 
         # Re-resolve the license BEFORE anything is built or swapped:
         # [license] itself is hot, so renewals apply without a restart.
@@ -2323,6 +2332,16 @@ class ProxyState:
             logger.warning("routing: %s", warning)
         if effective.detection.encrypted_content_passthrough:
             logger.warning("%s", ENCRYPTED_CONTENT_RISK_WARNING)
+        if starts_llm:
+            # The server's origin only (llm_ner.server_origin, as /status
+            # names it): never a path, never the key or its variable.
+            from llm_redact.detection.llm_ner import server_origin
+
+            logger.warning(
+                "config reload starts the llm NER backend: model server %s (the url the"
+                " proxy started with) now receives every string it scans, unredacted",
+                server_origin(effective.detection.ner.llm.url),
+            )
         logger.info("config reloaded (%d detection rules)", len(detection.detectors))
         # A SIGHUP reload that failed before this apply no longer describes
         # what runs (/status config_reload ``last.superseded``).

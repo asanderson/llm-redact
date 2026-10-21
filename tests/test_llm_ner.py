@@ -1056,8 +1056,60 @@ def test_doctor_warns_about_a_remote_model_server(
 
 
 def test_doctor_says_nothing_about_an_inactive_llm_backend(tmp_path: Path) -> None:
+    # A table on loopback without a key: nothing would leave the machine.
     rows = _doctor(tmp_path, '[detection.ner.llm]\non_error = "skip"\n')
     assert "llm" not in rows
+    rows = _doctor(tmp_path, '[detection.ner.llm]\nurl = "http://127.0.0.1:8080"\n')
+    assert "llm" not in rows
+
+
+@pytest.mark.parametrize(
+    ("ner", "table", "where", "key"),
+    [
+        (
+            "enabled = false",
+            'url = "https://llm.example:8443/v1"\nallow_remote = true\n',
+            "https://llm.example:8443 (off loopback)",
+            None,
+        ),
+        (
+            'enabled = true\nbackends = ["spacy"]',
+            'url = "https://llm.example"\nallow_remote = true\napi_key_env = "LLM_KEY_VAR"\n',
+            "https://llm.example (off loopback)",
+            "LLM_KEY_VAR",
+        ),
+        (
+            'enabled = false\nbackends = ["llm"]',
+            'api_key_env = "LLM_KEY_VAR"\n',
+            "http://127.0.0.1:11434 (on loopback)",
+            "LLM_KEY_VAR",
+        ),
+    ],
+    ids=["remote, NER off", "remote with a key, spacy the backend", "a key, NER off"],
+)
+def test_doctor_warns_about_a_dormant_table_a_reload_could_switch_on(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ner: str,
+    table: str,
+    where: str,
+    key: str | None,
+) -> None:
+    """A table the backend does not run (NER off, or "llm" not among the
+    backends) naming a server off loopback or a key variable: a reload that
+    runs the backend starts it there with no restart, so doctor WARNs —
+    offline, the origin and the variable's name only (never its value, never
+    a path), no server asked."""
+    monkeypatch.setenv("LLM_KEY_VAR", "value-of-the-key-0123456789")
+    server = install_llm(monkeypatch, FakeModelServer())
+    rows = _doctor(tmp_path, f"[detection.ner]\n{ner}\n\n[detection.ner.llm]\n{table}")
+    ((level, message),) = rows["llm"]
+    assert level == "WARN"
+    assert message.startswith(f"[detection.ner.llm] names model server {where} while the backend")
+    assert "starts it there with no restart" in message and "unredacted" in message
+    assert (f"the key {key} holds" in message) is (key is not None)
+    assert "value-of-the-key" not in message and "/v1" not in message
+    assert server.requests == []
 
 
 def test_doctor_offline_asks_no_model_server(

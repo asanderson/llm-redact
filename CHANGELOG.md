@@ -185,7 +185,12 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     kept, naming keys, never a value. Whoever can change `[detection]` can therefore never make
     a running proxy send scanned text, or a key, somewhere its startup configuration does not
     name — but can switch the backend on there, a dormant table's server or the loopback
-    default included (docs/threat-model.md lists it among the residual risks).
+    default included (docs/threat-model.md lists it among the residual risks), also with a
+    config editor save that only switches NER on while the file's backends hold `"llm"`. A
+    start by reload is logged once applied, a WARNING naming the model server's origin
+    (`config reload starts the llm NER backend: …`), and `llm-redact doctor` WARNs about a
+    dormant table naming a server off loopback or a key variable: a destination a reload can
+    switch on.
     `config.RESTART_ONLY_PATHS` lists the three for the editor, and `apply_config`'s
     restart-required list (the plugin API's `DashboardHost` contract) now holds their dotted
     names beside the section names: an entry is a name to show, not always a `Config`

@@ -523,7 +523,12 @@ and key variable, or at the loopback defaults — and from then on every
 scanned string goes to that server
 ([threat-model.md](threat-model.md#residual-risks)): a dormant table is a
 destination a reload can switch on, so leave it out of a configuration
-that is not to run the backend.
+that is not to run the backend. A config editor save that only switches
+NER on starts it too when the file's backends hold `"llm"`. A start by
+reload is logged once applied, a WARNING naming the server's origin
+(`config reload starts the llm NER backend: model server … now receives
+every string it scans, unredacted`), and `llm-redact doctor` WARNs about a
+dormant table that names a server off loopback or a key variable.
 
 **A server that requires a key** (vLLM started with `--api-key`, a hosted
 https endpoint, Ollama behind an authenticating reverse proxy or Ollama's

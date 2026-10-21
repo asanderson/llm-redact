@@ -383,6 +383,56 @@ def test_a_reload_starts_the_backend_on_a_proxy_started_without_it_at_the_startu
     assert _sent(server) == {(url, key)}
 
 
+_STARTS = "config reload starts the llm NER backend: model server "
+
+
+def _start_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith(_STARTS)]
+
+
+@pytest.mark.parametrize("ran", [True, False], ids=["started running it", "started without it"])
+def test_an_apply_that_starts_the_backend_says_where_scanned_text_now_goes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, ran: bool
+) -> None:
+    """A start by reload is said once it is live: a WARNING naming the
+    model server's origin (never a path, the key or its variable) — also
+    for an editor save that only switched NER on while the file's backends
+    held "llm" (llm-redact-pro's editor carries a backend it does not show
+    over), the save that started a dormant table's backend unseen. An apply
+    that leaves the backend as it was, running or not, says nothing, nor
+    does a refused start."""
+    monkeypatch.setenv(KEY_VAR, KEY_VALUE)
+    monkeypatch.setenv(OTHER_VAR, OTHER_VALUE)
+    install_spacy(monkeypatch, FakeSpacy([]))
+    install_llm(monkeypatch, FakeModelServer([(NAME, "person")]))
+    table = llm_ner_config(url=STARTED_REMOTE, allow_remote=True, api_key_env=KEY_VAR).llm
+    # The file's backends hold "llm"; NER is on (ran) or off (dormant).
+    ner = NerConfig(enabled=ran, backends=("llm",), llm=table)
+    state = ProxyState(Config(detection=DetectionConfig(ner=ner)), None)
+    startup = state.config
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        if ran:
+            state.apply_config(_stopped(startup, "NER switched off"))
+        # Left as it was (off): nothing said.
+        state.apply_config(_with(state.config, ner={"entities": ("PERSON", "ADDRESS")}))
+        # A start anywhere else is refused, and nothing said.
+        with pytest.raises(ConfigError):
+            state.apply_config(_with(state.config, ner={"enabled": True}, api_key_env=OTHER_VAR))
+        assert _start_lines(caplog) == [] and "llm" not in _running(state)
+        # The editor's save: NER switched on beside another backend, the
+        # file's "llm" carried over.
+        save = _with(state.config, ner={"enabled": True, "backends": ("spacy", "llm")})
+        state.apply_config(save, prepared=state.prepare_config(save))
+        assert _running(state) == ["spacy", "llm"]
+        (line,) = _start_lines(caplog)
+        assert line.startswith(f"{_STARTS}{STARTED_REMOTE} (the url the proxy started with)")
+        assert "unredacted" in line
+        assert not any(value in line for value in (KEY_VAR, KEY_VALUE, OTHER_VAR, OTHER_VALUE))
+        # Kept running: nothing more said.
+        state.apply_config(_with(state.config, timeout_ms=5000))
+    assert len(_start_lines(caplog)) == 1
+
+
 @pytest.mark.parametrize("moved", _ELSEWHERE)
 @pytest.mark.parametrize("start", list(_NOT_RUNNING))
 def test_a_start_at_other_values_on_a_proxy_started_without_it_is_refused(

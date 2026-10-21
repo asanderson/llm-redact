@@ -321,8 +321,10 @@ an `llm` backend finding. With `deny = ["acme"]` and `email = "warn"`,
 `bob.private@«DENY_001»-corp.example` and counts as one warning — as
 when an access gate adds `acme`. A warn-mode value that loses an overlap
 only to another value forwarded as sent (a longer warn-mode match, an
-approved block) has nothing redacted and is not counted; the winner
-counts as what it is — a warn-mode value as a warning, an approved block
+approved block — and, where the proxy cannot rewrite the text, a verbatim
+field or an upload's extracted text, any value an approved refusal
+override lets through) has nothing redacted and is not counted; the winner
+counts as what it is — a warn-mode value as a warning, an approved value
 as an override used (`llm_redact_overrides_used_total`, the content
 facts' `overridden_types`), not as a warning. Of warn-mode values
 overlapping one another that are partly redacted, the one the overlap

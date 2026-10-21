@@ -911,10 +911,11 @@ class ContentFacts:
       joined with, an ``llm`` backend finding; one the redacted values
       cover whole does not count, nor one that lost only to another value
       forwarded as sent — that one counts as what it is: a warn-mode value
-      here, an approved block in ``overridden_types``, never here. A
-      warn-mode ``llm`` backend finding is cut around the other values
-      instead, and counts once per piece it forwards (docs/detection.md
-      "Per-rule modes").
+      here, an approved block (or, where the proxy cannot rewrite the text,
+      any value an approved override passes) in ``overridden_types``, never
+      here. A warn-mode ``llm`` backend finding is cut around the other
+      values instead, and counts once per piece it forwards
+      (docs/detection.md "Per-rule modes").
     - ``unscanned_parts``: the binary upload file parts this request
       forwards unscanned (``[detection] binary_uploads = "forward"``, or an
       approved ``binary_upload`` override).

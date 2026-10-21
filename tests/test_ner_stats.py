@@ -527,15 +527,29 @@ def _table_row(doc: str, start: str) -> str:
     return row
 
 
+def _list_item(doc: str, start: str) -> str:
+    """The one list item in ``docs/<doc>`` starting ``start``, its lines
+    joined (up to the next item or the end of the list)."""
+    lines = (REPO / "docs" / doc).read_text(encoding="utf-8").splitlines()
+    (first,) = [i for i, line in enumerate(lines) if line.startswith(start)]
+    item = [lines[first]]
+    for line in lines[first + 1 :]:
+        if not line.startswith("  "):
+            break
+        item.append(line)
+    return " ".join(" ".join(item).split())
+
+
 def test_every_definition_of_the_inline_counter_counts_a_preview() -> None:
     # A redaction preview has no prefetched results, so each string it
     # hands an NER backend is an inline call — on the event loop when the
     # host calls it there, on a worker thread of its own in llm-redact-pro's
     # dashboard (the status test above runs it so). Every place defining
     # llm_redact_ner_inline_calls_total says both: the /metrics HELP text,
-    # the metrics reference, the NER counter table and the dashboard panel
-    # (the first three once said every inline call held up the event loop,
-    # beside a panel saying a preview counts off it). And which dashboard
+    # the metrics reference, the NER counter table, the dashboard panel and
+    # the metrics reference's account of that panel (the first three once
+    # said every inline call held up the event loop, beside a panel saying
+    # a preview counts off it). And which dashboard
     # runs it where: llm-redact-pro 0.17.1 — which its floor dependency
     # still installs beside this core — runs the preview on the event loop,
     # only its later releases on a worker thread (a definition saying "its
@@ -570,6 +584,9 @@ def test_every_definition_of_the_inline_counter_counts_a_preview() -> None:
         ),
         "detection.md": _table_row("detection.md", "| `inline_calls` |"),
         "dashboard": panel["description"],
+        "observability.md NER coverage row": _list_item(
+            "observability.md", "- strings by outcome;"
+        ),
     }
     for where, definition in definitions.items():
         for phrase in ("by the redaction itself", "request's path", "event loop", "preview"):
@@ -587,8 +604,11 @@ def test_every_preview_contract_says_the_live_ner_counters_count_it() -> None:
     # A preview runs the LIVE detectors (the status test above counts its
     # string as scanned and inline): the DashboardHost contract and
     # ProxyState.preview once said it wrote no metrics, beside a HELP text
-    # and a panel saying it is counted. Each now says what it leaves alone
-    # (the live vault, the audit, the request and detection counters) and
+    # and a panel saying it is counted, and docs/dashboard.md called the
+    # dashboard's preview card the CLI's dry run, which writes no metrics
+    # (it builds detectors of its own, in its own process). Each now says
+    # what it leaves alone (the live vault, the audit, the request and
+    # detection counters) and
     # what moves as for a request: the NER coverage counters and the llm
     # backend's circuit breaker (test_llm_ner.py runs both).
     from llm_redact import plugin_api
@@ -598,6 +618,9 @@ def test_every_preview_contract_says_the_live_ner_counters_count_it() -> None:
     contracts = {
         "DashboardHost": host[host.index("``preview`` runs") :].split(" OPTIONAL members", 1)[0],
         "ProxyState.preview": _flat(ProxyState.preview.__doc__),
+        "dashboard.md": _list_item("dashboard.md", "- **Redaction preview").split(
+            "preview card", 1
+        )[1],
     }
     for where, contract in contracts.items():
         for phrase in ("live vault", "audit", "llm_redact_ner_", "inline call", "breaker"):

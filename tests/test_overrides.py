@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -780,6 +781,33 @@ async def test_a_joined_span_in_a_verbatim_field_is_approved_value_by_value(
         assert json.loads(_sent(upstream))["suffix"] == suffix
         again = await client.post("/v1/fine_tuning/jobs", json=body, headers=KEY)
         assert again.status_code == 400 and len(upstream.requests) == 1
+
+
+async def test_a_warn_value_cut_only_by_an_approved_verbatim_value_is_no_warning(
+    tmp_path: Path,
+) -> None:
+    # A warn-mode custom rule reading on from inside the email loses the
+    # overlap to it: refused, the field is refused for the email, which cuts
+    # that value (counted as the redaction counts it). Approved, the email
+    # goes upstream as sent, and the warn-mode value with it, whole: nothing
+    # of it is cut, no warning.
+    from llm_redact.detection.engine import CustomRule
+
+    tail = CustomRule(name="tail", detector_type="TAIL", pattern=r"corp\.example now")
+    upstream = Upstream()
+    detection = DetectionConfig(custom_rules=(tail,), modes=(("tail", "warn"),))
+    app = _app(tmp_path, upstream, detection=detection)
+    body = {"model": "gpt-4o-mini", "training_file": "file-abc", "suffix": f"{EMAIL} now"}
+    state = app.state.proxy
+    async with _client(app) as client:
+        refused = await client.post("/v1/fine_tuning/jobs", json=body, headers=KEY)
+        assert refused.status_code == 400 and "`suffix`" in refused.text
+        assert state.warn_counts == Counter({"TAIL": 1})
+        _store(tmp_path).approve("once", approver=None, code=_code(refused))
+        passed = await client.post("/v1/fine_tuning/jobs", json=body, headers=KEY)
+    assert passed.status_code == 200
+    assert json.loads(_sent(upstream))["suffix"] == f"{EMAIL} now"
+    assert state.warn_counts == Counter({"TAIL": 1})
 
 
 # --- uploads --------------------------------------------------------------------------

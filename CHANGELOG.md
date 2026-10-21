@@ -109,9 +109,11 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   and counts as one warning, as with an added `acme`). Whether part of the value is still sent
   is decided once everything is redacted: one whose rest an added deny string or an `llm`
   backend finding redacts is not counted, nor one that lost only to another value forwarded as
-  sent (that one counts as what it is: a warn-mode value as a warning, an approved block as an
-  override used, `llm_redact_overrides_used_total`, not as a warning); of overlapping ones, one
-  value two detectors find counts once. An `llm` backend finding loses no overlap — it is cut
+  sent (that one counts as what it is: a warn-mode value as a warning, an approved block — or,
+  where the proxy cannot rewrite the text (a verbatim field, an upload's extracted text), any
+  value an approved refusal override lets through — as an override used,
+  `llm_redact_overrides_used_total`, not as a warning); of overlapping ones, one value two
+  detectors find counts once. An `llm` backend finding loses no overlap — it is cut
   around the other values — so a warn-mode one counts once per piece left as sent, as before. A
   configured deny string takes part in overlap resolution and an added one is applied after it,
   so where warn-mode values overlap one another the same bytes upstream can still count
@@ -328,10 +330,11 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   counter table (docs/detection.md) now define it the same way: they said every inline call
   ran on the event loop, and llm-redact-pro's preview runs on a worker thread of its own in its
   releases after 0.17.1. The preview's own contract (`plugin_api.DashboardHost`,
-  `ProxyState.preview`) said it wrote no metrics: it runs the live detectors, so the NER
-  coverage counters count its strings and the `llm` backend's circuit breaker its model
-  server's failures, as for a request's; the live vault, the audit and the request and
-  detection counters stay untouched, as before.
+  `ProxyState.preview`) and docs/dashboard.md said it wrote no metrics: it runs the live
+  detectors, so the NER coverage counters count its strings and the `llm` backend's circuit
+  breaker its model server's failures, as for a request's; the live vault, the audit and the
+  request and detection counters stay untouched, as before. (`llm-redact preview` builds
+  detectors of its own, in its own process: nothing it counts reaches a running proxy.)
 
 ### Fixed
 - The main architecture diagram now draws optional Open WebUI as a separate

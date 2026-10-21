@@ -93,8 +93,10 @@ backend (*No data* without `[detection.ner]`), three panels to a line:
   NER worker thread (the NER prefetch, [how-it-works.md](how-it-works.md)) —
   on a request's path that is the event loop, every other request waiting
   for that string's inference; a redaction preview in the llm-redact-pro
-  dashboard runs this way too, on its own worker thread — and `prefetch
-  misses` is `llm_redact_ner_prefetch_misses_total`, the strings a request's
+  dashboard runs this way too, on a worker thread of its own in
+  llm-redact-pro releases after 0.17.1, on the event loop in 0.17.1 and
+  earlier — and `prefetch misses` is
+  `llm_redact_ner_prefetch_misses_total`, the strings a request's
   redaction did not find among the results its prefetch computed (a reload
   replaced the detectors while the request waited; otherwise a string the
   prefetch failed to collect), each also counted as inline. Both stay at

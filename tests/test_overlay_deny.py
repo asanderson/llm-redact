@@ -38,7 +38,7 @@ from llm_redact.plugin_api import Inspection
 from llm_redact.redactor import BlockedRequest, Redactor
 from llm_redact.upload_inspection import judge
 from llm_redact.vault import InMemoryVault
-from warn_oracle import expected_warnings, replaced
+from warn_oracle import expected_warnings, replaced, scanned
 
 EMAIL = "bob.private@acme-corp.example"
 
@@ -618,6 +618,157 @@ def test_a_warn_value_that_lost_only_to_a_value_forwarded_as_sent_is_not_counted
     assert cut.warn_counts == Counter({"LEAD": 1, "EMAIL": 1})
 
 
+# Where the proxy cannot rewrite the text (a verbatim field, an upload's
+# extracted text), a value an approved override passes goes upstream as sent
+# in redact mode too. R wins the overlap against W, a warn-mode value
+# starting inside it (R starts earlier): what of W lies outside R is sent.
+CUT = "0123456789ABCDEFGHIJ"
+R = Detection(0, 10, "R", CUT[0:10])
+W = Detection(5, 15, "W", CUT[5:15])
+
+
+def _cutting(
+    *found: Detection,
+    modes: dict[str, str],
+    approved: Approved,
+    added: tuple[str, ...] = (),
+    recorded: bool = False,
+) -> Redactor:
+    redactor = Redactor(
+        [_Spans(list(found))],
+        InMemoryVault(),
+        Allowlist(),
+        modes={**modes, "W": "warn"},
+        added_deny=_plan(added),
+    ).with_overrides(approved)
+    return redactor.with_recorder(_Recorder()) if recorded else redactor
+
+
+@pytest.mark.parametrize(
+    ("mode", "values", "found", "warned"),
+    [
+        # Approved, in redact mode or in block mode: R goes upstream as
+        # sent, so W lost only to a value forwarded as sent and is no
+        # warning (R counts as an override used).
+        ("redact", (R.value,), Counter(), Counter()),
+        ("block", (R.value,), Counter(), Counter()),
+        # Not approved: the text is refused for R (the caller refuses it),
+        # and W counts as redact_text counts it.
+        ("redact", (), Counter({"R": 1}), Counter({"W": 1})),
+    ],
+)
+# A scan sink's recorder attached, an access gate's added deny string away
+# from both (it is found, and refuses the text for good): the same count.
+@pytest.mark.parametrize(("recorded", "added"), [(False, ()), (True, ()), (False, ("IJ",))])
+def test_a_scan_counts_no_warn_value_cut_only_by_a_value_an_approval_passes(
+    mode: str,
+    values: tuple[str, ...],
+    found: Counter[str],
+    warned: Counter[str],
+    recorded: bool,
+    added: tuple[str, ...],
+) -> None:
+    approved = Approved(*values)
+    redactor = _cutting(R, W, modes={"R": mode}, approved=approved, added=added, recorded=recorded)
+    if added:
+        found = found + Counter({"DENY": 1})
+    assert redactor.scan(CUT) == (found, bool(values))
+    assert redactor.warn_counts == warned
+    # Taking the added strings in asks about a block-mode winner first
+    # (_absorb), as the redaction does.
+    assert approved.asked == [("R", R.value)] * (2 if added and mode == "block" else 1)
+    assert redactor.scan_text(CUT) == found
+    assert redactor.warn_counts == warned + warned
+
+
+def test_a_scan_whose_text_is_redacted_after_all_counts_as_redact_text_does() -> None:
+    # Redactable (convert mode) and redact_text: a value in redact mode is
+    # redacted, never put to the overrides, so W is cut.
+    approved = Approved(R.value)
+    scanning = _cutting(R, W, modes={}, approved=approved)
+    assert scanning.scan(CUT, redactable=True) == (Counter({"R": 1}), False)
+    assert scanning.warn_counts == Counter({"W": 1})
+    redacting = _cutting(R, W, modes={}, approved=approved)
+    assert redacting.redact_text(CUT) == "«R_001»ABCDEFGHIJ"
+    assert redacting.warn_counts == Counter({"W": 1})
+    assert approved.asked == []
+
+
+# A joining value (A: a card read inside a run of digit groups, say) and a
+# value it overlaps (B) are redacted as ONE span over their union; W
+# overlaps it and yields to it (Redactor._join).
+A = Detection(0, 10, "A", CUT[0:10], joins=True)
+B = Detection(8, 12, "B", CUT[8:12])
+
+
+@pytest.mark.parametrize(
+    ("values", "found", "warned"),
+    [
+        # Each value approved: the span goes upstream as sent, and W lost
+        # only to it.
+        ((A.value, B.value), Counter(), Counter()),
+        # One of them: the text is refused for the span, which cuts W.
+        ((A.value,), Counter({"A": 1}), Counter({"W": 1})),
+        ((), Counter({"A": 1}), Counter({"W": 1})),
+    ],
+)
+def test_a_scan_counts_no_warn_value_cut_only_by_a_union_an_approval_passes(
+    values: tuple[str, ...], found: Counter[str], warned: Counter[str]
+) -> None:
+    approved = Approved(*values)
+    redactor = _cutting(A, W, B, modes={}, approved=approved)
+    assert redactor.scan(CUT) == (found, len(values) == 2)
+    assert redactor.warn_counts == warned
+    assert approved.asked == [("A", A.value), ("B", B.value)]
+    # The redaction replaces the span whatever was approved: W is cut.
+    redacting = _cutting(A, W, B, modes={}, approved=approved)
+    assert redacting.redact_text(CUT) == "«A_001»CDEFGHIJ"
+    assert redacting.warn_counts == Counter({"W": 1})
+
+
+@pytest.mark.parametrize(
+    ("values", "warned"),
+    # Not approved, R cuts W; approved, it passes before the block refuses.
+    [((), Counter({"W": 1})), ((R.value,), Counter())],
+)
+def test_a_scan_a_block_refuses_counts_the_values_cut_before_it(
+    values: tuple[str, ...], warned: Counter[str]
+) -> None:
+    # A block-mode value (K) later in the text refuses it: the warn-mode
+    # value R cuts is counted all the same, as redact_text counts it.
+    block = Detection(16, 20, "K", CUT[16:20])
+    approved = Approved(*values)
+    redactor = _cutting(R, W, block, modes={"K": "block"}, approved=approved)
+    with pytest.raises(BlockedRequest, match="K"):
+        redactor.scan(CUT)
+    assert redactor.warn_counts == warned
+    assert approved.asked == [("R", R.value), ("K", block.value)]
+    redacting = _cutting(R, W, block, modes={"K": "block"}, approved=approved)
+    with pytest.raises(BlockedRequest, match="K"):
+        redacting.redact_text(CUT)
+    assert redacting.warn_counts == Counter({"W": 1})
+
+
+@pytest.mark.parametrize(
+    ("values", "outcome", "warned"),
+    [((R.value,), "overridden", Counter()), ((), "detected", Counter({"W": 1}))],
+)
+def test_an_inspected_upload_counts_no_warn_value_cut_only_by_an_approved_one(
+    values: tuple[str, ...], outcome: str, warned: Counter[str]
+) -> None:
+    # An upload's extracted text (upload_inspection.judge): the same count.
+    redactor = _cutting(R, W, modes={}, approved=Approved(*values))
+    verdict = judge(
+        {0: Inspection(CUT, True, "x")},
+        redactor,
+        identity=False,
+        text_budget=1000,
+        convertible=False,
+    )
+    assert verdict.outcomes == Counter({outcome: 1})
+    assert redactor.warn_counts == warned
+
+
 @pytest.mark.parametrize(("priority", "counted"), [(100, "EMAIL"), (90, "MAIL")])
 def test_one_warn_value_two_detectors_find_is_counted_once_when_cut(
     priority: int, counted: str
@@ -981,6 +1132,78 @@ def test_a_warn_value_is_a_warning_exactly_when_part_of_it_is_still_sent(
         got = redactor.redact_text(text)
         redacted = replaced(text, got, vault)
         assert redactor.warn_counts == expected_warnings(detections, configured, modes, redacted)
+
+
+@settings(deadline=None, max_examples=1000)
+@given(
+    spans=_JOINING_SPANS,
+    added=st.lists(st.tuples(st.integers(0, len(_LETTERS) - 1), st.integers(1, 10)), max_size=3),
+    modes=st.dictionaries(
+        st.sampled_from(["EMAIL", "PHONE", "IBAN"]), st.sampled_from(["warn", "block"])
+    ),
+    approve=st.sets(st.integers(0, 5)),
+    redactable=st.booleans(),
+)
+def test_a_scan_counts_a_warn_value_cut_by_what_it_refuses_the_text_for(
+    spans: list[tuple[int, int, str, int, bool, int]],
+    added: list[tuple[int, int]],
+    modes: dict[str, str],
+    approve: set[int],
+    redactable: bool,
+) -> None:
+    # Detection only (a verbatim field, an upload's extracted text: nothing
+    # is replaced), with configured deny strings, joined runs, llm findings
+    # and added strings together, block-mode values approved or not: a
+    # warn-mode value is a warning exactly when part of it is still sent —
+    # cut by the values the scan refuses the text for (or, redactable,
+    # redacts it for), never by one an approved override passes, which goes
+    # upstream as sent like it. Those values are the ones redact_text
+    # replaces less the ones the scan passes: all of them when redactable.
+    text = _LETTERS
+    found = []
+    for start, length, kind, tier, joins, priority in spans:
+        end = min(start + length, len(text))
+        joining = joins and tier == 1
+        found.append(Detection(start, end, kind, text[start:end], priority, tier, joining))
+    values = {found[i].value for i in approve if i < len(found)}
+    added_deny = _plan(tuple(text[start : start + length] for start, length in added))
+
+    def redactor(added_deny: DetectorPlan | None, vault: InMemoryVault | None = None) -> Redactor:
+        return Redactor(
+            [_Spans(found)],
+            vault if vault is not None else InMemoryVault(),
+            Allowlist(),
+            modes=modes,
+            added_deny=added_deny,
+        ).with_overrides(Approved(*values))
+
+    scanner = redactor(added_deny)
+    try:
+        configured = redactor(None)._winners(text)
+        winners = redactor(added_deny)._winners(text)
+    except BlockedRequest:
+        # A block-mode value no approval passes, joined with a joining one
+        # (or overlapped by an added string): refused while resolving.
+        with pytest.raises(BlockedRequest):
+            scanner.scan(text, redactable=redactable)
+        assert scanner.warn_counts == Counter()
+        return
+    acted = scanned(winners, modes, values, redactable=redactable)
+    vault = InMemoryVault()
+    try:
+        got = redactor(added_deny, vault).redact_text(text)
+    except BlockedRequest:
+        assert acted is None
+    else:
+        assert acted is not None and acted <= replaced(text, got, vault)
+        assert not redactable or acted == replaced(text, got, vault)
+    if acted is None:
+        with pytest.raises(BlockedRequest):
+            scanner.scan(text, redactable=redactable)
+        return
+    scanner.scan(text, redactable=redactable)
+    detections = scanner.plan.detect(text, Allowlist())
+    assert scanner.warn_counts == expected_warnings(detections, configured, modes, acted)
 
 
 def test_an_llm_finding_piece_an_added_string_cuts_is_swept_with_the_other_cut_values() -> None:

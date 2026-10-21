@@ -7,8 +7,12 @@ tests/test_warn_counting.py runs it beside the live redactor over the same
 detections, modes, added deny strings and approvals: what ``redact_text``
 outputs, refuses and issues, what ``scan`` returns and refuses,
 ``Redactor.counts``, the overrides consulted (in order) and the recorder's
-calls must be the same — only ``warn_counts`` may differ. Everything below
-this docstring is the file at that commit, byte for byte.
+calls must be the same — only ``warn_counts`` may differ, save where a
+configured deny string overlaps another value: that copy lets the deny
+string win every overlap, the live redactor joins it with the value
+(tests/test_deny.py runs both over such texts: nothing the copy redacts or
+refuses is sent). Everything below this docstring is the file at that
+commit, byte for byte.
 """
 
 from bisect import bisect_left, bisect_right

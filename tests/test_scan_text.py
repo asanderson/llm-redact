@@ -101,9 +101,11 @@ def test_a_deny_string_is_always_found_whatever_its_types_mode(mode: str) -> Non
     assert redactor.warn_counts == {}
 
 
-def test_a_deny_string_wins_the_overlap() -> None:
+def test_a_deny_string_is_joined_with_the_value_it_overlaps() -> None:
+    # One span over both, typed after the email (it starts first); the deny
+    # string once won the overlap, and the scan found DENY alone.
     redactor = _redactor(_detection(deny=["doe@corp"]))
-    assert redactor.scan_text(f"mail {EMAIL}") == Counter({"DENY": 1})
+    assert redactor.scan_text(f"mail {EMAIL}") == Counter({"EMAIL": 1})
 
 
 def test_allowlists_apply() -> None:
@@ -163,10 +165,13 @@ def test_blocked_type_never_blocks_a_deny_string() -> None:
     redactor = _redactor(config)
     assert redactor.blocked_type("the Project Nightjar budget") is None
     assert redactor.redact_text("the Project Nightjar budget") == "the «EMAIL_001» budget"
-    # ...and wins the overlap with a block-mode match it covers.
+    # ...but a block-mode value it overlaps, joined with it, refuses — as
+    # redact_text refuses it. The deny string once won that overlap, and
+    # the rest of the email went upstream ("mail jane.«DENY_001».example").
     covering = _redactor(_detection(deny=["doe@corp"], modes={"email": "block"}))
-    assert covering.blocked_type(f"mail {EMAIL}") is None
-    assert covering.redact_text(f"mail {EMAIL}") == "mail jane.«DENY_001».example"
+    assert covering.blocked_type(f"mail {EMAIL}") == "EMAIL"
+    with pytest.raises(BlockedRequest, match="EMAIL"):
+        covering.redact_text(f"mail {EMAIL}")
 
 
 def test_blocked_type_applies_the_allowlists() -> None:

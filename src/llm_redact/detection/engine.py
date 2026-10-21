@@ -287,8 +287,8 @@ class DetectionConfig:
     # "block" (reject the whole request fail-closed). Stored sorted so
     # config equality (reload's detector-reuse check) is canonical.
     modes: tuple[tuple[str, str], ...] = ()
-    # User deny strings (tier 0: always redacted, win every overlap, bypass
-    # the allowlist, never subject to modes). Stored sorted — canonical
+    # User deny strings (tier 0: always redacted, joined with the values they
+    # overlap, bypass the allowlist, never subject to modes). Stored sorted — canonical
     # equality, same reason as modes.
     deny_strings: tuple[DenyEntry, ...] = ()
     # [detection.mcp] exempt_servers: MCP content blocks addressed to these

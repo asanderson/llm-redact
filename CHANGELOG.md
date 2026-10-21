@@ -68,6 +68,21 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   placeholder of its own.) Nothing 1.12.0 or 1.12.1 redacted or refused is forwarded now, with
   custom rules, NER spans and `[detection.modes]` too: tests pin that against both releases'
   pipelines.
+- **A deny string sent the rest of a value it overlaps upstream.** A deny match won every
+  overlap, and what it did not cover went as sent: with `deny = ["acme"]`,
+  `mail bob@acme.example` went upstream as `mail bob@«DENY_001».example`; two overlapping deny
+  strings (`acme` and `mecorp` in `acmecorp`) sent the rest of one of them; and a block-mode
+  value a deny string overlapped was not refused, its rest sent. A deny string is now joined with
+  every value it overlaps, as the values above are: every value among them that redacts (another
+  deny string, a value in redact mode) is redacted with it, overlapping ones as one placeholder
+  over their union typed after the one starting first (`mail «EMAIL_001»`, `«DENY_001»`); a
+  value in block mode among them refuses the request, also one that would lose the overlap to a
+  value redacted in its place without the deny string (an approved refusal override lets it
+  through as sent where nothing redacted covers it); a warn-mode value goes upstream only where
+  nothing redacted covers it. A deny string never redacts or refuses less than before, nor than
+  the same policy without it: a property test pins both, against the previous redactor and the
+  built-in rules in random modes. An access gate's added deny strings (llm-redact-pro roles) are
+  taken in after the configured policy, as before (docs/detection.md, "Deny strings").
 - **A custom rule whose pattern can match the empty string could send a deny string upstream as
   sent.** With `deny = ["acme"]` and a custom rule matching no characters where the deny string
   starts (a lookahead such as `(?=acme)`, `\d*(?=acme)`), `the acme merger` went upstream as

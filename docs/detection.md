@@ -220,7 +220,9 @@ before one `:`), a PlanetScale token whose dots take it past 64 characters
 (1.12.1; [Values next to punctuation](#values-next-to-punctuation)). So none
 of them takes characters from another value: each is joined with every
 value it overlaps, directly or through other overlapping values — a custom
-rule's value, an NER span, another rule's value, a deny string. In such a
+rule's value, an NER span, another rule's value, a deny string. A deny
+string is joined the same way with every value it overlaps
+([below](#deny-strings-values-that-must-always-be-redacted)). In such a
 run of overlapping values:
 
 - A value in block mode refuses the request (an approved override lets
@@ -284,14 +286,34 @@ case_sensitive = true
 type = "PROJECT"                 # -> «PROJECT_001»
 ```
 
-A deny match wins any overlap against rule matches (even longer ones;
-one overlapping a value joined with what it overlaps — a card read inside
-a run, a paper IBAN, a value before a run of dots — is redacted together
-with it, [above](#values-joined-with-the-ones-they-overlap)),
-bypasses the allowlist, and is never subject to per-rule modes — it always
-redacts. Matching is literal substring ("Auroras" gets its "Aurora"
-redacted); each casing variant round-trips back to exactly what was sent.
-The llm-redact-pro dashboard's config editor has a deny-strings table.
+A deny match always redacts: it is never subject to per-rule modes and
+bypasses the allowlist. It is joined with every value it overlaps, directly
+or through other overlapping values, like the values
+[above](#values-joined-with-the-ones-they-overlap):
+
+- Every value among them that redacts — another deny match, a value in
+  redact mode — is redacted with it, values overlapping one another as ONE
+  placeholder over their union typed after the one starting first (of
+  those, the longest): with `deny = ["acme"]`, `mail bob@acme.example`
+  goes upstream as `mail «EMAIL_001»`, and with `deny = ["acme", "mecorp"]`,
+  `acmecorp` as `«DENY_001»`.
+- A value in block mode among them refuses the request (an approved
+  refusal override lets it through as sent where nothing redacted covers
+  it) — also one that would lose the overlap to a value redacted in its
+  place without the deny string.
+- A value forwarded as sent (warn mode) goes only where nothing redacted
+  covers it.
+
+Before this release a deny match won every overlap, and the rest of what it
+overlapped went upstream: `acme` inside an email sent
+`bob@«DENY_001».example`, two overlapping deny strings sent the rest of
+one of them, and a block-mode value a deny string overlapped was not
+refused — its rest was sent. An access gate's added deny strings
+(llm-redact-pro roles) are taken in after the configured policy instead, so
+they only tighten what it decided. Matching is literal substring ("Auroras"
+gets its "Aurora" redacted); each casing variant round-trips back to
+exactly what was sent. The llm-redact-pro dashboard's config editor has a
+deny-strings table.
 
 ## Per-rule modes: redact, warn, block
 
@@ -352,7 +374,8 @@ read after the other detectors' values, as overlap resolution reads it
   access gate, wherever it replaces the same characters: the values come
   from the configured detectors, the characters from what is replaced in
   the end — never from the way overlap resolution reached it (a configured
-  deny string takes part in it, an added one is taken in after it).
+  deny string is joined with the values it overlaps, an added one is taken
+  in after them).
 - An `llm` backend finding is one value: it loses no overlap but is cut
   around the other values ("Additive only",
   [below](#a-model-server-you-run-the-llm-backend)), and counts once
@@ -1329,12 +1352,13 @@ Every NER backend handles each string the redaction scans the same way:
 8. **Rule toggles.** A type whose built-in rule is disabled (or scoped out by
    `[detection] languages`) is suppressed for NER too.
 9. **Allowlists, overlaps and modes.** Allowlisted values are left alone; the
-   rest meet the regex rules and deny strings in overlap resolution (deny
-   strings win every overlap, then the longest span; a regex rule wins an
-   exact tie; an `llm` finding never displaces another detection and keeps
-   only what lies outside the others' winners), and the winner's mode
-   redacts it into the vault, forwards it (warn) or refuses the request
-   (block). A span of any other backend overlapping a card read inside a
+   rest meet the regex rules and deny strings in overlap resolution (the
+   longest span wins; a regex rule wins an exact tie; a deny string is
+   joined with what it overlaps and always redacted,
+   [Deny strings](#deny-strings-values-that-must-always-be-redacted); an
+   `llm` finding never displaces another detection and keeps only what
+   lies outside the others' winners), and the winner's mode redacts it
+   into the vault, forwards it (warn) or refuses the request (block). A span of any other backend overlapping a card read inside a
    run of digit groups, a paper IBAN or a value before a run of dots is
    joined with it instead
    ([Values joined with the ones they overlap](#values-joined-with-the-ones-they-overlap));

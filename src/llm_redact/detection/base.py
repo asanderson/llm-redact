@@ -19,8 +19,11 @@ class Detection:
     # Lower sorts first when detections start at the same offset with the
     # same length; lets specific rules (sk-ant-) beat generic ones (sk-).
     priority: int = 100
-    # 0 = user deny strings: wins ANY overlap regardless of span length or
-    # start position, always redacts, bypasses the allowlist. 1 = everything
+    # 0 = user deny strings: always redacts, bypasses the allowlist, and is
+    # joined with the values it overlaps (redactor.Redactor._resolved: every
+    # one that redacts with it as one placeholder, a block-mode one
+    # refusing); a tier-0 span wins ANY overlap in redactor._resolve_tiers,
+    # regardless of span length or start position. 1 = everything
     # else (rules, NER) — the pre-tier behavior, byte for byte. 2
     # (ADDITIVE_TIER) = additive only: never displaces a tier-0 or tier-1
     # detection, cut around the ones it overlaps instead.

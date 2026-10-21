@@ -308,11 +308,11 @@ def test_a_value_forwarded_as_sent_hides_a_warn_value_it_overlaps() -> None:
     with pytest.raises(BlockedRequest, match="K"):
         redactor.redact_text(TEXT)
     assert redactor.warn_counts == Counter({"W": 1})
-    # Nor a deny string another one wins against, sent in part: a deny
-    # string is no value forwarded as sent.
+    # Nor deny strings: two overlapping ones are joined (one placeholder
+    # over their union), and a deny string is no value forwarded as sent.
     denied = (_at(0, 6, "D", 0), _at(4, 10, "D", 0), _at(8, 14, "W"))
     redactor = _redactor(denied, {"W": "warn"})
-    assert redactor.redact_text(TEXT) == "«D_001»GHIJKLMNOPQRSTUVWX"
+    assert redactor.redact_text(TEXT) == "«D_001»KLMNOPQRSTUVWX"
     assert redactor.warn_counts == Counter({"W": 1})
 
 
@@ -599,6 +599,22 @@ def _found(spans: Sequence[tuple[int, int, str, int, bool, int]]) -> list[Detect
             Detection(start, end, kind, TEXT[start:end], priority, tier, joins and tier == 1)
         )
     return found
+
+
+def _apart(found: list[Detection]) -> list[Detection]:
+    """``found`` less every configured deny string (tier 0) overlapping
+    another detection that is no llm finding: the only ones resolved
+    otherwise than by the redactor before the rule, which let a deny string
+    win every overlap."""
+    return [
+        d
+        for d in found
+        if d.tier
+        or not any(
+            o is not d and o.tier != ADDITIVE_TIER and o.start < d.end and d.start < o.end
+            for o in found
+        )
+    ]
 
 
 def _strings(spans: Sequence[tuple[int, int]]) -> tuple[str, ...]:
@@ -928,8 +944,11 @@ def test_nothing_but_the_warn_counts_differs_from_before(
     # Against the redactor before the rule (a frozen copy): output, refusal,
     # placeholders issued, counts, overrides consulted in order, the
     # recorder's calls and the budget are the same — the counting resolution
-    # of a refused text consults nothing.
-    found = _found(spans)
+    # of a refused text consults nothing. Save where a configured deny
+    # string overlaps another value: it is now joined with it
+    # (tests/test_deny.py, test_joined_values.py), where the frozen copy let
+    # it win every overlap.
+    found = _apart(_found(spans))
     kw = {
         "added": _strings(added),
         "final_blocks": frozenset(t for t in final if modes.get(t) == "block"),

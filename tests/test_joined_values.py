@@ -704,13 +704,16 @@ def test_joining_never_redacts_or_refuses_less_than_a_sweep_without_some(
 ) -> None:
     # Against the overlap sweep over the same detections less any joining
     # ones (a release reading fewer, as 1.12.1 did no card inside a run and
-    # 1.12.0 no paper IBAN): every character it redacts is redacted, every
-    # refusal it makes is made, every joining value that redacts is redacted
-    # whole; the winners are disjoint and in order; and with no joining
-    # value the result is the sweep's own.
+    # 1.12.0 no paper IBAN; a configuration with fewer deny strings) — and
+    # over all of them, where a deny string won every overlap until it was
+    # joined with what it overlaps: every character it redacts is
+    # redacted, every refusal it makes is made, every joining value that
+    # redacts (a deny string always) is redacted whole; the winners are
+    # disjoint and in order; and with no joining value the result is the
+    # sweep's own.
     detections = _sorted(spans)
     dropped = data.draw(st.sets(st.sampled_from(range(len(detections))))) if detections else set()
-    fewer = [d for i, d in enumerate(detections) if not (d.joins and i in dropped)]
+    fewer = [d for i, d in enumerate(detections) if not (_joining(d) and i in dropped)]
     redactor = Redactor([], InMemoryVault(), Allowlist(), modes=modes)
     before = _redacts(_resolve_overlaps(fewer), modes)
     try:
@@ -718,15 +721,23 @@ def test_joining_never_redacts_or_refuses_less_than_a_sweep_without_some(
     except BlockedRequest:
         return
     assert all(a.end <= b.start for a, b in zip(winners, winners[1:], strict=False))
-    if not any(d.joins for d in detections):
+    if not any(_joining(d) for d in detections):
         assert winners == _resolve_overlaps(detections)
     now = _redacts(winners, modes)
     if now is None:
         return
     assert before is not None and before <= now
+    swept = _redacts(_resolve_overlaps(detections), modes)
+    assert swept is not None and swept <= now
     for d in detections:
-        if d.joins and (d.tier == 0 or modes.get(d.detector_type, "redact") == "redact"):
+        if _joining(d) and (d.tier == 0 or modes.get(d.detector_type, "redact") == "redact"):
             assert set(range(d.start, d.end)) <= now
+
+
+def _joining(d: Detection) -> bool:
+    """Whether ``d`` is joined with what it overlaps: a value that says so,
+    or a deny string."""
+    return d.joins or d.tier == 0
 
 
 @settings(deadline=None, max_examples=500)

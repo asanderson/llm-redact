@@ -1,8 +1,10 @@
 """User-configured deny strings: literal values that must always be redacted.
 
-The strongest signal in the pipeline: a deny match is tier 0, so it wins any
-overlap against rule/NER detections regardless of span length, is never
-subject to [detection.modes], and bypasses the allowlist. Matching is plain
+The strongest signal in the pipeline: a deny match is tier 0, is never
+subject to [detection.modes], bypasses the allowlist, and is joined with every
+rule/NER value it overlaps (Redactor._resolved): one redacted in its place, or
+another deny match, is redacted with it as one placeholder, and a block-mode
+one refuses the request. Matching is plain
 substring (no word boundaries — "Auroras" gets its "Aurora" redacted),
 case-insensitive unless the entry says otherwise.
 """
@@ -26,8 +28,9 @@ class DenyDetector:
 
     Each entry compiles to its own escaped-literal pattern rather than one
     combined alternation: Python alternation is first-alternative-wins, and
-    longest-deny-wins between overlapping entries ("aurora" vs "project
-    aurora") needs every entry's independent match stream. Case-insensitive
+    joining overlapping entries ("aurora" inside "project aurora", "acme"
+    and "mecorp" in "acmecorp": one placeholder over the union) needs every
+    entry's independent match stream. Case-insensitive
     entries use re.IGNORECASE, NOT a lowered haystack — str.lower() can
     change string length ('İ' lowers to two characters), which would corrupt
     match offsets.

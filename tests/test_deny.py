@@ -1,7 +1,10 @@
 """User deny strings: detector, precedence, config surfaces."""
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
+import redactor_before_warn_rule as before
 from llm_redact.config import ConfigError, parse_config
 from llm_redact.detection.deny import DenyDetector, DenyEntry
 from llm_redact.detection.engine import (
@@ -9,9 +12,10 @@ from llm_redact.detection.engine import (
     build_allowlist,
     build_detectors,
 )
-from llm_redact.redactor import Redactor
+from llm_redact.redactor import BlockedRequest, Redactor
 from llm_redact.rehydrate import Rehydrator
 from llm_redact.vault import InMemoryVault
+from warn_oracle import replaced
 
 # ---- DenyDetector ----
 
@@ -64,14 +68,28 @@ def _redactor(vault: InMemoryVault, config: DetectionConfig, **kwargs) -> Redact
     return Redactor(build_detectors(config), vault, build_allowlist(config), **kwargs)
 
 
-def test_deny_wins_inside_longer_rule_match(vault: InMemoryVault) -> None:
-    # The email is longer and starts earlier; the deny substring must still
-    # win the overlap ("highest precedence").
+def test_a_deny_string_inside_a_redacted_value_is_redacted_with_it(vault: InMemoryVault) -> None:
+    # The email is longer and starts earlier: joined with the deny string,
+    # it is redacted whole, as one placeholder typed after it. The deny
+    # string once won the overlap and "jane@" went upstream in the clear.
     config = DetectionConfig(deny_strings=(DenyEntry("corp.example"),))
     out = _redactor(vault, config).redact_text("mail jane@corp.example now")
-    assert "«DENY_001»" in out
-    assert "corp.example" not in out
-    assert "jane@" in out  # the non-deny remainder of the email is not an email anymore
+    assert out == "mail «EMAIL_001» now"
+    assert vault.original_for("«EMAIL_001»") == "jane@corp.example"
+    # A deny string covering the value whole is the placeholder's type.
+    config = DetectionConfig(deny_strings=(DenyEntry("mail jane@corp.example"),))
+    out = _redactor(InMemoryVault(), config).redact_text("mail jane@corp.example now")
+    assert out == "«DENY_001» now"
+
+
+def test_a_deny_string_inside_a_secret_keeps_no_part_of_it_in_the_clear(
+    vault: InMemoryVault,
+) -> None:
+    key = "AKIAIOSFODNN7EXAMPLE"
+    config = DetectionConfig(deny_strings=(DenyEntry("IOSFOD"),))
+    out = _redactor(vault, config).redact_text(f"key {key} x")
+    assert out == "key «AWS_KEY_001» x"
+    assert vault.original_for("«AWS_KEY_001»") == key
 
 
 def test_deny_wins_over_warn_mode_engulfing(vault: InMemoryVault) -> None:
@@ -90,14 +108,29 @@ def test_deny_wins_over_warn_mode_engulfing(vault: InMemoryVault) -> None:
     assert redactor.warn_counts == {}
 
 
-def test_deny_suppresses_block_mode_match(vault: InMemoryVault) -> None:
-    # Deliberate pin: the deny span wins the overlap, so the block-mode
-    # EMAIL match never reaches dispatch and the request goes through with
-    # the deny span redacted.
-    config = DetectionConfig(deny_strings=(DenyEntry("corp.example"),))
-    redactor = _redactor(vault, config, modes={"EMAIL": "block"})
-    out = redactor.redact_text("mail jane@corp.example now")
-    assert "«DENY_001»" in out
+@pytest.mark.parametrize("deny", ["corp.example", "mail jane@corp.example now"])
+def test_a_block_mode_value_a_deny_string_overlaps_refuses(deny: str) -> None:
+    # Joined with the deny string, the block-mode email refuses the request
+    # — inside it or around it. The deny string once won the overlap, the
+    # email never reached dispatch, and its rest ("jane@") went upstream.
+    config = DetectionConfig(deny_strings=(DenyEntry(deny),))
+    redactor = _redactor(InMemoryVault(), config, modes={"EMAIL": "block"})
+    with pytest.raises(BlockedRequest, match="EMAIL"):
+        redactor.redact_text("mail jane@corp.example now")
+    assert redactor.blocked_type("mail jane@corp.example now") == "EMAIL"
+    # Approved, the email goes as sent where the deny string does not cover it.
+    approving = _redactor(InMemoryVault(), config, modes={"EMAIL": "block"})
+    approving = approving.with_overrides(_Approving())
+    out = approving.redact_text("mail jane@corp.example now")
+    assert "«DENY_001»" in out and "corp.example" not in out
+
+
+class _Approving:
+    def allows(self, detector_type: str, value: str) -> bool:
+        return True
+
+    def unoverridable(self) -> None:
+        return None
 
 
 def test_deny_never_subject_to_modes_even_on_type_collision(vault: InMemoryVault) -> None:
@@ -124,6 +157,30 @@ def test_overlapping_deny_entries_longest_wins(vault: InMemoryVault) -> None:
     out = _redactor(vault, config).redact_text("the project aurora launch")
     assert out == "the «DENY_001» launch"
     assert vault.original_for("«DENY_001»") == "project aurora"
+
+
+@pytest.mark.parametrize(
+    ("entries", "placeholder"),
+    [
+        ((DenyEntry("acme"), DenyEntry("mecorp")), "«DENY_001»"),
+        # Typed after the one starting first.
+        (
+            (DenyEntry("mecorp", detector_type="CORP"), DenyEntry("acme", detector_type="ORG")),
+            "«ORG_001»",
+        ),
+    ],
+)
+def test_overlapping_deny_entries_are_one_placeholder(
+    entries: tuple[DenyEntry, ...], placeholder: str
+) -> None:
+    # Two deny strings overlapping one another are redacted as one
+    # placeholder over their union. One of them once won the overlap and
+    # the rest of the other ("corp") went upstream.
+    vault = InMemoryVault()
+    out = _redactor(vault, DetectionConfig(deny_strings=entries)).redact_text("see acmecorp now")
+    assert out == f"see {placeholder} now"
+    assert vault.original_for(placeholder) == "acmecorp"
+    assert Rehydrator(vault).rehydrate_text(out) == "see acmecorp now"
 
 
 def test_casing_variants_round_trip_exactly(vault: InMemoryVault) -> None:
@@ -221,3 +278,79 @@ def test_all_tier1_resolution_identical_to_plain_sweep() -> None:
             )
         detections.sort(key=lambda d: (d.start, -(d.end - d.start), d.priority))
         assert _resolve_overlaps(detections) == _sweep(detections)
+
+
+# ---- joined with what they overlap: never less than before ----
+
+# Pieces of agent traffic: values the built-in rules read, and words deny
+# strings are drawn from.
+_PIECES = (
+    "mail",
+    "bob@acme.example",
+    "jane.doe@corp.example",
+    "key",
+    "AKIAIOSFODNN7EXAMPLE",
+    "card",
+    "4111 1111 1111 1111",
+    "call",
+    "+1 415 555 0100",
+    "acmecorp",
+    "project aurora",
+)
+_RULE_MODES = ("redact", "warn", "block")
+
+
+@settings(deadline=None, max_examples=400)
+@given(
+    pieces=st.lists(st.sampled_from(_PIECES), min_size=1, max_size=6),
+    cuts=st.lists(st.tuples(st.integers(0, 120), st.integers(2, 12)), min_size=1, max_size=3),
+    modes=st.dictionaries(
+        st.sampled_from(("email", "aws_access_key_id", "credit_card", "phone_number")),
+        st.sampled_from(_RULE_MODES),
+    ),
+)
+def test_a_deny_string_never_redacts_or_refuses_less_than_before(
+    pieces: list[str], cuts: list[tuple[int, int]], modes: dict[str, str]
+) -> None:
+    # Deny strings cut out of the text anywhere — inside a value, across
+    # two, across one another — with the built-in rules in random modes.
+    # Against the redactor that let a deny string win every overlap (the
+    # frozen copy) and against the same policy without the deny strings:
+    # every refusal either makes is made, every character either redacts
+    # is redacted, and every deny string's characters are.
+    text = " ".join(pieces)
+    deny = tuple(
+        dict.fromkeys(
+            text[a : a + n] for a, n in cuts if text[a : a + n].strip() and "«" not in text
+        )
+    )
+    with_deny = DetectionConfig(
+        deny_strings=tuple(DenyEntry(value) for value in deny), modes=tuple(modes.items())
+    )
+    without = DetectionConfig(modes=tuple(modes.items()))
+    now = _outcome(Redactor, with_deny, text)
+    for config, redactor in ((with_deny, before.Redactor), (without, Redactor)):
+        then = _outcome(redactor, config, text)
+        if then is None:
+            assert now is None, (text, deny, modes)
+        elif now is not None:
+            assert then <= now, (text, deny, modes, sorted(then - now))
+    if now is not None:
+        for d in DenyDetector([DenyEntry(value) for value in deny]).detect(text):
+            assert set(range(d.start, d.end)) <= now, (text, d.value)
+
+
+def _outcome(redactor: type, config: DetectionConfig, text: str) -> set[int] | None:
+    """The positions ``text`` has replaced by placeholders, or None when the
+    redaction refuses it."""
+    from llm_redact.detection.engine import build_modes
+
+    vault = InMemoryVault()
+    built = redactor(
+        build_detectors(config), vault, build_allowlist(config), modes=build_modes(config)
+    )
+    try:
+        output = built.redact_text(text)
+    except (BlockedRequest, before.BlockedRequest):
+        return None
+    return replaced(text, output, vault)

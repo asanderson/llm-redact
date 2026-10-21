@@ -864,9 +864,11 @@ def test_overlapping_warn_values_count_alike_configured_or_added(
         assert redactor.warn_counts == warned
 
 
-def test_a_deny_string_another_one_wins_against_is_no_warning_whatever_its_type() -> None:
-    # Two overlapping deny strings typed after a warn-mode rule's type: the
-    # one the deny sweep drops is cut too, but a deny string takes no mode.
+def test_overlapping_deny_strings_are_no_warning_whatever_their_type() -> None:
+    # Two overlapping deny strings typed after a warn-mode rule's type:
+    # joined, one placeholder over their union — a deny string takes no
+    # mode. One of them once won the overlap and the rest of the other
+    # (" secret") went upstream, uncounted.
     config = DetectionConfig(
         modes=(("email", "warn"),),
         deny_strings=(
@@ -875,9 +877,7 @@ def test_a_deny_string_another_one_wins_against_is_no_warning_whatever_its_type(
         ),
     )
     redactor = _redactor(config)
-    assert (
-        redactor.redact_text("status: acme corp secret plan") == "status: «EMAIL_001» secret plan"
-    )
+    assert redactor.redact_text("status: acme corp secret plan") == "status: «EMAIL_001» plan"
     assert redactor.warn_counts == Counter()
     assert redactor.counts == Counter({"EMAIL": 1})
 

@@ -859,9 +859,11 @@ class DetectionOverlay:
       configured policy blocks stays overridable).
     - ``deny``: extra literal deny strings (case-insensitive, non-empty, no
       guillemets), redacted wherever they occur. Unlike ``[detection]
-      deny``, which wins every overlap among the configured detectors, they
-      are detected APART from those and taken in on top of what they
-      decided, so they never displace it: where one overlaps a value the
+      deny``, which is joined with the values it overlaps among the
+      configured detectors (a block-mode one among them refuses, even one
+      that lost its overlap to a value redacted in its place), they are
+      detected APART from those and taken in on top of what they decided,
+      so they never displace it: where one overlaps a value the
       configured policy redacts or denies, the UNION of both spans is
       redacted as one placeholder (neither leaves in part); a value the
       policy blocks still refuses the request; only a value the policy

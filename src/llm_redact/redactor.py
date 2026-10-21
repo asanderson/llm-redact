@@ -235,6 +235,15 @@ def _overlapping(spans: Sequence[Detection]) -> list[list[Detection]]:
     return runs
 
 
+def _joins(d: Detection) -> bool:
+    """Whether ``d`` is joined with the values it overlaps
+    (``Redactor._resolved``): a deny string (tier 0), whose rest of a value
+    it cut into once went upstream — the rest of an email it occurs in, of
+    another deny string it overlaps, of a block-mode value, unrefused — or
+    a value that says so (``Detection.joins``)."""
+    return d.joins or not d.tier
+
+
 def _unite(text: str, spans: list[Detection]) -> list[Detection]:
     """``spans`` in start order, every run of overlapping spans joined into
     ONE detection over their union (``_joined``); a span overlapping no other
@@ -663,22 +672,25 @@ class Redactor:
     def _resolved(self, text: str, detections: list[Detection]) -> list[Detection]:
         """The configured detections' winners: ``_resolve_overlaps``'s,
         except in a run of values overlapping one another directly or
-        through others that holds one that joins (``Detection.joins``: a
-        card read inside a run of digit groups, an IBAN in the paper
-        format, a value ending before a run of dots since 1.12.1), which is
-        ``_join``ed. Without one, the sweep's own, byte for byte; with one,
-        every character the sweep without the joining values would redact
-        is redacted, and every value it refuses for still refuses. Additive
-        detections (``ADDITIVE_TIER``: the llm NER backend's) are never
-        joined: they keep only what lies outside the winners, exactly as
+        through others that holds one that joins (``_joins``: a deny
+        string, a card read inside a run of digit groups, an IBAN in the
+        paper format, a value ending before a run of dots since 1.12.1),
+        which is ``_join``ed. Without one, the sweep's own, byte for byte;
+        with one, every character the sweep without the joining values
+        would redact is redacted, and every value it refuses for still
+        refuses — and, a deny string among them, every character the sweep
+        with it would redact too (it won every overlap there, and the rest
+        of what it cut into went upstream). Additive detections
+        (``ADDITIVE_TIER``: the llm NER backend's) are never joined: they
+        keep only what lies outside the winners, exactly as
         ``_resolve_overlaps`` treats them, so one never takes the place of
         a card or an IBAN, or of the type its placeholder carries."""
-        if not any(d.joins for d in detections):
+        if not any(_joins(d) for d in detections):
             return _resolve_overlaps(detections)
         joined: list[Detection] = []
         swept: list[Detection] = []
         for run in _overlapping([d for d in detections if d.tier != ADDITIVE_TIER]):
-            if any(d.joins for d in run):
+            if any(_joins(d) for d in run):
                 joined += self._join(text, run)
             else:
                 swept += run

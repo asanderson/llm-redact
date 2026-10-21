@@ -60,7 +60,7 @@ from test_no_loss_since_1_12_0 import (
     card_run,
     luhn_card,
 )
-from warn_oracle import cut_warnings
+from warn_oracle import Every, expected_warnings
 
 CARD = "4111 1111 1111 1111"
 # A paper IBAN whose digits after the bank code are a Luhn-valid card number.
@@ -198,28 +198,60 @@ def test_two_joined_runs_and_a_value_touching_one() -> None:
     assert redactor.counts == Counter({"CREDIT_CARD": 2, "QTY": 1})
 
 
-def test_a_forwarded_value_overlapping_a_redacted_one_yields_and_is_counted() -> None:
-    # Forwarded values in the joined run: one overlapping the card yields to
-    # it, and is still counted as a warning (it was found, and what lies
-    # outside the card goes upstream); one only touching it (ending where it
-    # starts, starting where it ends) is forwarded and counted as before.
-    rules = (
-        CustomRule(name="qty", detector_type="QTY", pattern=r"Qty \d+ "),
-        CustomRule(name="lead", detector_type="LEAD", pattern=r"\d+ 4111"),
-        CustomRule(name="tail", detector_type="TAIL", pattern=r"1111 Main"),
-        CustomRule(name="rest", detector_type="REST", pattern=r"(?<=\d) Main Street"),
-    )
-    modes = {"QTY": "warn", "LEAD": "warn", "TAIL": "warn", "REST": "warn"}
+QTY = CustomRule(name="qty", detector_type="QTY", pattern=r"Qty \d+ ")
+LEAD = CustomRule(name="lead", detector_type="LEAD", pattern=r"\d+ 4111")
+TAIL_1111 = CustomRule(name="tail", detector_type="TAIL", pattern=r"1111 Main")
+REST = CustomRule(name="rest", detector_type="REST", pattern=r"(?<=\d) Main Street")
+
+
+@pytest.mark.parametrize(
+    ("rules", "warned"),
+    [
+        # Overlapping the card: each yields to it and is still counted (what
+        # lies outside the card goes upstream).
+        ((LEAD, TAIL_1111), Counter({"LEAD": 1, "TAIL": 1})),
+        # Only touching it (ending where it starts, starting where it ends):
+        # forwarded whole and counted.
+        ((QTY, REST), Counter({"QTY": 1, "REST": 1})),
+        # All four: the lead overlaps the quantity and the tail the rest, each
+        # pair forwarded as sent, so of each the one the sweep reads first
+        # counts — as without the card.
+        ((QTY, LEAD, TAIL_1111, REST), Counter({"QTY": 1, "TAIL": 1})),
+    ],
+)
+def test_a_forwarded_value_overlapping_a_redacted_one_yields_and_is_counted(
+    rules: tuple[CustomRule, ...], warned: Counter[str]
+) -> None:
+    modes = dict.fromkeys(("QTY", "LEAD", "TAIL", "REST"), "warn")
     redactor = _redactor(*rules, modes=modes)
     text = f"Qty 12 {CARD} Main Street"
     assert _redacted(redactor, text) == "Qty 12 «CREDIT_CARD_001» Main Street"
-    assert redactor.warn_counts == Counter({"QTY": 1, "LEAD": 1, "TAIL": 1, "REST": 1})
+    assert redactor.warn_counts == warned
     # A check ahead of the redaction counts nothing.
     redactor.warn_counts.clear()
     assert redactor.blocked_type(text) is None and redactor.warn_counts == Counter()
-    # Nor does a scan count a value twice: once per value it drops.
+    # Nor does a scan count a value twice: once per value.
     assert redactor.scan(text, redactable=True).found == Counter({"CREDIT_CARD": 1})
-    assert redactor.warn_counts == Counter({"QTY": 1, "LEAD": 1, "TAIL": 1, "REST": 1})
+    assert redactor.warn_counts == warned
+
+
+def test_a_value_forwarded_as_sent_touching_the_union_stays_a_winner() -> None:
+    # In a run joined around J (redacted), an approved block-mode value K
+    # ending where J starts is clear of it: a winner, so the redaction puts
+    # it to the overrides once more, as every block-mode winner; W, which
+    # overlaps J, yields to it.
+    text = "ABCDEFGHIJKLMNOP"
+    k = Detection(0, 4, "K", text[0:4])
+    w = Detection(2, 6, "W", text[2:6])
+    j = Detection(4, 10, "J", text[4:10], joins=True)
+    approved = Approved(k.value)
+    redactor = Redactor(
+        [_Given(k, w, j)], InMemoryVault(), Allowlist(), modes={"K": "block", "W": "warn"}
+    ).with_overrides(approved)
+    assert redactor.redact_text(text) == "ABCD«J_001»KLMNOP"
+    assert approved.asked == [("K", "ABCD"), ("K", "ABCD")]
+    # Of the values sent, K is read first and W overlaps it: no warning.
+    assert redactor.warn_counts == Counter()
 
 
 def test_a_warn_mode_value_overlapping_two_redacted_ones_is_counted_once() -> None:
@@ -643,6 +675,16 @@ def _sorted(spans: Iterable[tuple[int, int, str, bool, int]]) -> list[Detection]
     return sorted(found, key=lambda d: (d.start, -(d.end - d.start), d.priority))
 
 
+def _replaced(winners: Iterable[Detection], modes: Mapping[str, str]) -> set[int]:
+    """The offsets ``redact_text`` replaces of ``winners`` under ``modes``:
+    a deny string's or a union's (tier 0), a redact-mode value's."""
+    offsets: set[int] = set()
+    for d in winners:
+        if d.tier == 0 or modes.get(d.detector_type, "redact") == "redact":
+            offsets.update(range(d.start, d.end))
+    return offsets
+
+
 def _redacts(winners: Iterable[Detection], modes: Mapping[str, str]) -> set[int] | None:
     """The offsets ``winners`` redact under ``modes`` (None: one refuses)."""
     offsets: set[int] = set()
@@ -692,22 +734,25 @@ def test_joining_never_redacts_or_refuses_less_than_a_sweep_without_some(
 def test_a_dropped_warn_mode_value_is_counted_only_when_part_of_it_goes_upstream(
     spans: list[tuple[int, int, str, bool, int]], modes: dict[str, str]
 ) -> None:
-    # What the redaction counts as warnings besides its winners: exactly the
-    # warn-mode values the winners cut — a joined run drops, or a deny
-    # string or a value redacted in its place wins an ordinary overlap
-    # against (with no joining value: the sweep's own) — with a character no
-    # winner redacts, each span once however many detections read it, and
-    # none that lost only to a value forwarded as sent.
+    # What the redaction counts as warnings: exactly what the rule predicts
+    # (tests/warn_oracle.py) from the values found and what is replaced — a
+    # warn-mode value a joined run drops, or a deny string or a value
+    # redacted in its place wins an ordinary overlap against, counts when a
+    # character of it is still sent, each span once however many detections
+    # read it. A text a block refuses while resolving (a block-mode value in
+    # a joined run) counts what it would with every block approved.
+    text = "x" * 60
     detections = _sorted(spans)
     redactor = Redactor([], InMemoryVault(), Allowlist(), modes=modes)
+    approving = Redactor([], InMemoryVault(), Allowlist(), modes=modes).with_overrides(Every())
+    passing = approving._resolved(text, detections)
     try:
-        winners = redactor._settled("x" * 60, detections, None)
+        winners = redactor._settled(text, detections, None)
     except BlockedRequest:
-        return
-    redacted = _redacts(winners, modes)
-    if redacted is None:
-        return  # a block-mode winner: redact_text refuses the text
-    assert redactor.warn_counts == cut_warnings(detections, winners, modes, redacted)
+        winners = passing
+    else:
+        assert winners == passing
+    assert redactor.warn_counts == expected_warnings(detections, modes, _replaced(winners, modes))
 
 
 class _Additive:
@@ -781,17 +826,14 @@ def test_a_recorder_counts_the_warn_values_a_joined_run_drops() -> None:
         def record(self, text: str, found: object) -> None:
             pass
 
-    rules = (
-        CustomRule(name="qty", detector_type="QTY", pattern=r"Qty \d+ "),
-        CustomRule(name="lead", detector_type="LEAD", pattern=r"\d+ 4111"),
-        CustomRule(name="tail", detector_type="TAIL", pattern=r"1111 Main"),
-    )
+    rules = (QTY, LEAD, TAIL_1111)
     modes = {"QTY": "warn", "LEAD": "warn", "TAIL": "warn"}
     text = f"Qty 12 {CARD} Main Street"
     plain = _redactor(*rules, modes=modes)
     recorded = _redactor(*rules, modes=modes).with_recorder(Recorder())
     assert _redacted(recorded, text) == _redacted(plain, text)
-    assert recorded.warn_counts == plain.warn_counts == Counter({"QTY": 1, "LEAD": 1, "TAIL": 1})
+    # The lead overlaps the quantity, both sent: one of them counts.
+    assert recorded.warn_counts == plain.warn_counts == Counter({"QTY": 1, "TAIL": 1})
 
 
 @pytest.mark.parametrize(
@@ -845,12 +887,10 @@ def test_an_additive_detection_never_joins(
     ordered = sorted(extra, key=lambda d: (d.start, -(d.end - d.start), d.priority))
     for d in _sweep(ordered):
         assert set(range(d.start, d.end)) <= covered
-    # A warn-mode value the winners cut is a warning only when part of it is
-    # still sent: one an llm finding redacts the rest of is not.
+    # The warnings follow the rule: an llm finding read as found, a
+    # warn-mode value one redacts the rest of not counted.
     assert redactor._settled(text, both, None) == winners
-    redacted = _redacts(winners, modes)
-    if redacted is not None:
-        assert redactor.warn_counts == cut_warnings(both, winners, modes, redacted)
+    assert redactor.warn_counts == expected_warnings(both, modes, _replaced(winners, modes))
 
 
 # --- the differential --------------------------------------------------------------

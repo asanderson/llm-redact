@@ -144,9 +144,10 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
     ),
     "llm_redact.redactor.xǁRedactorǁscan__mutmut_14": (
         "sent = False -> sent = None in Redactor.scan: the flag is read once, as "
-        "`not sent` in the finally, and None is falsy like False; a completed loop "
-        "reassigns it to a bool before it is read, so None only ever stands in for "
-        "False on a refusal (BlockedRequest), where both count the cut values."
+        "`detected and sent` in the finally, and None is falsy like False; a "
+        "completed loop reassigns it to a bool before it is read, so None only ever "
+        "stands in for False on a refusal (BlockedRequest), where both take the "
+        "`elif detected` branch and count against what redact_text replaces."
     ),
     "llm_redact.rehydrate.x_escape_prefix_start__mutmut_24": (
         "(i - j) % 2 -> (i + j) % 2: i-j and i+j always share parity, so the "

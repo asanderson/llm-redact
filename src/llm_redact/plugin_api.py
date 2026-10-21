@@ -899,12 +899,16 @@ class ContentFacts:
       redaction replaced with placeholders in THIS request (never another
       request's, whatever runs concurrently), sorted by type.
     - ``warned``: likewise for the warn-mode values the request forwards as
-      sent (observed, not redacted) — in part included where a value it is
-      joined with or an added deny string (``DetectionOverlay``) takes part
-      of it (one the redacted values cover whole does not count), but not
-      one that loses an ordinary overlap to a configured deny string or to
-      a value redacted in its place, although the rest of it is sent
-      (docs/detection.md "Per-rule modes").
+      sent (observed, not redacted) — in part included, once, where the
+      redaction takes part of it: a deny string (configured, or added by
+      ``DetectionOverlay``), a value redacted in its place, a value it is
+      joined with, an ``llm`` backend finding; one the redacted values
+      cover whole does not count, nor one that lost only to another value
+      forwarded as sent — that one counts as what it is: a warn-mode value
+      here, an approved block in ``overridden_types``, never here. A
+      warn-mode ``llm`` backend finding is cut around the other values
+      instead, and counts once per piece it forwards (docs/detection.md
+      "Per-rule modes").
     - ``unscanned_parts``: the binary upload file parts this request
       forwards unscanned (``[detection] binary_uploads = "forward"``, or an
       approved ``binary_upload`` override).

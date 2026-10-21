@@ -81,7 +81,7 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "-(end + start) and -(end - start) differ by the constant 2*start and order "
         "them identically (longest first). Same sorted list for every input."
     ),
-    "llm_redact.redactor.xǁRedactorǁ_resolved__mutmut_35": (
+    "llm_redact.redactor.xǁRedactorǁ_resolved__mutmut_33": (
         "additive sort key -(end - start) -> -(end + start) in Redactor._resolved: the "
         "same key as _resolve_overlaps' (mutant 15 there) — among equal starts both "
         "order longest first, so the sort is unchanged for every input."

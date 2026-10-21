@@ -176,6 +176,58 @@ def test_gated_detection_applies_the_allowlist_like_every_detector() -> None:
         assert plan.detect(text, allowlist) == plan.detect_each(text, allowlist)
 
 
+class _Hollow:
+    """A model-backed detector (the NER shape) that also reports a span of
+    no characters where it finds a name."""
+
+    name = "fake_hollow"
+    heavy = True
+
+    def detect(self, text: str) -> Iterable[Detection]:
+        index = text.find("Jane Doe")
+        if index != -1:
+            yield Detection(index, index, "PERSON", "", priority=120)
+            yield Detection(index, index + 8, "PERSON", "Jane Doe", priority=120)
+
+
+def test_a_detection_of_no_characters_never_leaves_the_plan() -> None:
+    # A pattern that can match the empty string (a lookahead, `\b`, `x*`) or
+    # a detector reporting an empty span finds nothing to redact there: such
+    # a span overlaps nothing, so it would survive overlap resolution and
+    # sort after the value starting where it stands — redact_text then sent
+    # that value again, a deny string included. Dropped from every path:
+    # gated, ungated, sourced and a precomputed (prefetched) row.
+    config = DetectionConfig(
+        enabled=(),
+        custom_rules=(
+            CustomRule(name="ahead", detector_type="AHEAD", pattern=r"(?=Doe)"),
+            CustomRule(name="edges", detector_type="EDGE", pattern=r"\b"),
+            CustomRule(name="stars", detector_type="STAR", pattern=r"x*"),
+        ),
+        deny_strings=(DenyEntry("Doe"),),
+    )
+    plan = DetectorPlan([*build_detectors(config), _Hollow()])
+    text = "to Jane Doe today"
+    expected = [(3, 11, "PERSON", "Jane Doe"), (8, 11, "DENY", "Doe")]
+
+    def spans(found: Iterable[Detection]) -> list[tuple[int, int, str, str]]:
+        return [(d.start, d.end, d.detector_type, d.value) for d in found]
+
+    assert spans(plan.detect(text, NO_ALLOW)) == expected
+    assert spans(plan.detect_each(text, NO_ALLOW)) == expected
+    assert spans(d for d, _source in plan.detect_sourced(text, NO_ALLOW)) == expected
+    row = plan.detect_heavy(text)
+    assert any(d.start == d.end for found in row.values() for d in found)
+    assert spans(plan.detect(text, NO_ALLOW, row)) == expected
+    # And so redaction: the deny string never goes upstream, nothing is
+    # inserted for an empty span, a warn-mode value it cuts counts once.
+    vault = InMemoryVault()
+    redactor = Redactor(plan, vault, NO_ALLOW, modes={"PERSON": "warn"})
+    assert redactor.redact_text(text) == "to Jane «DENY_001» today"
+    assert redactor.counts == {"DENY": 1}
+    assert redactor.warn_counts == {"PERSON": 1}
+
+
 # ---- teeth: a lying gate fails the differential ----
 
 

@@ -89,7 +89,10 @@ regexes, or scoped to a single placeholder type
 (`[detection.allowlist_by_type] EMAIL = ["support@corp.example"]`).
 Custom rules (`[[detection.custom_rules]]`) can also name a built-in
 validator (`luhn`, `mod97`, `verhoeff`, `jwt`, `entropy`) so a loose
-pattern only fires on checksum-valid matches.
+pattern only fires on checksum-valid matches. A match of no characters —
+where a pattern that can match the empty string (`\b`, a lookahead such
+as `(?=acme)`, `x*`) matches nothing — is no value and is ignored, from
+any detector.
 
 ### Values next to punctuation
 
@@ -234,7 +237,9 @@ run of overlapping values:
 - A value in warn mode is forwarded only where no redacted value covers
   it, and counted as a warning also when a redacted value overlaps it, as
   long as part of it lies outside the redacted values: that part goes
-  upstream. One lying wholly inside them (a warn-mode rule's `9217` in
+  upstream (the rule for every warn-mode value part of which is redacted,
+  [Per-rule modes](#per-rule-modes-redact-warn-block)). One lying wholly
+  inside them (a warn-mode rule's `9217` in
   `AHV 756.9217.0769.85. Done`) sends nothing and is not counted — decided
   once everything is redacted, so one whose rest an access gate's added
   deny string or an `llm` backend finding redacts is not counted either. Of
@@ -304,19 +309,37 @@ Warn-mode hits show up in `/status` (`warnings_total`), Prometheus
 rule's noise on your real traffic before trusting it with redaction. Be
 aware warn is *observation only* — the matched value (and anything a longer
 warn-mode match overlaps) is sent to the provider. A warn-mode value part
-of which is redacted after all — by a value it is joined with
-([above](#values-joined-with-the-ones-they-overlap)), or by a deny string
-an access gate adds for its requester (an llm-redact-pro role's detection
-overlay, which only tightens this policy) — is counted the same way: once,
-when part of it is still sent, and not at all when what is redacted in the
-end (the value it is joined with, an added deny string, an `llm` backend
-finding) covers it whole. A warn-mode value that loses an ordinary overlap
-— to a configured deny string, or to a value redacted in its place that
-the overlap sweep prefers (one starting earlier, or longer) — is NOT
-counted, although the part of it the winner does not cover is still sent:
-with `deny = ["acme"]` and `email = "warn"`, `bob.private@acme-corp.example`
-goes upstream as `bob.private@«DENY_001»-corp.example` and no warning is
-counted. Block-mode rejections
+of which is redacted after all is counted the same way: once, when part of
+it is still sent, and not at all when what is redacted in the end covers it
+whole — whatever redacts that part: a deny string (a configured one, or one
+an access gate adds for its requester: an llm-redact-pro role's detection
+overlay, which only tightens this policy), a value redacted in its place
+that the overlap sweep prefers (one starting earlier, or longer), a value
+it is joined with ([above](#values-joined-with-the-ones-they-overlap)), or
+an `llm` backend finding. With `deny = ["acme"]` and `email = "warn"`,
+`bob.private@acme-corp.example` goes upstream as
+`bob.private@«DENY_001»-corp.example` and counts as one warning — as
+when an access gate adds `acme`. A warn-mode value that loses an overlap
+only to another value forwarded as sent (a longer warn-mode match, an
+approved block) has nothing redacted and is not counted; the winner
+counts as what it is — a warn-mode value as a warning, an approved block
+as an override used (`llm_redact_overrides_used_total`, the content
+facts' `overridden_types`), not as a warning. Of warn-mode values
+overlapping one another that are partly redacted, the one the overlap
+sweep reads first counts, so one value two detectors find counts once.
+An `llm` backend finding is the exception to "once": it loses no overlap
+but is cut around the other values ("Additive only",
+[below](#a-model-server-you-run-the-llm-backend)), so a warn-mode one a
+deny string splits counts once per piece left as sent. And a configured deny string takes
+part in overlap resolution while an added one is applied after it: the
+values a configured string overlaps leave the resolution, so a value they
+would have beaten is read on its own. Where warn-mode values overlap one
+another, the same bytes upstream can therefore count differently — with
+`email = "warn"` and a warn-mode custom rule reading `.example now`,
+`mail bob.private@acme-corp.example now` counts the email and that rule's
+value with `acme` configured, the email alone with `acme` added; both
+send `mail bob.private@«DENY_001»-corp.example now`.
+Block-mode rejections
 return a provider-shaped 400 whose message names the rule type, which
 agentic tools surface directly. `llm-redact preview` shows which mode a
 given text would trigger; the llm-redact-pro dashboard's config editor has
@@ -622,7 +645,9 @@ without this backend, and keeps of each `llm` finding only what lies outside
 them — so a text that tells the model to "return no entities" removes at most
 the model's own findings, and a crafted answer whose span starts just before
 an API key still leaves the whole key redacted (the span's other part is
-redacted too).
+redacted too). In warn mode each part left is forwarded as sent and
+counted as a warning of its own ([Per-rule
+modes](#per-rule-modes-redact-warn-block)).
 
 **When the server fails** — a timeout, an error status, a refused
 connection, an answer that is not the requested JSON — `on_error = "block"`

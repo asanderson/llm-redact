@@ -75,12 +75,18 @@ def test_deny_wins_inside_longer_rule_match(vault: InMemoryVault) -> None:
 
 
 def test_deny_wins_over_warn_mode_engulfing(vault: InMemoryVault) -> None:
-    # A warn-mode EMAIL match overlapping a deny span is dropped entirely:
-    # the deny redacts, and no warn is counted for the dropped match.
+    # A warn-mode EMAIL match overlapping a deny span loses the overlap: the
+    # deny redacts, and the rest of the email ("jane@") is sent as it was —
+    # a warning, once, for the email the deny span cut.
     config = DetectionConfig(deny_strings=(DenyEntry("corp.example"),))
     redactor = _redactor(vault, config, modes={"EMAIL": "warn"})
     out = redactor.redact_text("mail jane@corp.example now")
-    assert "«DENY_001»" in out
+    assert out == "mail jane@«DENY_001» now"
+    assert redactor.warn_counts == {"EMAIL": 1}
+    # One the deny span covers whole sends nothing: no warning.
+    config = DetectionConfig(deny_strings=(DenyEntry("jane@corp.example now"),))
+    redactor = _redactor(InMemoryVault(), config, modes={"EMAIL": "warn"})
+    assert redactor.redact_text("mail jane@corp.example now") == "mail «DENY_001»"
     assert redactor.warn_counts == {}
 
 

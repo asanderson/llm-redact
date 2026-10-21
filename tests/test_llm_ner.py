@@ -914,6 +914,15 @@ async def test_a_failing_model_server_refuses_the_request_503(
     (row,) = state.recent
     assert row["status"] == 503
     assert NAME not in caplog.text and "secret of" not in caplog.text
+    # The failed call is counted where it ran: on the NER worker (never
+    # inline), or by the redaction itself — an inline call attempted,
+    # counted although it raised.
+    stats = _llm_stats(app)
+    assert (stats.errors, stats.inline_calls, stats.prefetch_misses) == (
+        1,
+        0 if prefetching else 1,
+        0,
+    )
     # The server answers again: the next request goes through.
     assert (await _chat(app, f"hi {NAME}")).status_code == 200
 
@@ -1013,6 +1022,8 @@ async def test_a_preview_moves_the_live_ner_counters_and_breaker_only(
     assert state.preview(f"secret {NAME}")["unavailable"] == {"backend": "llm", "reason": "timeout"}
     metrics, status = await read()
     assert 'llm_redact_ner_errors_total{backend="llm"} 1' in metrics
+    # The failed call is an inline call too: attempted, though it raised.
+    assert 'llm_redact_ner_inline_calls_total{backend="llm"} 2' in metrics
     assert 'llm_redact_ner_breaker_opens_total{backend="llm"} 1' in metrics
     assert status["detection"]["ner"]["backends"]["llm"]["breaker"]["state"] == "open"
     assert "llm_redact_requests_total{" not in metrics

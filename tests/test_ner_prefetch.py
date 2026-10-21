@@ -17,14 +17,14 @@ import re
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from llm_redact.bench.corpus import generate
-from llm_redact.detection.base import Detection, Detector
+from llm_redact.detection.base import Detection, Detector, DetectorUnavailable
 from llm_redact.detection.engine import (
     Allowlist,
     DetectionConfig,
@@ -415,6 +415,79 @@ def test_a_failing_model_releases_its_lock() -> None:
         with pytest.raises(RuntimeError):
             run()
         assert not heavy_lock(model).locked()
+
+
+class _Raising(FakeModel):
+    """A heavy detector whose every call raises ``error``."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    def detect(self, text: str) -> list[Detection]:
+        self.calls.append(text)
+        raise self.error
+
+
+_FAULTS = [
+    pytest.param(lambda: DetectorUnavailable("llm", "timeout"), id="unavailable"),
+    pytest.param(lambda: RuntimeError("model fault"), id="other"),
+]
+
+
+@pytest.mark.parametrize("fault", _FAULTS)
+@pytest.mark.parametrize("filtered", [False, True], ids=["bare", "type_filtered"])
+def test_an_inline_call_that_raises_is_counted_once_and_propagates(
+    fault: Callable[[], Exception], filtered: bool
+) -> None:
+    # inline_calls counts every call the redaction ATTEMPTED: one that
+    # raised held its caller (on a request's path, the event loop) up for
+    # as long as it ran, like one that returned, and was once not counted
+    # at all.
+    error = fault()
+    model = _Raising(error)
+    detector: Detector = TypeFilteredDetector(model, frozenset()) if filtered else model
+    detectors: list[Detector] = [*build_detectors(DetectionConfig()), detector, Light()]
+    redactor = _redactor(detectors)
+    plan = redactor.plan
+    with pytest.raises(type(error)) as raised:
+        plan.detect("Jane Doe", ALLOW)
+    assert raised.value is error  # propagated unchanged
+    assert model.calls == ["Jane Doe"]
+    assert (model.stats.inline_calls, model.stats.prefetch_misses) == (1, 0)
+    assert not heavy_lock(model).locked()  # counted under the lock, then released
+    # Once per attempt, through every way the plan runs a detector itself.
+    with pytest.raises(type(error)):
+        plan.detect_each("Bob Jones", ALLOW)
+    with pytest.raises(type(error)):
+        plan.detect_sourced("Carol King", ALLOW)
+    assert model.stats.inline_calls == 3
+    # A request's redaction: a text missing from its table is a miss, run
+    # inline and counted there too, whether the call returned or raised.
+    with pytest.raises(type(error)):
+        redactor.with_precomputed({}, plan).redact_text("Dan Brown")
+    assert (model.stats.inline_calls, model.stats.prefetch_misses) == (4, 1)
+    assert model.calls == ["Jane Doe", "Bob Jones", "Carol King", "Dan Brown"]
+
+
+@pytest.mark.parametrize("fault", _FAULTS)
+async def test_a_prefetch_that_raises_counts_no_inline_call(
+    fault: Callable[[], Exception],
+) -> None:
+    # The NER worker's calls (detect_heavy) are never inline, whether they
+    # returned or raised: the exception reaches the prefetch's caller
+    # unchanged, and the redaction itself ran nothing.
+    error = fault()
+    model = _Raising(error)
+    plan = DetectorPlan([model])
+    with pytest.raises(type(error)) as raised:
+        await prefetch(plan, ["Jane Doe"])
+    assert raised.value is error
+    with pytest.raises(type(error)):
+        plan.detect_heavy("Bob Jones")
+    assert model.calls == ["Jane Doe", "Bob Jones"]
+    assert model.stats.inline_calls == model.stats.prefetch_misses == 0
+    assert not heavy_lock(model).locked()
 
 
 def test_a_miss_counts_on_every_heavy_detector() -> None:

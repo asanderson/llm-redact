@@ -594,6 +594,12 @@ def test_every_definition_of_the_inline_counter_counts_a_preview() -> None:
         clause = definition.split("preview", 1)[1]
         for phrase in ("worker thread", "event loop", "after 0.17.1", "0.17.1 and earlier"):
             assert phrase in clause, (where, phrase)
+        # And what is counted: every call attempted inline (DetectorPlan's
+        # _inline counts in a finally), one that raised — the llm backend's
+        # DetectorUnavailable, any other fault — like one that returned
+        # (tests/test_ner_prefetch.py). The counter once skipped every call
+        # that raised, and no definition said which it counted.
+        assert "every call attempted, whether it returned or raised" in definition, where
 
 
 def _flat(text: str | None) -> str:

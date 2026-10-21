@@ -19,10 +19,10 @@ overlapping windows (``scanned_windowed``, each window counted in
 per model entity or window (``ungrounded``, ``errors``, ``breaker_opens``
 and ``breaker_short_circuits`` only the llm backend's, which asks a model
 server), and two count where the model ran: the strings the redaction itself
-ran a backend on (``inline_calls``; on a request's path, the event loop) and
-how many of those a request's NER prefetch should have covered
-(``prefetch_misses``). To add a counter, add a field: the ``/status`` block
-lists every field.
+ran a backend on (``inline_calls``, every call attempted, whether it returned
+or raised; on a request's path, the event loop) and how many of those a
+request's NER prefetch should have covered (``prefetch_misses``). To add a
+counter, add a field: the ``/status`` block lists every field.
 """
 
 from dataclasses import dataclass, fields
@@ -76,9 +76,12 @@ class NerStats:
     breaker_short_circuits: int = 0
     # Strings this backend was run on BY THE REDACTION ITSELF
     # (DetectorPlan._run) instead of ahead of it on the NER worker thread
-    # (ner_prefetch). On a request's path that is the event loop: every such
-    # call held up every other request on the proxy for one string's
-    # inference. A redaction preview (ProxyState.preview, which the
+    # (ner_prefetch): every call attempted, counted once whether it returned
+    # or raised (a DetectorUnavailable, a timeout, any other fault; the
+    # worker's own calls never count here, raising or not). On a request's
+    # path that is the event loop: every such call held up every other
+    # request on the proxy for one string's inference, a failed one for as
+    # long as it ran. A redaction preview (ProxyState.preview, which the
     # llm-redact-pro dashboard runs on a worker thread of its own in its
     # releases after 0.17.1, on the event loop in 0.17.1 and earlier) has no
     # prefetched results and is counted too. Zero while every request shape

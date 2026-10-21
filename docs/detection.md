@@ -51,7 +51,10 @@ regexes, or scoped to a single placeholder type
 (`[detection.allowlist_by_type] EMAIL = ["support@corp.example"]`).
 Custom rules (`[[detection.custom_rules]]`) can also name a built-in
 validator (`luhn`, `mod97`, `verhoeff`, `jwt`, `entropy`) so a loose
-pattern only fires on checksum-valid matches.
+pattern only fires on checksum-valid matches. A match of no characters —
+where a pattern that can match the empty string (`\b`, a lookahead such
+as `(?=acme)`, `x*`) matches nothing — is no value and is ignored, from
+any detector.
 
 ### Values next to punctuation
 

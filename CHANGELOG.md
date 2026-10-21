@@ -68,6 +68,14 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   placeholder of its own.) Nothing 1.12.0 or 1.12.1 redacted or refused is forwarded now, with
   custom rules, NER spans and `[detection.modes]` too: tests pin that against both releases'
   pipelines.
+- **A custom rule whose pattern can match the empty string could send a deny string upstream as
+  sent.** With `deny = ["acme"]` and a custom rule matching no characters where the deny string
+  starts (a lookahead such as `(?=acme)`, `\d*(?=acme)`), `the acme merger` went upstream as
+  `the «DENY_001»«CODENAME_001»acme merger`: the empty match overlapped nothing, was placed after
+  the deny string, and the redaction inserted a placeholder for nothing and then sent the deny
+  string again. A pattern matching the empty string elsewhere (`\b`, `x*`) inserted a placeholder
+  at every such position. A detection of no characters, from any detector, is now dropped before
+  anything acts on it (docs/detection.md).
 
 ### Changed
 - **The `hf` backend's default model is now `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`**

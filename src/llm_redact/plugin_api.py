@@ -905,17 +905,23 @@ class ContentFacts:
       redaction replaced with placeholders in THIS request (never another
       request's, whatever runs concurrently), sorted by type.
     - ``warned``: likewise for the warn-mode values the request forwards as
-      sent (observed, not redacted) — in part included, once, where the
-      redaction takes part of it: a deny string (configured, or added by
-      ``DetectionOverlay``), a value redacted in its place, a value it is
-      joined with, an ``llm`` backend finding; one the redacted values
-      cover whole does not count, nor one that lost only to another value
-      forwarded as sent — that one counts as what it is: a warn-mode value
-      here, an approved block (or, where the proxy cannot rewrite the text,
-      any value an approved override passes) in ``overridden_types``, never
-      here. A warn-mode ``llm`` backend finding is cut around the other
-      values instead, and counts once per piece it forwards
-      (docs/detection.md "Per-rule modes").
+      sent (observed, not redacted), by one rule over the values found and
+      the characters replaced (docs/detection.md "Per-rule modes"): a
+      warn-mode value counts once when a character of it is still sent —
+      also where the redaction takes part of it: a deny string (configured,
+      or added by ``DetectionOverlay``, alike wherever they replace the
+      same characters), a value redacted in its place, a value it is joined
+      with, an ``llm`` backend finding; an ``llm`` finding counts once
+      however many pieces of it are sent, read after the other detectors'
+      values (it never takes a warning from one of them). One the redacted
+      values cover whole does not count, nor one overlapping another value
+      forwarded as sent that the overlap sweep takes before it, even one
+      sent whole. That other value is counted as what it is: a warn-mode
+      value here, an approved block (or, where the proxy cannot rewrite the
+      text, any value an approved override passes) in ``overridden_types``
+      — but a block-mode value that lost the overlap resolution to a value
+      redacted in its place is neither refused nor approved: its rest and
+      the warn-mode value it hides go upstream counted nowhere.
     - ``unscanned_parts``: the binary upload file parts this request
       forwards unscanned (``[detection] binary_uploads = "forward"``, or an
       approved ``binary_upload`` override).

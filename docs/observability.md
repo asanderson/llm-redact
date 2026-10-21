@@ -18,7 +18,7 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 |---|---|
 | `deploy/prometheus-scrape.yml` | A `scrape_configs` job to merge into your `prometheus.yml`. |
 | `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, upstream errors, high proxy-overhead p95, refusals caused by the proxy's own storage, NER skipping strings longer than `max_chars`, the `llm` NER backend's model server failing, a plugin's scan sinks dropping captures). |
-| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes, NER coverage: strings by outcome, strings skipped as longer than `max_chars`, windows and truncated windows, entities dropped; a plugin's scan sinks: captures delivered, captures dropped by reason, queue depth). |
+| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes, NER coverage: strings by outcome, strings skipped as longer than `max_chars`, strings run inline instead of prefetched, windows and truncated windows, entities dropped, the `llm` backend's model server failures and circuit breaker; a plugin's scan sinks: captures delivered, captures dropped by reason, queue depth). |
 
 ## Metrics reference
 
@@ -44,7 +44,7 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | `llm_redact_ner_errors_total` | counter | `backend` | Strings the `llm` backend's model server failed on (a timeout, an error status, a connection fault, an answer that is not the requested JSON), and strings its open circuit breaker failed at once. With `on_error = "block"` each refused its request (`detector_unavailable`); with `"skip"` each was **forwarded without the backend's findings** — a coverage gap, also a `llm-redact status` posture line. |
 | `llm_redact_ner_breaker_opens_total` | counter | `backend` | Times the `llm` backend's circuit breaker opened (`[detection.ner.llm] breaker_seconds`): `breaker_failures` calls in a row failed because its model server is down — a timeout, a transport fault, an HTTP 5xx — or the probe after a cooldown failed. While open, `/status` `detection.ner.backends.llm.breaker` says so and `llm-redact status` prints a posture line. |
 | `llm_redact_ner_breaker_short_circuits_total` | counter | `backend` | Strings the `llm` backend failed at once, without asking its model server, because its circuit breaker was open; each is also counted in `llm_redact_ner_errors_total` (refused, or forwarded without its findings, as `on_error` says). |
-| `llm_redact_ner_inline_calls_total` | counter | `backend` | Strings an NER backend ran on the event loop itself — every other request waited for that string's inference — instead of ahead of the redaction on the NER worker thread. |
+| `llm_redact_ner_inline_calls_total` | counter | `backend` | Strings an NER backend was run on by the redaction itself instead of ahead of it on the NER worker thread (the NER prefetch, [how-it-works.md](how-it-works.md)). On a request's path that is the event loop — every other request waited for that string's inference; a redaction preview in the llm-redact-pro dashboard runs the live detectors this way too and is counted — on a worker thread of its own in llm-redact-pro releases after 0.17.1, on the event loop in 0.17.1 and earlier. Zero while every request is prefetched and nobody runs a preview. |
 | `llm_redact_ner_prefetch_misses_total` | counter | `backend` | Strings a request's redaction did not find among its precomputed NER results (or found computed for detectors a reload has since replaced) and ran inline instead; each is also counted in `llm_redact_ner_inline_calls_total`. |
 | `llm_redact_overrides_used_total` | counter | `kind` | Requests (and realtime frames) that passed a refusal on an approved refusal override (docs/overrides.md), by `once`/`always` — **the overridden value, body or file part was forwarded upstream as sent**, like a warn-mode value. Also `/status` `overrides`. |
 | `llm_redact_upstream_errors_total` | counter | `provider` | Transport faults failed closed as 502 (by upstream name when routing is enabled). |
@@ -82,6 +82,34 @@ change to `[detection]`, by SIGHUP or the dashboard editor) — Prometheus reads
 that as a counter reset, which `rate()` and `increase()` handle. A reload that
 leaves `[detection]` alone keeps them. A redaction preview in the
 llm-redact-pro dashboard runs the live detectors and is counted like a request.
+
+The shipped dashboard's **NER coverage** row charts every one of them, per
+backend (*No data* without `[detection.ner]`), three panels to a line:
+
+- strings by outcome; the strings skipped as longer than `max_chars`, in
+  orange (what `LlmRedactNerSkippingLongStrings` warns on); and where the
+  models ran: `inline` is `llm_redact_ner_inline_calls_total`, the strings a
+  backend was run on by the redaction itself instead of ahead of it on the
+  NER worker thread (the NER prefetch, [how-it-works.md](how-it-works.md)) —
+  on a request's path that is the event loop, every other request waiting
+  for that string's inference; a redaction preview in the llm-redact-pro
+  dashboard runs this way too, on its own worker thread — and `prefetch
+  misses` is `llm_redact_ner_prefetch_misses_total`, the strings a request's
+  redaction did not find among the results its prefetch computed (a reload
+  replaced the detectors while the request waited; otherwise a string the
+  prefetch failed to collect), each also counted as inline. Both stay at
+  zero while every request is prefetched and nobody runs a preview.
+- the windows long strings were read in and the truncated ones; the model
+  entities dropped, in orange (`labels` and `offsets`, which should stay at
+  zero, and `ungrounded`: values the `llm` backend's model server returned
+  that do not occur in the text it read, that are shorter than two characters
+  or that hold a placeholder's guillemet — an earlier turn's token a request
+  carries counts there too); and the `llm` backend's model
+  server on a panel of its own: the strings it failed on in orange
+  (`llm_redact_ner_errors_total`, what `LlmRedactNerServerFailing` warns
+  on), the strings its open circuit breaker failed at once without asking
+  the server in yellow, and the times the breaker opened in red. Every other
+  backend reports zero on the `llm` backend's series.
 
 ## Local refusal kinds
 

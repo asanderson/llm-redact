@@ -18,10 +18,11 @@ overlapping windows (``scanned_windowed``, each window counted in
 ``[detection.ner] max_chars`` (``skipped_max_chars``). The other counters are
 per model entity or window (``ungrounded``, ``errors``, ``breaker_opens``
 and ``breaker_short_circuits`` only the llm backend's, which asks a model
-server), and two count where the model ran: on the
-event loop (``inline_calls``) and how many of those a request's NER prefetch
-should have covered (``prefetch_misses``). To add a counter, add a field:
-the ``/status`` block lists every field.
+server), and two count where the model ran: the strings the redaction itself
+ran a backend on (``inline_calls``; on a request's path, the event loop) and
+how many of those a request's NER prefetch should have covered
+(``prefetch_misses``). To add a counter, add a field: the ``/status`` block
+lists every field.
 """
 
 from dataclasses import dataclass, fields
@@ -56,8 +57,10 @@ class NerStats:
     # the exact sent text can be restored.
     offsets_dropped: int = 0
     # Entities a model server returned (the llm backend) whose text does
-    # not occur in the text it was given, or is shorter than two
-    # characters: invented or mangled, never redacted.
+    # not occur in the text it was given, is shorter than two characters
+    # or holds a placeholder's guillemet (an earlier turn's token the text
+    # carries), and entities that came without a text or a type: never
+    # redacted.
     ungrounded: int = 0
     # Strings a model server failed on (the llm backend: a timeout, an
     # error status, a connection fault, an answer it could not read). With
@@ -71,11 +74,15 @@ class NerStats:
     # Strings the llm backend failed at once, without asking its server,
     # because its circuit breaker was open (each also counted in errors).
     breaker_short_circuits: int = 0
-    # Strings this backend was run on BY THE EVENT LOOP (DetectorPlan._run)
-    # instead of ahead of the redaction on the NER worker thread
-    # (ner_prefetch): every call that held up every other request on the
-    # proxy for one string's inference. Zero while every request shape is
-    # prefetched.
+    # Strings this backend was run on BY THE REDACTION ITSELF
+    # (DetectorPlan._run) instead of ahead of it on the NER worker thread
+    # (ner_prefetch). On a request's path that is the event loop: every such
+    # call held up every other request on the proxy for one string's
+    # inference. A redaction preview (ProxyState.preview, which the
+    # llm-redact-pro dashboard runs on a worker thread of its own in its
+    # releases after 0.17.1, on the event loop in 0.17.1 and earlier) has no
+    # prefetched results and is counted too. Zero while every request shape
+    # is prefetched and nobody runs a preview.
     inline_calls: int = 0
     # Strings a request's redaction looked up in its precomputed NER results
     # and did not find (or found computed for detectors a reload replaced):

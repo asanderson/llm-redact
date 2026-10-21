@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -116,33 +117,546 @@ def test_no_alert_reads_the_end_to_end_duration() -> None:
 
 def test_ner_coverage_gap_has_panels_and_an_alert() -> None:
     # Strings longer than [detection.ner] max_chars are never read by the
-    # models: the shipped dashboard shows every NER family and an alert
-    # pages on a sustained skip rate, with a runbook-style description.
-    dashboard = (DEPLOY / "grafana-dashboard.json").read_text()
-    for family in (
-        "llm_redact_ner_strings_total",
-        "llm_redact_ner_windows_total",
-        "llm_redact_ner_windows_truncated_total",
-        "llm_redact_ner_labels_dropped_total",
-        "llm_redact_ner_offsets_dropped_total",
-        "llm_redact_ner_ungrounded_total",
-        "llm_redact_ner_errors_total",
-        "llm_redact_ner_breaker_opens_total",
-        "llm_redact_ner_breaker_short_circuits_total",
-    ):
-        assert family in dashboard, family
-    rules = yaml.safe_load((DEPLOY / "prometheus-alerts.yml").read_text())["groups"][0]["rules"]
-    rule = {r["alert"]: r for r in rules}["LlmRedactNerSkippingLongStrings"]
+    # models: the shipped dashboard charts every NER family (below) and an
+    # alert pages on a sustained skip rate, with a runbook-style description.
+    rules = _alert_rules()
+    rule = rules["LlmRedactNerSkippingLongStrings"]
     assert 'llm_redact_ner_strings_total{outcome="skipped_max_chars"}' in rule["expr"]
     assert rule["labels"]["severity"] == "warning"
     assert rule["annotations"]["summary"]
     assert "max_chars" in rule["annotations"]["description"]
     # The llm backend's model server failing: refused or forwarded without
     # its findings, either way worth a look.
-    server = {r["alert"]: r for r in rules}["LlmRedactNerServerFailing"]
+    server = rules["LlmRedactNerServerFailing"]
     assert "llm_redact_ner_errors_total" in server["expr"]
     assert server["labels"]["severity"] == "warning"
     assert "on_error" in server["annotations"]["description"]
+
+
+def _alert_rules() -> dict[str, dict[str, Any]]:
+    rules = yaml.safe_load((DEPLOY / "prometheus-alerts.yml").read_text())["groups"][0]["rules"]
+    return {rule["alert"]: rule for rule in rules}
+
+
+def _row_panels(title: str) -> list[dict[str, Any]]:
+    """The panels laid out below the row titled ``title``, up to the next row."""
+    panels = _dashboard_panels()
+    rows = [p["gridPos"]["y"] for p in panels if p["type"] == "row"]
+    top = next(p["gridPos"]["y"] for p in panels if p["type"] == "row" and p["title"] == title)
+    bottom = min((y for y in rows if y > top), default=math.inf)
+    return [p for p in panels if p["type"] != "row" and top < p["gridPos"]["y"] < bottom]
+
+
+def _charted_series(expr: str) -> str:
+    """What a query or an alert's expression charts: its comparison
+    (``> 0``) and the length of its rate windows left out, so an alert
+    over 15 minutes and a panel over 5 read the same series."""
+    series = re.sub(r"\s*>\s*0\s*$", "", expr.strip())
+    return re.sub(r"\[\d+[smh]\]", "[window]", series)
+
+
+# Field override properties that only label a series: its unit, its
+# decimals, its legend name. Every other property an override sets can
+# change whether the series it reaches is seen as charted — its color,
+# Grafana's "Hide in area" (custom.hideFrom) with a flag set, how it is
+# drawn (custom.lineWidth and custom.fillOpacity at 0, custom.drawStyle
+# points with custom.pointSize 0, custom.transform), an axis bound.
+_SERIES_LABELS = frozenset({"unit", "decimals", "displayName"})
+
+
+def _hides(flags: Any) -> bool:
+    """Whether a "Hide in area" value hides the series anywhere: a flag set
+    (a Grafana export writes all three, the false ones included), or not the
+    mapping of flags it should be."""
+    return not isinstance(flags, dict) or any(flags.values())
+
+
+def _restyles(prop: dict[str, Any]) -> bool:
+    """Whether a field override property can recolor, hide or stop drawing
+    the series it reaches: anything but a label (_SERIES_LABELS), and a
+    "Hide in area" only with a flag set."""
+    if prop["id"] == "custom.hideFrom":
+        return _hides(prop.get("value"))
+    return prop["id"] not in _SERIES_LABELS
+
+
+def _unseen(defaults: dict[str, Any]) -> str | None:
+    """Why a panel's field defaults would leave its series unseen, else
+    None: a "Hide in area" flag set; a transform (negative-Y draws a series
+    upside down, constant replaces its values); nothing to draw (a line or
+    bars neither stroked nor filled, points of size 0, another draw style);
+    or an axis bound cutting off what an alert fires on (a fixed maximum, a
+    minimum above zero)."""
+    custom = defaults.get("custom", {})
+    if "hideFrom" in custom and _hides(custom["hideFrom"]):
+        return "custom.hideFrom"
+    if custom.get("transform") is not None:
+        return "custom.transform"
+    style = custom.get("drawStyle", "line")
+    if style == "points":
+        if custom.get("pointSize", 5) <= 0:
+            return "custom.pointSize"
+    elif style in ("line", "bars"):
+        if custom.get("lineWidth", 1) <= 0 and custom.get("fillOpacity", 0) <= 0:
+            return "custom.lineWidth"
+    else:
+        return "custom.drawStyle"
+    if defaults.get("max") is not None:
+        return "max"
+    if (defaults.get("min") or 0) > 0:
+        return "min"
+    return None
+
+
+def _drawn_in_the_panel_color(panel: dict[str, Any], target: dict[str, Any]) -> None:
+    """Assert ``target``'s series is drawn, visibly, in ``panel``'s default
+    color.
+
+    The panel's field defaults must draw it (``_unseen``). An override that
+    can change how a series looks (``_restyles``: anything but a unit, the
+    decimals or a legend name) may reach only OTHER queries' series, named
+    by their refId (``byFrameRefID``): one matching fields by name, by a
+    regular expression, by type or by value (what Grafana's editor offers
+    first, and exports as is) can reach this series whatever its refId, and
+    so can one naming this target's own refId. Neither a transformation (it
+    can drop or rename the series) nor a hidden query (Grafana never runs
+    it) is allowed on the panel either."""
+    where = (panel["title"], target["refId"])
+    assert not target.get("hide"), where
+    assert not panel.get("transformations"), where
+    unseen = _unseen(panel["fieldConfig"]["defaults"])
+    assert unseen is None, (where, unseen)
+    for override in panel["fieldConfig"]["overrides"]:
+        if not any(_restyles(prop) for prop in override["properties"]):
+            continue
+        matcher = override["matcher"]
+        assert matcher["id"] == "byFrameRefID", (where, matcher)
+        assert matcher["options"] != target["refId"], (where, matcher)
+
+
+_NER_ALERTS = ("LlmRedactNerSkippingLongStrings", "LlmRedactNerServerFailing")
+_ORANGE = {"mode": "fixed", "fixedColor": "orange"}
+
+
+def test_the_ner_coverage_row_charts_every_ner_family() -> None:
+    # Every llm_redact_ner_* family the core renders (CORE_METRIC_FAMILIES
+    # is pinned to the rendered set by test_metrics_surfaces.py) is charted
+    # in the NER coverage row, and nowhere else: a family a new release
+    # adds fails here until it is on the dashboard. A hidden query charts
+    # nothing (Grafana never runs it), so none on the row is hidden.
+    from llm_redact.metrics import CORE_METRIC_FAMILIES
+
+    families = {name for name in CORE_METRIC_FAMILIES if name.startswith("llm_redact_ner_")}
+    row = _row_panels("NER coverage")
+    hidden = [(p["title"], t["refId"]) for p in row for t in p["targets"] if t.get("hide")]
+    assert not hidden, hidden
+    charted = [m for p in row for t in p["targets"] for m in _referenced_metrics(t["expr"])]
+    assert set(charted) == families, set(charted) ^ families
+    elsewhere = [
+        p["title"]
+        for p in _dashboard_panels()
+        if p not in row and "llm_redact_ner_" in json.dumps(p.get("targets", []))
+    ]
+    assert not elsewhere, elsewhere
+    for panel in row:
+        for target in panel["targets"]:
+            assert "sum by (backend" in target["expr"], target
+            assert target["legendFormat"].startswith("{{backend}}"), target
+
+
+def test_the_ner_rules_series_are_charted_in_the_warning_color() -> None:
+    # The series each NER alert reads is charted by exactly one target of
+    # the dashboard, on an NER coverage panel that names the alert and
+    # draws it in the dashboard's warning color (orange): never recolored
+    # or hidden by an override, a transformation or a hidden query.
+    row = _row_panels("NER coverage")
+    rules = _alert_rules()
+    for alert in _NER_ALERTS:
+        expr = rules[alert]["expr"]
+        assert re.search(r">\s*0\s*$", expr), alert
+        wanted = _charted_series(expr)
+        found = [
+            (p, t)
+            for p in _dashboard_panels()
+            for t in p.get("targets", [])
+            if _charted_series(t["expr"]) == wanted
+        ]
+        assert len(found) == 1, (alert, [p["title"] for p, _ in found])
+        panel, target = found[0]
+        assert panel in row, alert
+        assert alert in panel["description"], alert
+        assert panel["fieldConfig"]["defaults"]["color"] == _ORANGE, alert
+        _drawn_in_the_panel_color(panel, target)
+
+
+def test_the_ner_model_server_has_a_panel_of_its_own() -> None:
+    # The llm backend's model server failures are charted apart from the
+    # entities a model returned and the redaction dropped (one panel held
+    # all six series once, the alert's among them): server errors in
+    # orange (LlmRedactNerServerFailing), the breaker's short-circuited
+    # strings yellow and its openings red, each of the two recolored by its
+    # own refId only — so no override reaches the alert's series.
+    row = _row_panels("NER coverage")
+    server = [p for p in row if "llm_redact_ner_errors_total" in json.dumps(p["targets"])]
+    (panel,) = server
+    exprs = {t["refId"]: t["expr"] for t in panel["targets"]}
+    assert sorted(m for e in exprs.values() for m in _referenced_metrics(e)) == [
+        "llm_redact_ner_breaker_opens_total",
+        "llm_redact_ner_breaker_short_circuits_total",
+        "llm_redact_ner_errors_total",
+    ]
+    errors = next(ref for ref, e in exprs.items() if "llm_redact_ner_errors_total" in e)
+    colors: dict[str, str] = {}
+    for override in panel["fieldConfig"]["overrides"]:
+        assert override["matcher"]["id"] == "byFrameRefID", override
+        (prop,) = override["properties"]
+        assert prop["id"] == "color", override
+        colors[override["matcher"]["options"]] = prop["value"]["fixedColor"]
+    breaker = {
+        "llm_redact_ner_breaker_short_circuits_total": "yellow",
+        "llm_redact_ner_breaker_opens_total": "red",
+    }
+    assert errors not in colors
+    assert {_referenced_metrics(exprs[ref]).pop(): color for ref, color in colors.items()} == (
+        breaker
+    )
+    assert "[detection.ner.llm]" in panel["description"]
+    for family in (*breaker, "llm_redact_ner_errors_total"):
+        assert family in panel["description"], family
+    # The entities panel no longer holds a model-server series.
+    (dropped,) = [p for p in row if "llm_redact_ner_labels_dropped_total" in json.dumps(p)]
+    assert not {m for t in dropped["targets"] for m in _referenced_metrics(t["expr"])} & {
+        *breaker,
+        "llm_redact_ner_errors_total",
+    }
+
+
+def test_the_entities_dropped_panel_says_what_ungrounded_counts() -> None:
+    # labels and offsets dropped mean a configuration or a model is wrong:
+    # they should stay at zero. ungrounded also counts what the llm
+    # backend's grounding rightly refuses (llm_ner._grounded): a value
+    # shorter than two characters, or one holding a placeholder's guillemet
+    # (an earlier turn's token a request carries). So the panel names every
+    # case the metrics reference names, and its "should stay at zero" leaves
+    # ungrounded out (one sentence once held all three, naming neither case).
+    row = _row_panels("NER coverage")
+    (panel,) = [p for p in row if "llm_redact_ner_ungrounded_total" in json.dumps(p["targets"])]
+    description = panel["description"]
+    (zero,) = [s for s in re.split(r"(?<=\.)\s+", description) if "stay at zero" in s]
+    assert "labels" in zero and "offsets" in zero, zero
+    assert "ungrounded" not in zero, zero
+    doc = (DEPLOY.parent / "docs" / "observability.md").read_text(encoding="utf-8")
+    (reference,) = [
+        line
+        for line in doc.splitlines()
+        if line.startswith("| `llm_redact_ner_ungrounded_total` |")
+    ]
+    for phrase in ("two characters", "guillemet"):
+        assert phrase in reference, phrase
+        assert phrase in description, phrase
+
+
+def _override(matcher: str, options: Any, prop: str, value: Any) -> dict[str, Any]:
+    return {
+        "matcher": {"id": matcher, "options": options},
+        "properties": [{"id": prop, "value": value}],
+    }
+
+
+_GREEN = {"mode": "fixed", "fixedColor": "green"}
+_HIDDEN = {"legend": True, "tooltip": True, "viz": True}
+_SHOWN = {"legend": False, "tooltip": False, "viz": False}
+# The field defaults Grafana 10/11 writes into every timeseries panel it
+# exports, whatever the panel set: a 1-pixel line, no fill, every "Hide in
+# area" flag false (_SHOWN), the rest the editor's defaults.
+_GRAFANA_EXPORT_CUSTOM: dict[str, Any] = {
+    "axisBorderShow": False,
+    "axisCenteredZero": False,
+    "axisColorMode": "text",
+    "axisLabel": "",
+    "axisPlacement": "auto",
+    "barAlignment": 0,
+    "drawStyle": "line",
+    "fillOpacity": 0,
+    "gradientMode": "none",
+    "hideFrom": _SHOWN,
+    "insertNulls": False,
+    "lineInterpolation": "linear",
+    "lineWidth": 1,
+    "pointSize": 5,
+    "scaleDistribution": {"type": "linear"},
+    "showPoints": "auto",
+    "spanNulls": False,
+    "stacking": {"group": "A", "mode": "none"},
+    "thresholdsStyle": {"mode": "off"},
+}
+
+
+@pytest.mark.parametrize(
+    ("change", "drawn"),
+    [
+        pytest.param(lambda panel: None, True, id="as-shipped"),
+        # What Grafana's override editor offers first, exported as is: the
+        # series matched by its display name or a pattern, whatever its refId.
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byRegexp", ".*server errors", "color", _GREEN)
+            ),
+            False,
+            id="recolored-by-pattern",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byName", "llm server errors", "color", _GREEN)
+            ),
+            False,
+            id="recolored-by-name",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byRegexp", ".*", "custom.hideFrom", _HIDDEN)
+            ),
+            False,
+            id="hidden-by-pattern",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["defaults"].update(custom={"hideFrom": _HIDDEN}),
+            False,
+            id="hidden-by-default",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byValue", {"reducer": "max", "op": "gte", "value": 0}, "color", _GREEN)
+            ),
+            False,
+            id="recolored-by-value",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byFrameRefID", "A", "color", _GREEN)
+            ),
+            False,
+            id="recolored-by-its-refid",
+        ),
+        pytest.param(lambda panel: panel["targets"][0].update(hide=True), False, id="query-hidden"),
+        pytest.param(
+            lambda panel: panel.update(
+                transformations=[{"id": "filterFieldsByName", "options": {}}]
+            ),
+            False,
+            id="transformed",
+        ),
+        # What leaves the alert's series alone: another query recolored by
+        # its refId, a unit by name.
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byFrameRefID", "B", "color", _GREEN)
+            ),
+            True,
+            id="another-query-recolored",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byName", "llm server errors", "unit", "short")
+            ),
+            True,
+            id="unit-by-name",
+        ),
+        # A series drawn with nothing to see: no line and no fill, points
+        # of size 0, flipped below the axis, cut off by a fixed maximum —
+        # by an override reaching it (by pattern, by name, by its own refId)
+        # or by the panel's defaults.
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                {
+                    "matcher": {"id": "byRegexp", "options": ".*"},
+                    "properties": [
+                        {"id": "custom.lineWidth", "value": 0},
+                        {"id": "custom.fillOpacity", "value": 0},
+                    ],
+                }
+            ),
+            False,
+            id="undrawn-by-pattern",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byFrameRefID", "A", "custom.lineWidth", 0)
+            ),
+            False,
+            id="line-width-by-its-refid",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byName", "llm server errors", "custom.transform", "negative-Y")
+            ),
+            False,
+            id="flipped-by-name",
+        ),
+        pytest.param(
+            lambda panel: (
+                panel["fieldConfig"]["defaults"]
+                .setdefault("custom", {})
+                .update(lineWidth=0, fillOpacity=0)
+            ),
+            False,
+            id="undrawn-by-default",
+        ),
+        pytest.param(
+            lambda panel: (
+                panel["fieldConfig"]["defaults"]
+                .setdefault("custom", {})
+                .update(drawStyle="points", pointSize=0)
+            ),
+            False,
+            id="points-of-size-zero-by-default",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["defaults"].update(max=0),
+            False,
+            id="clipped-by-default",
+        ),
+        # What a Grafana export writes and hides nothing: every "Hide in
+        # area" flag false, in the defaults or an override, and the
+        # timeseries defaults it adds to every panel; another query's line
+        # thinned by its refId.
+        pytest.param(
+            lambda panel: (
+                panel["fieldConfig"]["defaults"]
+                .setdefault("custom", {})
+                .update(_GRAFANA_EXPORT_CUSTOM)
+            ),
+            True,
+            id="exported-defaults",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byRegexp", ".*", "custom.hideFrom", _SHOWN)
+            ),
+            True,
+            id="exported-hide-flags-off",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byFrameRefID", "B", "custom.lineWidth", 0)
+            ),
+            True,
+            id="another-query-undrawn",
+        ),
+    ],
+)
+def test_no_override_can_recolor_or_hide_the_series_an_ner_alert_reads(
+    change: Callable[[dict[str, Any]], None], drawn: bool
+) -> None:
+    # The NER model server panel as shipped, its errors query (refId A:
+    # what LlmRedactNerServerFailing reads) edited the ways a Grafana export
+    # can: the check above must notice every one that reaches the alert's
+    # series, and only those.
+    panel = next(
+        p
+        for p in _row_panels("NER coverage")
+        if "llm_redact_ner_errors_total" in json.dumps(p["targets"])
+    )
+    target = panel["targets"][0]
+    assert target["refId"] == "A" and "llm_redact_ner_errors_total" in target["expr"]
+    change(panel)
+    if drawn:
+        _drawn_in_the_panel_color(panel, target)
+    else:
+        with pytest.raises(AssertionError):
+            _drawn_in_the_panel_color(panel, target)
+
+
+def test_the_ner_prefetch_counters_are_charted() -> None:
+    # Where the NER models ran — on a request's path, inline is the event
+    # loop, holding up every other request — is charted beside the strings
+    # they read, both families on one panel whose description says what
+    # each counts (docs/how-it-works.md, the NER prefetch) and that the
+    # pro dashboard's preview runs inline too (off the loop, but counted).
+    row = _row_panels("NER coverage")
+    families = ("llm_redact_ner_inline_calls_total", "llm_redact_ner_prefetch_misses_total")
+    (panel,) = [p for p in row if any(f in json.dumps(p["targets"]) for f in families)]
+    assert sorted(m for t in panel["targets"] for m in _referenced_metrics(t["expr"])) == list(
+        families
+    )
+    for target in panel["targets"]:
+        (family,) = _referenced_metrics(target["expr"])
+        assert target["expr"] == f"sum by (backend) (rate({family}[5m]))", target
+        assert not target.get("hide"), target  # Grafana never runs a hidden query
+    strings = next(p for p in row if p["title"] == "NER strings by backend and outcome")
+    assert panel["gridPos"]["y"] == strings["gridPos"]["y"]
+    description = panel["description"]
+    for phrase in (*families, "event loop", "prefetch", "preview", "reload"):
+        assert phrase in description, phrase
+    assert "docs/how-it-works.md" in description
+    assert "LlmRedact" not in description  # no alert reads them: not a warning panel
+    assert panel["fieldConfig"]["defaults"].get("color") is None
+
+
+def _reexported(panels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``panels`` as a Grafana export writes them back: every timeseries
+    panel's field defaults filled in (_GRAFANA_EXPORT_CUSTOM), what it set
+    kept."""
+    for panel in panels:
+        if panel["type"] == "timeseries":
+            custom = panel["fieldConfig"]["defaults"].setdefault("custom", {})
+            for key, value in _GRAFANA_EXPORT_CUSTOM.items():
+                custom.setdefault(key, value)
+    return panels
+
+
+def test_a_grafana_re_export_keeps_the_series_checks_green(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Editing the dashboard in Grafana and exporting it writes the editor's
+    # field defaults into every timeseries panel — "Hide in area" with
+    # every flag false among them, which hides nothing. The checks that an
+    # alert's series is drawn read those defaults: they once took the
+    # all-false flags for hiding, and an export failed five of them.
+    panels = _reexported(_dashboard_panels())
+    monkeypatch.setitem(globals(), "_dashboard_panels", lambda: panels)
+    test_the_ner_coverage_row_charts_every_ner_family()
+    test_the_ner_rules_series_are_charted_in_the_warning_color()
+    test_the_ner_model_server_has_a_panel_of_its_own()
+    test_the_ner_prefetch_counters_are_charted()
+    test_scan_capture_panels_read_what_the_alert_reads()
+
+
+def _families(prefix: str) -> list[str]:
+    from llm_redact.metrics import CORE_METRIC_FAMILIES
+
+    return sorted(name for name in CORE_METRIC_FAMILIES if name.startswith(prefix))
+
+
+_PREFETCH_FAMILIES = ("llm_redact_ner_inline_calls_total", "llm_redact_ner_prefetch_misses_total")
+
+
+@pytest.mark.parametrize("family", _families("llm_redact_ner_") + _families("llm_redact_scan_"))
+def test_a_hidden_query_charts_nothing(monkeypatch: pytest.MonkeyPatch, family: str) -> None:
+    # Grafana never runs a query hidden in its editor (the eye toggle,
+    # exported as "hide": true): its panel shows nothing of the family. So
+    # every check that a family is charted fails once each query reading it
+    # is hidden — those checks once counted a hidden query as charted.
+    panels = _dashboard_panels()
+    hidden = [
+        target
+        for panel in panels
+        for target in panel.get("targets", [])
+        if family in _referenced_metrics(target["expr"])
+    ]
+    assert hidden, family
+    for target in hidden:
+        target["hide"] = True
+    monkeypatch.setitem(globals(), "_dashboard_panels", lambda: panels)
+    if family.startswith("llm_redact_scan_"):
+        checks: list[Callable[[], None]] = [test_scan_capture_panels_read_what_the_alert_reads]
+    else:
+        checks = [test_the_ner_coverage_row_charts_every_ner_family]
+    if family in _PREFETCH_FAMILIES:
+        checks.append(test_the_ner_prefetch_counters_are_charted)
+    for check in checks:
+        with pytest.raises(AssertionError):
+            check()
 
 
 def test_dropped_scan_captures_have_an_alert() -> None:
@@ -180,6 +694,7 @@ def test_scan_capture_panels_read_what_the_alert_reads() -> None:
     for family, found in by_family.items():
         assert len(found) == 1, family
         panel = found[0]
+        assert not any(t.get("hide") for t in panel["targets"]), family  # never run
         assert panel["gridPos"]["y"] == row["gridPos"]["y"] + row["gridPos"]["h"], family
         assert family in panel["description"]
         assert "only while a plugin registers a scan sink" in panel["description"]
@@ -198,6 +713,7 @@ def test_scan_capture_panels_read_what_the_alert_reads() -> None:
     targets = {t["refId"]: t for t in dropped["targets"]}
     alerting = [ref for ref, t in targets.items() if selector in t["expr"]]
     assert len(alerting) == 1
+    _drawn_in_the_panel_color(dropped, targets[alerting[0]])
     (shutdown,) = (ref for ref in targets if ref not in alerting)
     assert 'reason="shutdown"' in targets[shutdown]["expr"]
     for target in targets.values():

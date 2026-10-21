@@ -622,9 +622,15 @@ class DashboardHost(Protocol):
     the running configuration kept, and ``validate_config`` refuses it
     alike.
     ``preview`` runs the LIVE detection pipeline over caller text on a
-    throwaway vault (no upstream, vault, metrics or audit write) and
-    returns ``{redacted, detections, warnings, blocked}`` — ``blocked`` is
-    ``{"type": T}`` or None, never a value.
+    throwaway vault and returns ``{redacted, detections, warnings,
+    blocked}`` — ``blocked`` is ``{"type": T}`` or None, never a value. It
+    sends no upstream request and writes nothing to the live vault, the
+    audit or the request and detection counters; but its detectors are the
+    live ones, so what they count for a request they count for it: the NER
+    coverage counters (``llm_redact_ner_*`` on /metrics, /status
+    ``detection.ner``: each string it hands a backend, as an inline call —
+    it has no prefetched results), and the llm backend's circuit breaker
+    its model server's failures (enough in a row open it for requests too).
 
     OPTIONAL members (cores before 1.13 lack them: read with ``getattr``),
     for running the preview and the editor's check off the event loop:

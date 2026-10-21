@@ -76,6 +76,9 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   string again. A pattern matching the empty string elsewhere (`\b`, `x*`) inserted a placeholder
   at every such position. A detection of no characters, from any detector, is now dropped before
   anything acts on it (docs/detection.md).
+- **`certifi` 2026.10.19 in `uv.lock`** (was 2026.6.17), for PYSEC-2026-4320. The locked
+  runtime closure (what the container images install) carries the fixed CA bundle; a `pip
+  install` already resolves the newest `certifi`.
 
 ### Changed
 - **The `hf` backend's default model is now `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`**

@@ -68,6 +68,17 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   placeholder of its own.) Nothing 1.12.0 or 1.12.1 redacted or refused is forwarded now, with
   custom rules, NER spans and `[detection.modes]` too: tests pin that against both releases'
   pipelines.
+- **A custom rule whose pattern can match the empty string could send a deny string upstream as
+  sent.** With `deny = ["acme"]` and a custom rule matching no characters where the deny string
+  starts (a lookahead such as `(?=acme)`, `\d*(?=acme)`), `the acme merger` went upstream as
+  `the «DENY_001»«CODENAME_001»acme merger`: the empty match overlapped nothing, was placed after
+  the deny string, and the redaction inserted a placeholder for nothing and then sent the deny
+  string again. A pattern matching the empty string elsewhere (`\b`, `x*`) inserted a placeholder
+  at every such position. A detection of no characters, from any detector, is now dropped before
+  anything acts on it (docs/detection.md).
+- **`certifi` 2026.10.19 in `uv.lock`** (was 2026.6.17), for PYSEC-2026-4320. The locked
+  runtime closure (what the container images install) carries the fixed CA bundle; a `pip
+  install` already resolves the newest `certifi`.
 
 ### Changed
 - **The `hf` backend's default model is now `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`**
@@ -92,14 +103,27 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   warn-mode value among them is forwarded only where no redacted value covers it, and counted as
   a warning, once, even where a redacted value overlaps it, as long as part of it lies outside the
   redacted values (that part goes upstream; one wholly inside them is not counted). A warn-mode
-  value an access gate's added deny string redacts part of (a detection overlay: llm-redact-pro
-  roles) is now counted the same way — in `llm_redact_warnings_total`, the request's row and
-  `authorize_content`'s `warned`, once, when part of it is still sent — where it was not
-  counted at all. For both, whether part of the value is still sent is decided once everything is
-  redacted: one whose rest an added deny string or an `llm` backend finding redacts is not
-  counted. A warn-mode value that loses an ordinary overlap — to a configured deny string, or to
-  a value redacted in its place — is still sent in part and not counted, as before
-  (docs/detection.md, "Per-rule modes", now says so). Where the proxy cannot rewrite the text (a
+  value part of which anything else redacts is now counted the same way — in
+  `llm_redact_warnings_total`, the request's row and `authorize_content`'s `warned`, once, when
+  part of it is still sent — where it was not counted at all: one an access gate's added deny
+  string redacts part of (a detection overlay: llm-redact-pro roles), and one that loses an
+  ordinary overlap to a configured deny string or to a value redacted in its place (with
+  `deny = ["acme"]` and `email = "warn"`, `bob.private@«DENY_001»-corp.example` goes upstream
+  and counts as one warning, as with an added `acme`). Whether part of the value is still sent
+  is decided once everything is redacted: one whose rest an added deny string or an `llm`
+  backend finding redacts is not counted, nor one that lost only to another value forwarded as
+  sent (that one counts as what it is: a warn-mode value as a warning, an approved block — or,
+  where the proxy cannot rewrite the text (a verbatim field, an upload's extracted text) and
+  sends it as it is, any value an approved refusal override lets through — as an override used,
+  `llm_redact_overrides_used_total`, not as a warning; such a text refused all the same counts
+  as a redacted one would, wherever the value refusing it is); of overlapping ones, one value
+  two detectors find counts once. An `llm` backend finding loses no overlap — it is cut
+  around the other values — so a warn-mode one counts once per piece left as sent, as before. A
+  configured deny string takes part in overlap resolution and an added one is applied after it,
+  so where warn-mode values overlap one another the same bytes upstream can still count
+  differently: a value the configured string's overlaps would have beaten counts as well
+  (docs/detection.md, "Per-rule modes"). What is redacted or refused is unchanged. Where the
+  proxy cannot rewrite the text (a
   verbatim field, an upload's extracted text), a span joining two or more such values is put to
   refusal overrides value by value: the refusal's code names every value, one approval of it
   lets the span through as sent (an access gate's content facts count each value once), and a
@@ -176,13 +200,21 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     llm-redact-pro config editor) keeps their running values, applies the rest of
     `[detection]` and names them in its "require restart" warning (`detection.ner.llm.url`, …).
     Those running values are the ones the proxy started with (no reload moves them). A reload
-    never starts the backend (`"llm"` added to the backends, NER switched on with it) on a
-    proxy started without it, not even a `[detection.ner.llm]` table the startup file held
-    with NER off; on one started running it, a reload may start it again after a reload
-    stopped it, only at those values — the build reading the key and checking the server as
-    at startup. Any other start is refused with the running configuration kept, naming keys,
-    never a value. Whoever can change `[detection]` can therefore never make a running proxy
-    send scanned text, or a key, somewhere it did not send to from its start.
+    starts the backend (`"llm"` added to the backends, NER switched on with it, again after a
+    reload stopped it) only at those values, also on a proxy started without it: there they
+    are a `[detection.ner.llm]` table the startup file held while the backend did not run
+    (NER off, or `"llm"` not among `[detection.ner] backends`), or the defaults
+    (Ollama on loopback, no key) — the build reading the key and checking the server as at
+    startup. A start with any of the three changed is refused with the running configuration
+    kept, naming keys, never a value. Whoever can change `[detection]` can therefore never make
+    a running proxy send scanned text, or a key, somewhere its startup configuration does not
+    name — but can switch the backend on there, a dormant table's server or the loopback
+    default included (docs/threat-model.md lists it among the residual risks), also with a
+    config editor save that only switches NER on while the file's backends hold `"llm"`. A
+    start by reload is logged once applied, a WARNING naming the model server's origin
+    (`config reload starts the llm NER backend: …`), and `llm-redact doctor` WARNs about a
+    dormant table naming a server off loopback or a key variable: a destination a reload can
+    switch on.
     `config.RESTART_ONLY_PATHS` lists the three for the editor, and `apply_config`'s
     restart-required list (the plugin API's `DashboardHost` contract) now holds their dotted
     names beside the section names: an entry is a name to show, not always a `Config`
@@ -234,7 +266,15 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   NER model once, and a SIGHUP reload builds off the event loop.** The proxy's detectors,
   allowlists and modes are now one immutable snapshot that a reload or a save swaps in a single
   step, and the redaction preview reads it once: a preview a reload overlaps describes the
-  configuration live when it began, never the old detectors with the new modes. Three optional
+  configuration live when it began, never the old detectors with the new modes.
+  `ProxyState.detectors`, `allowlist` and `modes`, plain attributes before, are read-only views
+  of that snapshot: code that assigned one (a plugin's tests adding a detector) assigns a new
+  snapshot instead, `state.detection_snapshot = dataclasses.replace(state.detection_snapshot,
+  detectors=...)`, which derives its plan and overlay builds anew. That swap reaches every
+  reader of the snapshot (the preview, per-conversation and overlay contexts, a new realtime
+  connection's admission) but not the static session's own redactor (`state.redactor`, which
+  static-mode requests redact with), as an attribute assignment never did: it keeps the
+  objects it was built over until an `apply_config` builds it anew. Three optional
   members of `plugin_api.DashboardHost`, read with `getattr` (an older core lacks them), let a
   dashboard plugin use this: `preview_snapshot` (True), `prepare_config(candidate)` — the config
   check, raising the same errors as `validate_config`, keeping the NER models it loaded for a
@@ -273,9 +313,32 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
 - **Four NER counters**: `ungrounded`, `errors`, `breaker_opens` and `breaker_short_circuits` in
   `/status` `detection.ner` and as `llm_redact_ner_ungrounded_total`,
   `llm_redact_ner_errors_total`, `llm_redact_ner_breaker_opens_total` and
-  `llm_redact_ner_breaker_short_circuits_total`, all on the shipped Grafana dashboard's NER
-  panel, and a `LlmRedactNerServerFailing` alert in `deploy/prometheus-alerts.yml` while the
-  model server fails.
+  `llm_redact_ner_breaker_short_circuits_total`, and a `LlmRedactNerServerFailing` alert in
+  `deploy/prometheus-alerts.yml` while the model server fails. All four are on the shipped
+  Grafana dashboard's NER coverage row: `ungrounded` beside the other entities dropped, and the
+  `llm` backend's model server on a panel of its own (as on llm-redact-pro's Subsystems
+  dashboard) — the strings it failed on in orange (what the alert reads, never recolored), the
+  strings its open circuit breaker failed at once in yellow and the breaker's openings in red.
+- **The shipped Grafana dashboard charts where the NER models ran.** A new panel in the NER
+  coverage row, beside the strings each backend read and skipped, charts
+  `llm_redact_ner_inline_calls_total` (strings a backend was run on by the redaction itself
+  instead of ahead of it on the NER worker thread: on a request's path that is the event loop,
+  every other request waiting for that string's inference; a redaction preview in the
+  llm-redact-pro dashboard runs this way too — on a worker thread of its own in llm-redact-pro
+  releases after 0.17.1, on the event loop in 0.17.1 and earlier) and
+  `llm_redact_ner_prefetch_misses_total` (strings a request's redaction did not find among the
+  results its prefetch computed — a reload replaced the detectors while it waited — each also
+  counted inline), until now on `/status` and `/metrics` only. Both stay at zero while every
+  request is prefetched and nobody runs a preview. The row's panels are now three to a line.
+  The counter's `# HELP` text, the metrics reference (docs/observability.md) and the NER
+  counter table (docs/detection.md) now define it the same way: they said every inline call
+  ran on the event loop, and llm-redact-pro's preview runs on a worker thread of its own in its
+  releases after 0.17.1. The preview's own contract (`plugin_api.DashboardHost`,
+  `ProxyState.preview`) and docs/dashboard.md said it wrote no metrics: it runs the live
+  detectors, so the NER coverage counters count its strings and the `llm` backend's circuit
+  breaker its model server's failures, as for a request's; the live vault, the audit and the
+  request and detection counters stay untouched, as before. (`llm-redact preview` builds
+  detectors of its own, in its own process: nothing it counts reaches a running proxy.)
 
 ### Fixed
 - The main architecture diagram now draws optional Open WebUI as a separate

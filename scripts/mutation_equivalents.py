@@ -81,7 +81,7 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "-(end + start) and -(end - start) differ by the constant 2*start and order "
         "them identically (longest first). Same sorted list for every input."
     ),
-    "llm_redact.redactor.xǁRedactorǁ_resolved__mutmut_35": (
+    "llm_redact.redactor.xǁRedactorǁ_resolved__mutmut_33": (
         "additive sort key -(end - start) -> -(end + start) in Redactor._resolved: the "
         "same key as _resolve_overlaps' (mutant 15 there) — among equal starts both "
         "order longest first, so the sort is unchanged for every input."
@@ -141,6 +141,12 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
     ),
     "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_19": (
         "default 'redact' -> 'REDACT': a non-'block'/'warn' default redacts identically."
+    ),
+    "llm_redact.redactor.xǁRedactorǁscan__mutmut_14": (
+        "sent = False -> sent = None in Redactor.scan: the flag is read once, as "
+        "`not sent` in the finally, and None is falsy like False; a completed loop "
+        "reassigns it to a bool before it is read, so None only ever stands in for "
+        "False on a refusal (BlockedRequest), where both count the cut values."
     ),
     "llm_redact.rehydrate.x_escape_prefix_start__mutmut_24": (
         "(i - j) % 2 -> (i + j) % 2: i-j and i+j always share parity, so the "

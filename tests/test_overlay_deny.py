@@ -20,25 +20,25 @@ import re
 from collections import Counter
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from llm_redact.detection.base import ADDITIVE_TIER, Detection
 from llm_redact.detection.deny import DenyDetector, DenyEntry
 from llm_redact.detection.engine import (
     Allowlist,
+    CustomRule,
     DetectionConfig,
     DetectorPlan,
     build_allowlist,
     build_detectors,
     build_modes,
 )
-from llm_redact.placeholders import PLACEHOLDER_RE
 from llm_redact.plugin_api import Inspection
 from llm_redact.redactor import BlockedRequest, Redactor
 from llm_redact.upload_inspection import judge
 from llm_redact.vault import InMemoryVault
-from warn_oracle import dropped_warnings
+from warn_oracle import expected_warnings, refused_at, replaced, scanned
 
 EMAIL = "bob.private@acme-corp.example"
 
@@ -260,6 +260,8 @@ def test_an_approved_or_warn_value_yields_to_a_union_at_any_tier(tier: int) -> N
     assert blocking.blocked_type(text) is None
     assert blocking.redact_text(text) == "mail bob at «DENY_001» dot com please"
     assert {value for _type, value in approved.asked} == {value}
+    # Part of it is sent, but an approved block is no warning.
+    assert blocking.warn_counts == Counter()
     warning = Redactor(
         [detector],
         InMemoryVault(),
@@ -403,8 +405,8 @@ def test_a_check_ahead_of_the_redaction_counts_nothing() -> None:
     redactor = _redactor(WARN, added=("acme",))
     assert redactor.blocked_type(f"mail {EMAIL}") is None
     assert redactor.warn_counts == Counter()
-    # Nor does the overlay's own step: it hands on the warn-mode winners it
-    # drops, in order, for the redaction to count (_settled).
+    # Nor does the overlay's own step: the redaction counts the warn-mode
+    # winner it cuts once the added strings are taken in (_settled).
     text = f"mail {EMAIL}"
     winners = redactor._winners(text)
     assert redactor.warn_counts == Counter({"EMAIL": 1})
@@ -413,9 +415,7 @@ def test_a_check_ahead_of_the_redaction_counts_nothing() -> None:
     added = _plan(("acme",))
     assert added is not None
     found = added.detect(text, Allowlist())
-    yielded: list[Detection] = []
-    assert redactor._absorb(text, configured, found, yielded) == winners
-    assert yielded == configured
+    assert redactor._absorb(text, configured, found) == winners
     assert redactor.warn_counts == Counter({"EMAIL": 1})
 
 
@@ -510,20 +510,387 @@ def test_a_warn_value_a_joined_run_drops_is_counted_after_the_added_strings(
     assert redactor.warn_counts == warned + warned
 
 
-def test_a_warn_value_a_configured_deny_string_cuts_into_is_not_counted() -> None:
-    # The documented residual (docs/detection.md, "Per-rule modes"): among
-    # the configured detectors a deny string wins the overlap and the
-    # warn-mode value loses it, as any value losing the overlap sweep does —
-    # the part of it outside the deny string is sent and NOT counted. Only a
-    # value a joined run or an added deny string drops is.
-    configured = DetectionConfig(modes=(("email", "warn"),), deny_strings=(DenyEntry("acme"),))
-    expected = "mail bob.private@«DENY_001»-corp.example now"
+# --- a warn-mode value an ordinary overlap cuts ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("deny", "expected", "warned"),
+    [
+        # Part of it: the rest is sent, a warning.
+        (("acme",), "mail bob.private@«DENY_001»-corp.example now", Counter({"EMAIL": 1})),
+        # Cut twice: one value, one warning.
+        (
+            ("private", "corp"),
+            "mail bob.«DENY_001»@acme-«DENY_002».example now",
+            Counter({"EMAIL": 1}),
+        ),
+        # A deny string starting before it and ending inside it.
+        (("mail bob",), "«DENY_001».private@acme-corp.example now", Counter({"EMAIL": 1})),
+        # The very value, a longer string holding it, two touching inside it:
+        # nothing of it is sent, nothing to warn about.
+        ((EMAIL,), "mail «DENY_001» now", Counter()),
+        ((f"{EMAIL} now",), "mail «DENY_001»", Counter()),
+        (("bob.private@", "acme-corp.example"), "mail «DENY_001»«DENY_002» now", Counter()),
+    ],
+)
+def test_a_warn_value_a_configured_deny_string_cuts_is_counted_as_an_added_one_is(
+    deny: tuple[str, ...], expected: str, warned: Counter[str]
+) -> None:
+    # Among the configured detectors a deny string wins every overlap: the
+    # warn-mode value loses it, and what of it lies outside the deny strings
+    # is sent as it was — a warning, once, exactly as when an access gate
+    # adds the same strings: the same bytes upstream, the same count.
+    text = f"mail {EMAIL} now"
+    configured = DetectionConfig(
+        modes=(("email", "warn"),), deny_strings=tuple(DenyEntry(value) for value in deny)
+    )
     redactor = _redactor(configured)
+    assert redactor.redact_text(text) == expected
+    assert redactor.warn_counts == warned
+    added = _redactor(WARN, added=deny)
+    assert added.redact_text(text) == expected
+    assert added.warn_counts == warned
+    # Detection only, a recorder attached: the same warning; a check ahead
+    # of the redaction counts nothing.
+    for redactable in (False, True):
+        scanning = _redactor(configured)
+        scanning.scan(text, redactable=redactable)
+        assert scanning.warn_counts == warned
+    recorder = _Recorder()
+    recorded = _redactor(configured).with_recorder(recorder)
+    assert recorded.redact_text(text) == expected
+    assert recorded.warn_counts == warned and recorder.texts == [text]
+    checked = _redactor(configured)
+    assert checked.blocked_type(text) is None and checked.warn_counts == Counter()
+
+
+MAILER = "mail bob.private"
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected", "warned"),
+    [
+        # Starting before it and ending inside it: the rest of it is sent.
+        (r"mail bob\.private", "«LEAD_001»@acme-corp.example now", Counter({"EMAIL": 1})),
+        # Starting where it starts and longer: it covers the value whole.
+        (r"bob\.private@acme-corp\.example now", "mail «LEAD_001»", Counter()),
+    ],
+)
+def test_a_warn_value_a_value_redacted_in_its_place_cuts_is_counted_when_partly_sent(
+    pattern: str, expected: str, warned: Counter[str]
+) -> None:
+    lead = CustomRule(name="lead", detector_type="LEAD", pattern=pattern)
+    config = DetectionConfig(modes=(("email", "warn"),), custom_rules=(lead,))
+    redactor = _redactor(config)
     assert redactor.redact_text(f"mail {EMAIL} now") == expected
-    assert redactor.warn_counts == Counter()
-    added = _redactor(WARN, added=("acme",))
-    assert added.redact_text(f"mail {EMAIL} now") == expected
+    assert redactor.warn_counts == warned
+    assert redactor.counts == Counter({"LEAD": 1})
+
+
+def test_a_warn_value_that_lost_only_to_a_value_forwarded_as_sent_is_not_counted() -> None:
+    # The email loses the overlap to a value starting before it that is
+    # forwarded as sent: nothing of the email is redacted, so the winner is
+    # what is counted (a warn-mode one) — or nothing (an approved block).
+    text = f"mail {EMAIL} now"
+    lead = CustomRule(name="lead", detector_type="LEAD", pattern=r"mail bob\.private")
+    warning = _redactor(
+        DetectionConfig(modes=(("email", "warn"), ("lead", "warn")), custom_rules=(lead,))
+    )
+    assert warning.redact_text(text) == text
+    assert warning.warn_counts == Counter({"LEAD": 1})
+    approved = Approved(MAILER)
+    blocking = _redactor(
+        DetectionConfig(modes=(("email", "warn"), ("lead", "block")), custom_rules=(lead,))
+    ).with_overrides(approved)
+    assert blocking.redact_text(text) == text
+    assert blocking.warn_counts == Counter()
+    assert approved.asked == [("LEAD", MAILER)]
+    # One that lost to such a value but that a deny string cuts elsewhere
+    # is cut all the same: a warning besides the winner's.
+    cut = _redactor(
+        DetectionConfig(
+            modes=(("email", "warn"), ("lead", "warn")),
+            custom_rules=(lead,),
+            deny_strings=(DenyEntry("acme"),),
+        )
+    )
+    assert cut.redact_text(text) == "mail bob.private@«DENY_001»-corp.example now"
+    assert cut.warn_counts == Counter({"LEAD": 1, "EMAIL": 1})
+
+
+# Where the proxy cannot rewrite the text (a verbatim field, an upload's
+# extracted text), a value an approved override passes goes upstream as sent
+# in redact mode too. R wins the overlap against W, a warn-mode value
+# starting inside it (R starts earlier): what of W lies outside R is sent.
+CUT = "0123456789ABCDEFGHIJ"
+R = Detection(0, 10, "R", CUT[0:10])
+W = Detection(5, 15, "W", CUT[5:15])
+
+
+def _cutting(
+    *found: Detection,
+    modes: dict[str, str],
+    approved: Approved,
+    added: tuple[str, ...] = (),
+    recorded: bool = False,
+) -> Redactor:
+    redactor = Redactor(
+        [_Spans(list(found))],
+        InMemoryVault(),
+        Allowlist(),
+        modes={**modes, "W": "warn"},
+        added_deny=_plan(added),
+    ).with_overrides(approved)
+    return redactor.with_recorder(_Recorder()) if recorded else redactor
+
+
+@pytest.mark.parametrize(
+    ("mode", "values", "found", "warned"),
+    [
+        # Approved, in redact mode or in block mode: R goes upstream as
+        # sent, so W lost only to a value forwarded as sent and is no
+        # warning (R counts as an override used).
+        ("redact", (R.value,), Counter(), Counter()),
+        ("block", (R.value,), Counter(), Counter()),
+        # Not approved: the text is refused for R (the caller refuses it),
+        # and W counts as redact_text counts it.
+        ("redact", (), Counter({"R": 1}), Counter({"W": 1})),
+    ],
+)
+# A scan sink's recorder attached, an access gate's added deny string the
+# text does not hold: the same count. One away from both is found and
+# refuses the text for good: nothing goes upstream, so W counts as
+# redact_text counts it — cut by R in redact mode, approved or not (an
+# approved block replaces nothing there either).
+@pytest.mark.parametrize(
+    ("recorded", "added"),
+    [(False, ()), (True, ()), (False, ("XY",)), (True, ("XY",)), (False, ("IJ",))],
+)
+def test_a_scan_counts_no_warn_value_cut_only_by_a_value_an_approval_passes(
+    mode: str,
+    values: tuple[str, ...],
+    found: Counter[str],
+    warned: Counter[str],
+    recorded: bool,
+    added: tuple[str, ...],
+) -> None:
+    approved = Approved(*values)
+    redactor = _cutting(R, W, modes={"R": mode}, approved=approved, added=added, recorded=recorded)
+    held = "IJ" in added
+    if held:
+        found = found + Counter({"DENY": 1})
+        warned = Counter({"W": 1}) if mode == "redact" else warned
+    assert redactor.scan(CUT) == (found, bool(values))
+    assert redactor.warn_counts == warned
+    # Taking the added strings in asks about a block-mode winner first
+    # (_absorb), as the redaction does, whether the text holds one or not.
+    assert approved.asked == [("R", R.value)] * (2 if added and mode == "block" else 1)
+    assert redactor.scan_text(CUT) == found
+    assert redactor.warn_counts == warned + warned
+
+
+def test_a_scan_whose_text_is_redacted_after_all_counts_as_redact_text_does() -> None:
+    # Redactable (convert mode) and redact_text: a value in redact mode is
+    # redacted, never put to the overrides, so W is cut.
+    approved = Approved(R.value)
+    scanning = _cutting(R, W, modes={}, approved=approved)
+    assert scanning.scan(CUT, redactable=True) == (Counter({"R": 1}), False)
+    assert scanning.warn_counts == Counter({"W": 1})
+    redacting = _cutting(R, W, modes={}, approved=approved)
+    assert redacting.redact_text(CUT) == "«R_001»ABCDEFGHIJ"
+    assert redacting.warn_counts == Counter({"W": 1})
+    assert approved.asked == []
+
+
+# A joining value (A: a card read inside a run of digit groups, say) and a
+# value it overlaps (B) are redacted as ONE span over their union; W
+# overlaps it and yields to it (Redactor._join).
+A = Detection(0, 10, "A", CUT[0:10], joins=True)
+B = Detection(8, 12, "B", CUT[8:12])
+
+
+@pytest.mark.parametrize(
+    ("values", "found", "warned"),
+    [
+        # Each value approved: the span goes upstream as sent, and W lost
+        # only to it.
+        ((A.value, B.value), Counter(), Counter()),
+        # One of them: the text is refused for the span, which cuts W.
+        ((A.value,), Counter({"A": 1}), Counter({"W": 1})),
+        ((), Counter({"A": 1}), Counter({"W": 1})),
+    ],
+)
+def test_a_scan_counts_no_warn_value_cut_only_by_a_union_an_approval_passes(
+    values: tuple[str, ...], found: Counter[str], warned: Counter[str]
+) -> None:
+    approved = Approved(*values)
+    redactor = _cutting(A, W, B, modes={}, approved=approved)
+    assert redactor.scan(CUT) == (found, len(values) == 2)
+    assert redactor.warn_counts == warned
+    assert approved.asked == [("A", A.value), ("B", B.value)]
+    # The redaction replaces the span whatever was approved: W is cut.
+    redacting = _cutting(A, W, B, modes={}, approved=approved)
+    assert redacting.redact_text(CUT) == "«A_001»CDEFGHIJ"
+    assert redacting.warn_counts == Counter({"W": 1})
+
+
+# A block-mode value (K) refusing the text after R and W, or before them
+# (then R2 cuts W2 as R cuts W).
+LATE_BLOCK = Detection(16, 20, "K", CUT[16:20])
+EARLY_BLOCK = Detection(0, 4, "K", CUT[0:4])
+R2 = Detection(5, 12, "R", CUT[5:12])
+W2 = Detection(8, 16, "W", CUT[8:16])
+
+
+@pytest.mark.parametrize("approve", [False, True])
+@pytest.mark.parametrize(("block", "cutting", "cut"), [(LATE_BLOCK, R, W), (EARLY_BLOCK, R2, W2)])
+def test_a_scan_a_block_refuses_counts_the_values_cut_as_redact_text_does(
+    approve: bool, block: Detection, cutting: Detection, cut: Detection
+) -> None:
+    # K refuses the text: nothing of it goes upstream, so the value R cuts
+    # (W) counts as redact_text counts it, whether R is approved or not and
+    # wherever in the text K is — before R (the scan never asks about R) or
+    # after it.
+    values = (cutting.value,) if approve else ()
+    approved = Approved(*values)
+    redactor = _cutting(cutting, cut, block, modes={"K": "block"}, approved=approved)
+    with pytest.raises(BlockedRequest, match="K"):
+        redactor.scan(CUT)
+    assert redactor.warn_counts == Counter({"W": 1})
+    asked = [("K", block.value)]
+    assert approved.asked == (asked if block is EARLY_BLOCK else [("R", cutting.value), *asked])
+    redacting = _cutting(cutting, cut, block, modes={"K": "block"}, approved=Approved(*values))
+    with pytest.raises(BlockedRequest, match="K"):
+        redacting.redact_text(CUT)
+    assert redacting.warn_counts == Counter({"W": 1})
+
+
+@pytest.mark.parametrize(
+    ("values", "outcome", "warned"),
+    [((R.value,), "overridden", Counter()), ((), "detected", Counter({"W": 1}))],
+)
+def test_an_inspected_upload_counts_no_warn_value_cut_only_by_an_approved_one(
+    values: tuple[str, ...], outcome: str, warned: Counter[str]
+) -> None:
+    # An upload's extracted text (upload_inspection.judge): the same count.
+    redactor = _cutting(R, W, modes={}, approved=Approved(*values))
+    verdict = judge(
+        {0: Inspection(CUT, True, "x")},
+        redactor,
+        identity=False,
+        text_budget=1000,
+        convertible=False,
+    )
+    assert verdict.outcomes == Counter({outcome: 1})
+    assert redactor.warn_counts == warned
+
+
+@pytest.mark.parametrize(("priority", "counted"), [(100, "EMAIL"), (90, "MAIL")])
+def test_one_warn_value_two_detectors_find_is_counted_once_when_cut(
+    priority: int, counted: str
+) -> None:
+    # The built-in email rule and a custom rule read the same value; a deny
+    # string cuts it: one warning, under the type the overlap sweep reads
+    # first (by priority; at a tie, the detector listed first).
+    mail = CustomRule(
+        name="mail",
+        detector_type="MAIL",
+        pattern=r"bob\.private@acme-corp\.example",
+        priority=priority,
+    )
+    config = DetectionConfig(
+        modes=(("email", "warn"), ("mail", "warn")),
+        custom_rules=(mail,),
+        deny_strings=(DenyEntry("acme"),),
+    )
+    redactor = _redactor(config)
+    assert (
+        redactor.redact_text(f"mail {EMAIL} now") == "mail bob.private@«DENY_001»-corp.example now"
+    )
+    assert redactor.warn_counts == Counter({counted: 1})
+
+
+def test_overlapping_warn_values_can_count_differently_configured_or_added() -> None:
+    # The documented limit of "the same rule" (docs/detection.md "Per-rule
+    # modes"): a configured deny string takes part in overlap resolution, an
+    # added one is taken in after it. The email overlaps `acme`. Configured,
+    # it leaves the resolution, so the custom rule's value it would have
+    # beaten wins on its own: two warnings. Added, the email beats that value
+    # first and is then cut: one. The same bytes upstream either way.
+    tail = CustomRule(name="tail", detector_type="TAIL", pattern=r"\.example [a-z]+")
+    modes = (("email", "warn"), ("tail", "warn"))
+    text = f"mail {EMAIL} now"
+    sent = "mail bob.private@«DENY_001»-corp.example now"
+    configured = _redactor(
+        DetectionConfig(modes=modes, custom_rules=(tail,), deny_strings=(DenyEntry("acme"),))
+    )
+    assert configured.redact_text(text) == sent
+    assert configured.warn_counts == Counter({"EMAIL": 1, "TAIL": 1})
+    added = _redactor(DetectionConfig(modes=modes, custom_rules=(tail,)), added=("acme",))
+    assert added.redact_text(text) == sent
     assert added.warn_counts == Counter({"EMAIL": 1})
+
+
+def test_a_deny_string_another_one_wins_against_is_no_warning_whatever_its_type() -> None:
+    # Two overlapping deny strings typed after a warn-mode rule's type: the
+    # one the deny sweep drops is cut too, but a deny string takes no mode.
+    config = DetectionConfig(
+        modes=(("email", "warn"),),
+        deny_strings=(
+            DenyEntry("acme corp", detector_type="EMAIL"),
+            DenyEntry("corp secret", detector_type="EMAIL"),
+        ),
+    )
+    redactor = _redactor(config)
+    assert (
+        redactor.redact_text("status: acme corp secret plan") == "status: «EMAIL_001» secret plan"
+    )
+    assert redactor.warn_counts == Counter()
+    assert redactor.counts == Counter({"EMAIL": 1})
+
+
+def test_an_llm_finding_a_configured_deny_string_cuts_counts_as_before() -> None:
+    # An llm finding (ADDITIVE_TIER) is never dropped by the ordinary
+    # overlap: it is cut around the winners and its pieces are what the
+    # redaction acts on — each a warn-mode winner, counted as such. One the
+    # additive sweep drops for another llm finding is no warning either.
+    value = "bob at example dot com"
+    text = f"mail {value} please"
+    deny = DetectorPlan([DenyDetector([DenyEntry("example")])])
+
+    def redactor(found: list[tuple[str, str, int]]) -> Redactor:
+        return Redactor(
+            [_Found(found), *deny.detectors],
+            InMemoryVault(),
+            Allowlist(),
+            modes={"EMAIL": "warn", "PERSON": "warn"},
+        )
+
+    pieces = redactor([(value, "EMAIL", ADDITIVE_TIER)])
+    assert pieces.redact_text(text) == "mail bob at «DENY_001» dot com please"
+    assert pieces.warn_counts == Counter({"EMAIL": 2})
+    swept = redactor([("mail bob at", "PERSON", ADDITIVE_TIER), (value, "EMAIL", ADDITIVE_TIER)])
+    assert swept.redact_text(text) == "mail bob at «DENY_001» dot com please"
+    assert swept.warn_counts == Counter({"PERSON": 1})
+
+
+def test_a_warn_value_a_configured_deny_string_cuts_in_a_converted_upload_counts_once() -> None:
+    # Converted: the text sent in the file's place is redacted (and its
+    # warning counted) later, so the scan's count is taken back out.
+    configured = DetectionConfig(modes=(("email", "warn"),), deny_strings=(DenyEntry("acme"),))
+    text = f"mail {EMAIL}"
+    redactor = _redactor(configured)
+    verdict = judge(
+        {0: Inspection(text, True, "x", convert_text=text)},
+        redactor,
+        identity=False,
+        text_budget=1000,
+        convertible=True,
+    )
+    assert verdict.outcomes == Counter({"converted": 1})
+    assert redactor.warn_counts == Counter()
+    assert redactor.redact_text(verdict.converted[0]) == "mail bob.private@«DENY_001»-corp.example"
+    assert redactor.warn_counts == Counter({"EMAIL": 1})
 
 
 # --- detection only (text the proxy cannot rewrite) -----------------------------------
@@ -558,56 +925,11 @@ def test_a_redactable_scan_finds_the_union_without_refusing_it() -> None:
 # --- the invariant ----------------------------------------------------------------------
 
 
-def _replaced(original: str, output: str, vault: InMemoryVault) -> set[int]:
-    """The positions of ``original`` that ``output`` replaced by a
-    placeholder (aligned through the vault: the original holds no
-    guillemet, so every one in the output starts a placeholder)."""
-    positions: set[int] = set()
-    cursor = last = 0
-    for match in PLACEHOLDER_RE.finditer(output):
-        literal = output[last : match.start()]
-        assert original.startswith(literal, cursor)
-        cursor += len(literal)
-        value = vault.original_for(match.group(0))
-        assert value is not None and original.startswith(value, cursor)
-        positions.update(range(cursor, cursor + len(value)))
-        cursor += len(value)
-        last = match.end()
-    assert original[cursor:] == output[last:]
-    return positions
-
-
-def _warnings(
-    text: str,
-    configured: list[Detection],
-    modes: dict[str, str],
-    got: str,
-    vault: InMemoryVault,
-    detections: list[Detection] | None = None,
-) -> Counter[str]:
-    """The warn counts the rule predicts for ``got`` (``text`` redacted
-    into ``vault`` with added strings): one per warn-mode value among the
-    ``configured`` winners (the policy's without them) that ``got`` still
-    holds a character of as sent — whether an added string took the rest
-    of it or none — and none for one the redacted spans cover whole; plus,
-    given the ``detections`` resolution started from, those a joined run
-    drops that ``got`` still holds a character of
-    (``warn_oracle.dropped_warnings``)."""
-    redacted = _replaced(text, got, vault)
-    winners = Counter(
-        d.detector_type
-        for d in configured
-        if d.tier
-        and modes.get(d.detector_type) == "warn"
-        and not set(range(d.start, d.end)) <= redacted
-    )
-    if detections is None:
-        return winners
-    return winners + dropped_warnings(detections, configured, modes, redacted)
-
-
 _WORDS = st.sampled_from(
-    ["bob", ".", "private", "@", "acme", "-", "corp", ".example", " ", "secret", "plan", "zeta"]
+    # The whole email too, so that most texts hold one for the deny strings
+    # and the custom rule to overlap.
+    [EMAIL, "bob", ".", "private", "@", "acme", "-", "corp", ".example", " ", "secret", "plan"]
+    + ["zeta"]
 )
 _CONFIGURED = st.lists(
     st.sampled_from(["corp secret", "secret plan", "acme", "zeta pl"]), max_size=2, unique=True
@@ -620,21 +942,36 @@ _ADDED = st.lists(
 )
 
 
+# A custom rule starting inside an email and running on past it: it loses
+# the overlap sweep to the email (which starts earlier), and to a deny string.
+TAIL = CustomRule(name="tail", detector_type="TAIL", pattern=r"\.example [a-z]+")
+_MODE = st.sampled_from(["redact", "warn", "block"])
+
+
 @settings(deadline=None, max_examples=300)
 @given(
     words=st.lists(_WORDS, max_size=14),
     configured=_CONFIGURED,
     added=_ADDED,
-    mode=st.sampled_from(["redact", "warn", "block"]),
+    mode=_MODE,
+    tail_mode=_MODE,
     approve=st.booleans(),
 )
 def test_added_strings_redact_a_superset_and_refuse_alike(
-    words: list[str], configured: list[str], added: list[str], mode: str, approve: bool
+    words: list[str],
+    configured: list[str],
+    added: list[str],
+    mode: str,
+    tail_mode: str,
+    approve: bool,
 ) -> None:
     text = "".join(words)
     config = DetectionConfig(
-        modes=(("email", mode),) if mode != "redact" else (),
+        modes=tuple(
+            (rule, m) for rule, m in (("email", mode), ("tail", tail_mode)) if m != "redact"
+        ),
         deny_strings=tuple(DenyEntry(value, detector_type="CODENAME") for value in configured),
+        custom_rules=(TAIL,),
     )
     base_vault, vault = InMemoryVault(), InMemoryVault()
     base = _redactor(config, vault=base_vault)
@@ -658,19 +995,24 @@ def test_added_strings_redact_a_superset_and_refuse_alike(
         assert caught.value.detector_type == configured_block.detector_type
         return
     got = tightened.redact_text(text)
-    redacted = _replaced(text, got, vault)
+    redacted = replaced(text, got, vault)
     # A SUPERSET of what the configured policy redacts...
-    assert _replaced(text, expected, base_vault) <= redacted
+    assert replaced(text, expected, base_vault) <= redacted
     # ...and every occurrence of every added string.
     for value in added:
         for match in re.finditer(re.escape(value), text, re.IGNORECASE):
             assert set(range(match.start(), match.end())) <= redacted
     # A warn-mode value is a warning exactly when part of it is still sent,
-    # once — every one of them without the added strings.
-    configured_winners = _redactor(config)._winners(text)
+    # once — with the added strings and without them: one a configured deny
+    # string or a value redacted in its place cuts as well (the plain path).
+    plain = _redactor(config)
+    configured_winners = plain._winners(text)
+    found = plain.plan.detect(text, build_allowlist(config))
     modes = build_modes(config)
-    assert tightened.warn_counts == _warnings(text, configured_winners, modes, got, vault)
-    assert base.warn_counts == _warnings(text, configured_winners, modes, expected, base_vault)
+    assert tightened.warn_counts == expected_warnings(found, configured_winners, modes, redacted)
+    assert base.warn_counts == expected_warnings(
+        found, configured_winners, modes, replaced(text, expected, base_vault)
+    )
 
 
 _SPANS = st.lists(
@@ -727,7 +1069,10 @@ def test_added_strings_put_no_new_value_to_the_overrides_and_blocked_type_agrees
         # A warn-mode value — an llm one too, never cut into fragments — is
         # a warning exactly when part of it is still sent, once; an
         # approved block never.
-        assert redactor.warn_counts == _warnings(text, configured, modes, got, vault)
+        found = plain.plan.detect(text, Allowlist())
+        assert redactor.warn_counts == expected_warnings(
+            found, configured, modes, replaced(text, got, vault)
+        )
     # The added strings never make the overrides hear a new value (a
     # fragment of one cut around them).
     assert {value for _type, value in approved.asked} <= values
@@ -753,8 +1098,11 @@ _JOINING_SPANS = st.lists(
         st.integers(0, len(_LETTERS) - 1),
         st.integers(1, 12),
         st.sampled_from(["EMAIL", "PHONE", "IBAN"]),
-        st.sampled_from([1, 1, ADDITIVE_TIER]),
-        st.booleans(),  # joins (never an llm finding)
+        # A configured deny string (tier 0: never in a mode, whatever its
+        # type), a value, an llm finding.
+        st.sampled_from([0, 1, 1, 1, ADDITIVE_TIER]),
+        st.booleans(),  # joins (never a deny string or an llm finding)
+        st.sampled_from([110, 120]),  # priority
     ),
     max_size=6,
 )
@@ -770,22 +1118,25 @@ _ADDED_SPANS = st.lists(
     warned=st.sets(st.sampled_from(["EMAIL", "PHONE", "IBAN"])),
 )
 def test_a_warn_value_is_a_warning_exactly_when_part_of_it_is_still_sent(
-    spans: list[tuple[int, int, str, int, bool]],
+    spans: list[tuple[int, int, str, int, bool, int]],
     added: list[tuple[int, int]],
     warned: set[str],
 ) -> None:
-    # Joined runs (Detection.joins: a card read inside a run of digit
-    # groups, a paper IBAN), llm findings and added strings together, in
-    # redact and warn mode only, so nothing refuses: a warn-mode value is a
-    # warning exactly when part of it is still sent — a winner, one an added
-    # string takes part of, one a joined run drops — and never when the
-    # redacted values cover it whole, decided after the added strings are
-    # taken in; with them and without.
+    # Configured deny strings, joined runs (Detection.joins: a card read
+    # inside a run of digit groups, a paper IBAN), llm findings and added
+    # strings together, in redact and warn mode only, so nothing refuses: a
+    # warn-mode value is a warning exactly when part of it is still sent — a
+    # winner, one an added string takes part of, one a joined run drops, one
+    # a deny string or a value redacted in its place wins an ordinary
+    # overlap against — and never when the redacted values cover it whole,
+    # nor when it lost only to values forwarded as sent; decided after the
+    # added strings are taken in; with them and without.
     text = _LETTERS
     found = []
-    for start, length, kind, tier, joins in spans:
+    for start, length, kind, tier, joins, priority in spans:
         end = min(start + length, len(text))
-        found.append(Detection(start, end, kind, text[start:end], 120, tier, joins and tier == 1))
+        joining = joins and tier == 1
+        found.append(Detection(start, end, kind, text[start:end], priority, tier, joining))
     modes = dict.fromkeys(warned, "warn")
     plain = Redactor([_Spans(found)], InMemoryVault(), Allowlist(), modes=modes)
     configured = plain._winners(text)
@@ -795,4 +1146,213 @@ def test_a_warn_value_is_a_warning_exactly_when_part_of_it_is_still_sent(
         vault = InMemoryVault()
         redactor = Redactor([_Spans(found)], vault, Allowlist(), modes=modes, added_deny=added_deny)
         got = redactor.redact_text(text)
-        assert redactor.warn_counts == _warnings(text, configured, modes, got, vault, detections)
+        redacted = replaced(text, got, vault)
+        assert redactor.warn_counts == expected_warnings(detections, configured, modes, redacted)
+
+
+@settings(deadline=None, max_examples=1000)
+@given(
+    spans=_JOINING_SPANS,
+    added=st.lists(st.tuples(st.integers(0, len(_LETTERS) - 1), st.integers(1, 10)), max_size=3),
+    modes=st.dictionaries(
+        st.sampled_from(["EMAIL", "PHONE", "IBAN"]), st.sampled_from(["warn", "block"])
+    ),
+    approve=st.sets(st.integers(0, 5)),
+    redactable=st.booleans(),
+)
+# Random generation meets these rarely. A joining value (PHONE) approved,
+# which cuts a warn-mode one (EMAIL): the text goes upstream as sent, no
+# warning — redactable, or with an added string elsewhere refusing it, a
+# warning.
+@example(
+    spans=[(0, 1, "PHONE", 1, True, 110), (0, 2, "EMAIL", 1, False, 110)],
+    added=[],
+    modes={"EMAIL": "warn"},
+    approve={0},
+    redactable=False,
+)
+@example(
+    spans=[(0, 1, "PHONE", 1, True, 110), (0, 2, "EMAIL", 1, False, 110)],
+    added=[],
+    modes={"EMAIL": "warn"},
+    approve={0},
+    redactable=True,
+)
+@example(
+    spans=[(0, 1, "PHONE", 1, True, 110), (0, 2, "EMAIL", 1, False, 110)],
+    added=[(10, 2)],
+    modes={"EMAIL": "warn"},
+    approve={0},
+    redactable=False,
+)
+# The union of a joining value and the value it overlaps cuts the warn-mode
+# one: sent as is when both are approved, refused when one is not.
+@example(
+    spans=[
+        (0, 4, "PHONE", 1, True, 110),
+        (2, 4, "IBAN", 1, False, 110),
+        (4, 5, "EMAIL", 1, False, 110),
+    ],
+    added=[],
+    modes={"EMAIL": "warn"},
+    approve={0, 1},
+    redactable=False,
+)
+@example(
+    spans=[
+        (0, 4, "PHONE", 1, True, 110),
+        (2, 4, "IBAN", 1, False, 110),
+        (4, 5, "EMAIL", 1, False, 110),
+    ],
+    added=[],
+    modes={"EMAIL": "warn"},
+    approve={0},
+    redactable=False,
+)
+# A block-mode value (IBAN) refuses the text after the approved value
+# cutting the warn-mode one, or before it, with a warn-mode winner on either
+# side of it (the one after it is never read).
+@example(
+    spans=[
+        (0, 4, "PHONE", 1, False, 110),
+        (2, 6, "EMAIL", 1, False, 110),
+        (9, 2, "EMAIL", 1, False, 110),
+        (12, 2, "IBAN", 1, False, 110),
+        (20, 2, "EMAIL", 1, False, 110),
+    ],
+    added=[],
+    modes={"EMAIL": "warn", "IBAN": "block"},
+    approve={0},
+    redactable=False,
+)
+@example(
+    spans=[
+        (0, 2, "IBAN", 1, False, 110),
+        (4, 4, "PHONE", 1, False, 110),
+        (6, 6, "EMAIL", 1, False, 110),
+        (20, 2, "EMAIL", 1, False, 110),
+    ],
+    added=[],
+    modes={"EMAIL": "warn", "IBAN": "block"},
+    approve={1},
+    redactable=False,
+)
+def test_a_scan_counts_a_warn_value_cut_by_what_it_refuses_the_text_for(
+    spans: list[tuple[int, int, str, int, bool, int]],
+    added: list[tuple[int, int]],
+    modes: dict[str, str],
+    approve: set[int],
+    redactable: bool,
+) -> None:
+    # Detection only (a verbatim field, an upload's extracted text: nothing
+    # is replaced), with configured deny strings, joined runs, llm findings
+    # and added strings together, values approved or not: a warn-mode value
+    # is a warning exactly as redact_text counts it — the text is refused
+    # (here, for a block, wherever it is; or by the caller, for a value
+    # found) or, redactable, redacted after all — unless the text goes
+    # upstream as sent, every value that would refuse it approved: then
+    # nothing of it is replaced and no value cut.
+    text = _LETTERS
+    found = []
+    for start, length, kind, tier, joins, priority in spans:
+        end = min(start + length, len(text))
+        joining = joins and tier == 1
+        found.append(Detection(start, end, kind, text[start:end], priority, tier, joining))
+    values = {found[i].value for i in approve if i < len(found)}
+    added_deny = _plan(tuple(text[start : start + length] for start, length in added))
+
+    def redactor(added_deny: DetectorPlan | None, vault: InMemoryVault | None = None) -> Redactor:
+        return Redactor(
+            [_Spans(found)],
+            vault if vault is not None else InMemoryVault(),
+            Allowlist(),
+            modes=modes,
+            added_deny=added_deny,
+        ).with_overrides(Approved(*values))
+
+    scanner = redactor(added_deny)
+    try:
+        configured = redactor(None)._winners(text)
+        winners = redactor(added_deny)._winners(text)
+    except BlockedRequest:
+        # A block-mode value no approval passes, joined with a joining one
+        # (or overlapped by an added string): refused while resolving.
+        with pytest.raises(BlockedRequest):
+            scanner.scan(text, redactable=redactable)
+        assert scanner.warn_counts == Counter()
+        return
+    acted = scanned(winners, modes, values, redactable=redactable)
+    refusal = refused_at(winners, modes, values)
+    vault = InMemoryVault()
+    redacting = redactor(added_deny, vault)
+    try:
+        got = redacting.redact_text(text)
+    except BlockedRequest:
+        assert refusal is not None
+        with pytest.raises(BlockedRequest):
+            scanner.scan(text, redactable=redactable)
+        sent = False
+    else:
+        assert refusal is None
+        found_values = scanner.scan(text, redactable=redactable).found
+        sent = not redactable and not found_values
+        # The oracle's positions: those the redaction replaces, unless the
+        # text goes upstream as sent.
+        assert acted == (set() if sent else replaced(text, got, vault))
+    detections = scanner.plan.detect(text, Allowlist())
+    assert scanner.warn_counts == expected_warnings(
+        detections, configured, modes, acted, refused_at=refusal
+    )
+    assert sent or scanner.warn_counts == redacting.warn_counts
+
+
+@pytest.mark.parametrize("scanning", [False, True])
+def test_an_approved_block_mode_llm_finding_an_added_string_cuts_is_no_warning(
+    scanning: bool,
+) -> None:
+    # An llm finding in block mode the requester approved yields to the
+    # added string overlapping it (Redactor._absorb): only that string is
+    # redacted, and the rest of the finding goes upstream as sent — an
+    # override used, never a warning, though a rule is in warn mode.
+    text = _LETTERS
+    finding = Detection(0, 6, "PERSON", text[0:6], 120, ADDITIVE_TIER)
+    approved = Approved(finding.value)
+    redactor = Redactor(
+        [_Spans([finding])],
+        InMemoryVault(),
+        Allowlist(),
+        modes={"PERSON": "block", "EMAIL": "warn"},
+        added_deny=_plan(("EF",)),
+    ).with_overrides(approved)
+    if scanning:
+        assert redactor.scan(text) == (Counter({"DENY": 1}), False)
+    else:
+        assert redactor.redact_text(text) == "ABCD«DENY_001»GHIJKLMNOPQRSTUVWX"
+    assert redactor.warn_counts == Counter()
+    assert approved.asked == [("PERSON", finding.value)]
+
+
+def test_an_llm_finding_piece_an_added_string_cuts_is_swept_with_the_other_cut_values() -> None:
+    # A configured deny string (I) cuts a warn-mode value (FGHIJ, EMAIL) and
+    # an llm finding starting where it starts (FGHIJKLMNO, PERSON) into two
+    # pieces, FGH and JKLMNO; an added string (G) takes the first piece's
+    # place. The cut values are read in the overlap sweep's order — by start,
+    # the longest first — so the email counts and the piece it overlaps does
+    # not (one value), while the second piece is a winner left whole.
+    text = _LETTERS
+    found = [
+        Detection(5, 10, "EMAIL", text[5:10]),
+        Detection(5, 15, "PERSON", text[5:15], 120, ADDITIVE_TIER),
+        Detection(8, 9, "DENY", text[8:9], tier=0),
+    ]
+    vault = InMemoryVault()
+    redactor = Redactor(
+        [_Spans(found)],
+        vault,
+        Allowlist(),
+        modes={"EMAIL": "warn", "PERSON": "warn"},
+        added_deny=_plan(("G",)),
+    )
+    got = redactor.redact_text(text)
+    assert got == "ABCDEF«DENY_001»H«DENY_002»JKLMNOPQRSTUVWX"
+    assert redactor.warn_counts == Counter({"EMAIL": 1, "PERSON": 1})

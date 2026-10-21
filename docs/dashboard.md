@@ -67,11 +67,19 @@ does not install that dashboard or add user isolation to the core proxy.
   history (types, counts, paths, durations — never values).
 - **Redaction preview / dry-run**: run `llm-redact preview --text "…"`
   (or pipe to stdin) to see what the current config *would* redact, warn
-  on, or block — entirely local: no request is sent upstream and nothing
-  is written to the vault, metrics, or audit log. Iterate on rules,
-  allowlists, modes, and language scope offline. (The llm-redact-pro
-  dashboard's preview card runs the same dry run against the running
-  proxy's live config.)
+  on, or block. It reads the config file and builds detectors of its own,
+  in its own process, over a throwaway vault: no request is sent upstream,
+  nothing reaches a running proxy (its vault, metrics or audit log), and
+  the counters those detectors keep end with the command. Iterate on rules,
+  allowlists, modes, and language scope offline (an `llm` NER backend in
+  the config still reads the text on its model server, as for a request).
+  The llm-redact-pro dashboard's preview card runs the same dry run in the
+  running proxy, with its live detectors over a throwaway vault: it never
+  writes the live vault or the audit log, nor counts in the request and
+  detection counters, but the detectors count its strings as a request's
+  — the NER coverage counters (`llm_redact_ner_*`, each string an inline
+  call) and the `llm` backend's circuit breaker (its model server's
+  failures count toward opening it).
 - **Coverage posture, surfaced loudly**: `llm-redact status` and
   `llm-redact doctor` both report every configured opt-out that lets
   traffic through unredacted — warn-mode types, providers with detection

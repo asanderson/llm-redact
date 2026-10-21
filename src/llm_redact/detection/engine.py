@@ -1077,7 +1077,8 @@ def _heavy(det: Detector) -> _Heavy | None:
 
 
 def _inline(det: Detector, heavy: _Heavy, prepared: PreparedText) -> list[Detection]:
-    """``det`` run on the event loop's own thread (no precomputed result):
+    """``det`` run by the redaction itself (no precomputed result) — on a
+    request's path the event loop's own thread, for a preview its caller's:
     under its model's lock — so a NER worker running it meanwhile holds
     this caller up for at most the string it is on — and counted
     (``inline_calls``, under the lock like the backend's own counters)."""
@@ -1196,7 +1197,8 @@ class DetectorPlan:
     detections from ``precomputed`` instead of calling them — the
     allowlist, the sort and everything else unchanged. A heavy detector the
     plan runs itself runs under its model's lock (``heavy_lock``) and is
-    counted (``NerStats.inline_calls``): it held up the event loop.
+    counted (``NerStats.inline_calls``): on a request's path it held up the
+    event loop.
     """
 
     def __init__(
@@ -1263,8 +1265,8 @@ class DetectorPlan:
         allowlist: Allowlist,
         precomputed: Mapping[int, Sequence[Detection]] | None = None,
     ) -> list[Detection]:
-        """The detections in ``text`` (allowlist applied, sorted).
-        ``precomputed``: heavy detectors' raw detections in ``text`` by
+        """The detections in ``text`` (allowlist applied, those of no
+        characters dropped, sorted). ``precomputed``: heavy detectors' raw detections in ``text`` by
         index (``detect_heavy``, a row of a ``PrecomputedTable``), taken
         instead of running them."""
         # One PreparedText per string: regex detectors share it so their
@@ -1352,11 +1354,22 @@ class DetectorPlan:
                 found = precomputed[index]
             else:
                 found = runners[index](prepared)
+            # A detection of no characters is no value and is dropped, from
+            # every detector: a custom rule's pattern can match the empty
+            # string (a lookahead, `\b`, `x*`), and such a span — overlapping
+            # nothing, so it survived overlap resolution — sorted after the
+            # value starting where it stands, so redact_text inserted a
+            # placeholder of nothing and then sent that value again in the
+            # clear, a deny string included. Overlap resolution relies on
+            # start-sorted winners having sorted ends, which only non-empty
+            # disjoint spans guarantee.
             # Tier-0 (deny) detections bypass the allowlist — global AND
             # per-type: deny is the user's explicit strongest signal, so a
             # deny/allowlist contradiction resolves in favor of redaction.
             detections.extend(
-                d for d in found if d.tier == 0 or not allows(d.detector_type, d.value)
+                d
+                for d in found
+                if d.start < d.end and (d.tier == 0 or not allows(d.detector_type, d.value))
             )
         detections.sort(key=_detection_order)
         return detections

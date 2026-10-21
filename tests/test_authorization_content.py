@@ -25,6 +25,7 @@ import pytest
 from fake_router import ROUTE_HEADER, FakeRouter, Hop, Stop, install, routed_config
 from llm_redact.authorization import AUTHORIZATION_FAULT, AUTHORIZATION_STAGE, GateAuthorization
 from llm_redact.config import AuditConfig, OverridesConfig, ProviderConfig
+from llm_redact.detection.deny import DenyEntry
 from llm_redact.detection.engine import DetectionConfig
 from llm_redact.overrides import OverrideStore
 from llm_redact.plugin_api import Admission, AuthorizationRequest, ContentFacts, DetectionOverlay
@@ -189,6 +190,43 @@ async def test_a_warn_mode_value_an_added_string_cuts_into_is_reported_when_part
     state = app.state.proxy
     assert state.warn_counts == dict(warned)
     assert state.recent[0]["warned"] == dict(warned)
+
+
+@pytest.mark.parametrize(
+    ("deny", "sent", "warned"),
+    [
+        # A configured deny string takes part of the warn-mode value, the rest
+        # is sent as it was: a warning, once — as with the access gate's.
+        (("acme",), "mail bob.private@«DENY_001»-corp.example", (("EMAIL", 1),)),
+        # It takes all of it: nothing to warn about.
+        ((OVERLAPPED,), "mail «DENY_001»", ()),
+    ],
+    ids=["partly", "whole"],
+)
+async def test_a_warn_mode_value_a_configured_deny_string_cuts_into_is_reported_alike(
+    monkeypatch: pytest.MonkeyPatch, deny: tuple[str, ...], sent: str, warned: Any
+) -> None:
+    # The same strings in [detection] deny instead of an access gate's
+    # overlay: the same bytes upstream, the same facts, counts and row.
+    gate = ContentGate()
+    _registry(monkeypatch, gate)
+    upstream = Upstream()
+    detection = DetectionConfig(
+        modes=(("email", "warn"),), deny_strings=tuple(DenyEntry(value) for value in deny)
+    )
+    app = _app(upstream, detection=detection)
+    body = _messages(f"mail {OVERLAPPED}")
+    assert (await _post(app, "/v1/messages", body, ANTHROPIC)).is_success
+    assert sent in upstream.sent()
+    ((_request, content),) = gate.asked
+    assert content == _facts(detected=(("DENY", 1),), warned=warned)
+    state = app.state.proxy
+    assert state.warn_counts == dict(warned)
+    assert state.recent[0]["warned"] == dict(warned)
+    async with _client(app) as client:
+        metrics = (await client.get("/__llm-redact/metrics")).text
+    line = 'llm_redact_warnings_total{type="EMAIL"} 1'
+    assert (line in metrics) is bool(warned)
 
 
 PAPER_IBAN = "GB39 WEST 3607 5983 8675 65"

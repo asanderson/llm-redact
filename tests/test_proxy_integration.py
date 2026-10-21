@@ -13,7 +13,7 @@ from starlette.routing import Route
 
 from llm_redact.config import Config, ProviderConfig
 from llm_redact.detection.deny import DenyEntry
-from llm_redact.detection.engine import DetectionConfig
+from llm_redact.detection.engine import CustomRule, DetectionConfig
 from llm_redact.proxy import create_app
 
 EMAIL = "jane.doe@corp.example"
@@ -891,6 +891,44 @@ async def test_deny_string_round_trip() -> None:
     status = (await client.get("/__llm-redact/status")).json()
     assert status["detections_total"] == {"DENY": 1}
     assert status["detection"]["deny_strings"] == 1
+
+
+@pytest.mark.parametrize("pattern", [r"(?=acme)", r"\d*(?=acme)", r"\b", r"x*"])
+@pytest.mark.parametrize("warn", [False, True], ids=["no-warn-rule", "warn-rule"])
+async def test_a_custom_rule_matching_no_characters_never_resends_a_deny_string(
+    pattern: str, warn: bool
+) -> None:
+    # A custom pattern that can match the empty string found a "value" of no
+    # characters where the deny string starts: overlapping nothing, it was
+    # kept and sorted after the deny string, so the request went upstream as
+    # `«DENY_001»«AHEAD_001»acme-secret` — the always-redact value in the
+    # clear — and with a warn-mode rule beside it the request failed outright.
+    # A detection of no characters is none: nothing is inserted, nothing sent.
+    received.clear()
+    rules = [
+        CustomRule(name="lead", detector_type="LEAD", pattern="XYZ"),
+        CustomRule(name="ahead", detector_type="AHEAD", pattern=pattern),
+    ]
+    if warn:
+        rules.append(CustomRule(name="tail", detector_type="TAIL", pattern=r"me-\w+"))
+    config = Config(
+        providers={"anthropic": ProviderConfig(upstream_base_url="http://upstream")},
+        detection=DetectionConfig(
+            custom_rules=tuple(rules),
+            deny_strings=(DenyEntry("acme"),),
+            modes=(("tail", "warn"),) if warn else (),
+        ),
+    )
+    app = create_app(config, upstream_transport=httpx.ASGITransport(app=_fake_upstream()))
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1")
+    response = await client.post("/v1/messages", json=_anthropic_body("the XYZacme-secret plan"))
+    assert response.status_code == 200
+    sent = received["anthropic"]["messages"][0]["content"]
+    assert sent == "the «LEAD_001»«DENY_001»-secret plan"
+    status = (await client.get("/__llm-redact/status")).json()
+    assert status["detections_total"] == {"LEAD": 1, "DENY": 1}
+    # The warn-mode value the deny string cut: the rest of it is sent, once.
+    assert status["warnings_total"] == ({"TAIL": 1} if warn else {})
 
 
 async def test_openai_embeddings_redact_only_no_note(client: httpx.AsyncClient) -> None:

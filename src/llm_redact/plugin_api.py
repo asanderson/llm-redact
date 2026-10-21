@@ -616,14 +616,21 @@ class DashboardHost(Protocol):
     (``config.RESTART_ONLY_PATHS`` through ``config.restart_only_name``,
     e.g. ``detection.ner.llm.url``) — a label to show, not always a
     ``Config`` attribute. A ``fresh`` those keys refuse (one that would
-    start the llm backend — a reload starts it again only on a process
-    started running it, at the values it started with —, or one the kept
-    values make invalid) raises ``ConfigError`` with the running
-    configuration kept, and ``validate_config`` refuses it alike.
+    start the llm backend at other values — a reload starts it only at the
+    values the process started with, also on a process started without
+    it —, or one the kept values make invalid) raises ``ConfigError`` with
+    the running configuration kept, and ``validate_config`` refuses it
+    alike.
     ``preview`` runs the LIVE detection pipeline over caller text on a
-    throwaway vault (no upstream, vault, metrics or audit write) and
-    returns ``{redacted, detections, warnings, blocked}`` — ``blocked`` is
-    ``{"type": T}`` or None, never a value.
+    throwaway vault and returns ``{redacted, detections, warnings,
+    blocked}`` — ``blocked`` is ``{"type": T}`` or None, never a value. It
+    sends no upstream request and writes nothing to the live vault, the
+    audit or the request and detection counters; but its detectors are the
+    live ones, so what they count for a request they count for it: the NER
+    coverage counters (``llm_redact_ner_*`` on /metrics, /status
+    ``detection.ner``: each string it hands a backend, as an inline call —
+    it has no prefetched results), and the llm backend's circuit breaker
+    its model server's failures (enough in a row open it for requests too).
 
     OPTIONAL members (cores before 1.13 lack them: read with ``getattr``),
     for running the preview and the editor's check off the event loop:
@@ -898,11 +905,16 @@ class ContentFacts:
       redaction replaced with placeholders in THIS request (never another
       request's, whatever runs concurrently), sorted by type.
     - ``warned``: likewise for the warn-mode values the request forwards as
-      sent (observed, not redacted) — in part included where a value it is
-      joined with or an added deny string (``DetectionOverlay``) takes part
-      of it (one the redacted values cover whole does not count), but not
-      one that loses an ordinary overlap to a configured deny string or to
-      a value redacted in its place, although the rest of it is sent
+      sent (observed, not redacted) — in part included, once, where the
+      redaction takes part of it: a deny string (configured, or added by
+      ``DetectionOverlay``), a value redacted in its place, a value it is
+      joined with, an ``llm`` backend finding; one the redacted values
+      cover whole does not count, nor one that lost only to another value
+      forwarded as sent — that one counts as what it is: a warn-mode value
+      here, an approved block (or, where the proxy cannot rewrite the text,
+      any value an approved override passes) in ``overridden_types``, never
+      here. A warn-mode ``llm`` backend finding is cut around the other
+      values instead, and counts once per piece it forwards
       (docs/detection.md "Per-rule modes").
     - ``unscanned_parts``: the binary upload file parts this request
       forwards unscanned (``[detection] binary_uploads = "forward"``, or an

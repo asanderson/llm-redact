@@ -89,7 +89,10 @@ regexes, or scoped to a single placeholder type
 (`[detection.allowlist_by_type] EMAIL = ["support@corp.example"]`).
 Custom rules (`[[detection.custom_rules]]`) can also name a built-in
 validator (`luhn`, `mod97`, `verhoeff`, `jwt`, `entropy`) so a loose
-pattern only fires on checksum-valid matches.
+pattern only fires on checksum-valid matches. A match of no characters —
+where a pattern that can match the empty string (`\b`, a lookahead such
+as `(?=acme)`, `x*`) matches nothing — is no value and is ignored, from
+any detector.
 
 ### Values next to punctuation
 
@@ -234,7 +237,9 @@ run of overlapping values:
 - A value in warn mode is forwarded only where no redacted value covers
   it, and counted as a warning also when a redacted value overlaps it, as
   long as part of it lies outside the redacted values: that part goes
-  upstream. One lying wholly inside them (a warn-mode rule's `9217` in
+  upstream (the rule for every warn-mode value part of which is redacted,
+  [Per-rule modes](#per-rule-modes-redact-warn-block)). One lying wholly
+  inside them (a warn-mode rule's `9217` in
   `AHV 756.9217.0769.85. Done`) sends nothing and is not counted — decided
   once everything is redacted, so one whose rest an access gate's added
   deny string or an `llm` backend finding redacts is not counted either. Of
@@ -304,19 +309,41 @@ Warn-mode hits show up in `/status` (`warnings_total`), Prometheus
 rule's noise on your real traffic before trusting it with redaction. Be
 aware warn is *observation only* — the matched value (and anything a longer
 warn-mode match overlaps) is sent to the provider. A warn-mode value part
-of which is redacted after all — by a value it is joined with
-([above](#values-joined-with-the-ones-they-overlap)), or by a deny string
-an access gate adds for its requester (an llm-redact-pro role's detection
-overlay, which only tightens this policy) — is counted the same way: once,
-when part of it is still sent, and not at all when what is redacted in the
-end (the value it is joined with, an added deny string, an `llm` backend
-finding) covers it whole. A warn-mode value that loses an ordinary overlap
-— to a configured deny string, or to a value redacted in its place that
-the overlap sweep prefers (one starting earlier, or longer) — is NOT
-counted, although the part of it the winner does not cover is still sent:
-with `deny = ["acme"]` and `email = "warn"`, `bob.private@acme-corp.example`
-goes upstream as `bob.private@«DENY_001»-corp.example` and no warning is
-counted. Block-mode rejections
+of which is redacted after all is counted the same way: once, when part of
+it is still sent, and not at all when what is redacted in the end covers it
+whole — whatever redacts that part: a deny string (a configured one, or one
+an access gate adds for its requester: an llm-redact-pro role's detection
+overlay, which only tightens this policy), a value redacted in its place
+that the overlap sweep prefers (one starting earlier, or longer), a value
+it is joined with ([above](#values-joined-with-the-ones-they-overlap)), or
+an `llm` backend finding. With `deny = ["acme"]` and `email = "warn"`,
+`bob.private@acme-corp.example` goes upstream as
+`bob.private@«DENY_001»-corp.example` and counts as one warning — as
+when an access gate adds `acme`. A warn-mode value that loses an overlap
+only to another value forwarded as sent (a longer warn-mode match, an
+approved block — and, where the proxy cannot rewrite the text, a verbatim
+field or an upload's extracted text, and sends it as it is, any value an
+approved refusal override lets through) has nothing redacted and is not
+counted; the winner counts as what it is — a warn-mode value as a warning,
+an approved value as an override used (`llm_redact_overrides_used_total`,
+the content facts' `overridden_types`), not as a warning. Such a text
+refused all the same (for a value no override approves, wherever it is in
+the text) counts as a redacted one would. Of warn-mode values
+overlapping one another that are partly redacted, the one the overlap
+sweep reads first counts, so one value two detectors find counts once.
+An `llm` backend finding is the exception to "once": it loses no overlap
+but is cut around the other values ("Additive only",
+[below](#a-model-server-you-run-the-llm-backend)), so a warn-mode one a
+deny string splits counts once per piece left as sent. And a configured deny string takes
+part in overlap resolution while an added one is applied after it: the
+values a configured string overlaps leave the resolution, so a value they
+would have beaten is read on its own. Where warn-mode values overlap one
+another, the same bytes upstream can therefore count differently — with
+`email = "warn"` and a warn-mode custom rule reading `.example now`,
+`mail bob.private@acme-corp.example now` counts the email and that rule's
+value with `acme` configured, the email alone with `acme` added; both
+send `mail bob.private@«DENY_001»-corp.example now`.
+Block-mode rejections
 return a provider-shaped 400 whose message names the rule type, which
 agentic tools surface directly. `llm-redact preview` shows which mode a
 given text would trigger; the llm-redact-pro dashboard's config editor has
@@ -492,31 +519,43 @@ entities, ...), and names each kept key in its "require restart" warning
 (`detection.ner.llm.url`, `detection.ner.llm.allow_remote`,
 `detection.ner.llm.api_key_env`; the editor's answer lists the same names).
 The running values are the ones the proxy started with: no reload moves
-them. A reload never starts the backend on a proxy started without it,
-and starts it again only at the values the proxy started with. One that
-would run it while the running configuration does not — `"llm"` added to
-`backends`, NER switched on with it, its table added — is refused on a
-proxy whose startup did not run the backend, whatever the file names: a
-`[detection.ner.llm]` table the startup file held with NER off, or the
-defaults (`a reload cannot start the llm backend: the proxy was not
-started running it`). On a proxy started running it, a reload that
-stopped it (NER switched off, or `"llm"` removed from `backends`, with
-or without its table) can be
-followed by one that re-activates it, applied when the file names the
-`url`, `allow_remote` and `api_key_env` the proxy started with; the build
+them. A reload starts the backend only at the values the proxy started
+with, also on a proxy started without it. One that would run it while the
+running configuration does not — `"llm"` added to `backends`, NER switched
+on with it, its table added, or any of these after a reload stopped it
+(NER switched off, or `"llm"` removed from `backends`, with or without its
+table) — is applied when the file names the `url`, `allow_remote` and
+`api_key_env` the proxy started with: on a proxy started running the
+backend, the ones it ran at; on one started without it, those of a
+`[detection.ner.llm]` table its startup file held while the backend did
+not run (NER off, or `"llm"` not among `[detection.ner] backends`: a
+dormant table), or the defaults (Ollama on loopback, no key) when the file
+held none. The build
 then reads the key's variable and checks the server and its model exactly
-as at startup (any failure keeps the running configuration), and an open
-realtime connection is closed 1012 to reconnect under the new detection
-policy, as for any `[detection]` change. A re-activation with any of the
-three changed is refused (`a reload cannot start the llm backend anywhere
-but where the proxy was started to send it`, naming the changed keys) and
-the running configuration kept: kept, the running values would start it
-at a destination the file does not name. So is a reload the kept values
-make invalid (a changed `api` whose paths the running `url` already ends
-with). Each refusal names keys, never a value. Restart the proxy to apply
-any of them. The startup and `serve --check` read the file as written. A
-running proxy therefore never begins to send scanned text, or a
-credential, to a destination it did not send to from its start.
+as at startup (any failure keeps the running configuration), `/status`
+shows the backend, and an open realtime connection is closed 1012 to
+reconnect under the new detection policy, as for any `[detection]` change.
+A start with any of the three changed is refused (`a reload cannot start
+the llm backend at other values than the proxy started with`, naming the
+changed keys) and the running configuration kept: kept, the running values
+would start it at a destination the file does not name. So is a reload the
+kept values make invalid (a changed `api` whose paths the running `url`
+already ends with). Each refusal names keys, never a value. Restart the
+proxy to apply any of them. The startup and `serve --check` read the file
+as written. A running proxy therefore never begins to send scanned text,
+or a credential, to a destination its startup configuration does not name.
+Whoever can change `[detection]` can switch the backend on at those
+values, though — on a proxy started without it, at a dormant table's `url`
+and key variable, or at the loopback defaults — and from then on every
+scanned string goes to that server
+([threat-model.md](threat-model.md#residual-risks)): a dormant table is a
+destination a reload can switch on, so leave it out of a configuration
+that is not to run the backend. A config editor save that only switches
+NER on starts it too when the file's backends hold `"llm"`. A start by
+reload is logged once applied, a WARNING naming the server's origin
+(`config reload starts the llm NER backend: model server … now receives
+every string it scans, unredacted`), and `llm-redact doctor` WARNs about a
+dormant table that names a server off loopback or a key variable.
 
 **A server that requires a key** (vLLM started with `--api-key`, a hosted
 https endpoint, Ollama behind an authenticating reverse proxy or Ollama's
@@ -610,7 +649,9 @@ without this backend, and keeps of each `llm` finding only what lies outside
 them — so a text that tells the model to "return no entities" removes at most
 the model's own findings, and a crafted answer whose span starts just before
 an API key still leaves the whole key redacted (the span's other part is
-redacted too).
+redacted too). In warn mode each part left is forwarded as sent and
+counted as a warning of its own ([Per-rule
+modes](#per-rule-modes-redact-warn-block)).
 
 **When the server fails** — a timeout, an error status, a refused
 connection, an answer that is not the requested JSON — `on_error = "block"`
@@ -1557,7 +1598,7 @@ existing `detection.ner_enabled`):
 | `errors` | `llm` only: strings its model server failed on (a timeout, an error status, a connection fault, an answer that is not the requested JSON) and strings its open circuit breaker failed at once; each refused its request with `on_error = "block"`, and went on without the backend's findings with `"skip"` |
 | `breaker_opens` | `llm` only: times its circuit breaker opened (`breaker_failures` timeouts, transport faults or HTTP 5xx answers in a row; a failed probe opens it again at once) |
 | `breaker_short_circuits` | `llm` only: strings failed at once, without asking its model server, because its circuit breaker was open (each also in `errors`) |
-| `inline_calls` | strings the backend ran on the event loop itself, holding up every other request for that string's inference, instead of ahead of the redaction on the NER worker thread |
+| `inline_calls` | strings the backend was run on by the redaction itself instead of ahead of it on the NER worker thread: on a request's path that is the event loop, every other request waiting for that string's inference; a redaction preview in the llm-redact-pro dashboard counts too — on a worker thread of its own in llm-redact-pro releases after 0.17.1, on the event loop in 0.17.1 and earlier |
 | `prefetch_misses` | strings a request's redaction did not find among its precomputed NER results (or found computed for detectors a reload has since replaced), run inline instead and counted in `inline_calls` too |
 
 Each string a backend is handed counts once, under `scanned_whole`,

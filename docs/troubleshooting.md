@@ -225,9 +225,9 @@ allowed_hosts, allowed_origins, vault, audit, log, tls, otel, users, email,
 extraction, and overrides changes are kept as they were and named in the
 "require restart" line — and so are the `llm` backend's `[detection.ner.llm]`
 `url`, `allow_remote` and `api_key_env`, named by their dotted path
-(`detection.ner.llm.url`); a reload never starts that backend on a proxy
-started without it, and starts it again only at the values the proxy
-started with (see "a reload cannot start the llm backend" below).
+(`detection.ner.llm.url`); a reload starts that backend only at the values
+the proxy started with, also on a proxy started without it (see "a reload
+cannot start the llm backend" below).
 
 The reload reads the file and builds what changed (every NER model of a
 changed `[detection]`) off the event loop, so the proxy keeps answering
@@ -1166,30 +1166,27 @@ reloads hot. A reload (SIGHUP, the llm-redact-pro config editor) that changed
 them keeps their running values — the ones the proxy started with —, applies
 the rest and names each kept key (`detection.ner.llm.url`,
 `detection.ner.llm.allow_remote`, `detection.ner.llm.api_key_env`) in its
-"require restart" warning. A reload never starts the backend on a proxy
-started without it, and starts it again only at the values the proxy
-started with:
+"require restart" warning. A reload starts the backend — `"llm"` added to
+`[detection.ner] backends`, NER switched on with it, its table added, or
+any of these after a reload stopped it — only at the values the proxy
+started with, also on a proxy started without it: there they are those of
+a `[detection.ner.llm]` table the startup file held while the backend did
+not run (NER off, or `"llm"` not among `[detection.ner] backends`), or the
+defaults (Ollama on loopback, no key) when it held none.
 
-- `config reload failed; keeping current config: [detection.ner] a reload
-  cannot start the llm backend: the proxy was not started running it (…)`
-  (the editor's 400): the reload would start the backend — `"llm"` added to
-  `[detection.ner] backends`, NER switched on with it, its table added — on
-  a proxy whose startup did not run it, even at the `url` and key variable
-  of a `[detection.ner.llm]` table the startup file held with NER off.
-  Restart the proxy (`serve --check` first) to start it.
-- `… a reload cannot start the llm backend anywhere but where the proxy was
-  started to send it: detection.ner.llm.url changed (…)`: the proxy was
-  started running the backend, a reload stopped it, and this one would start
-  it again with the named keys changed. Set them back and reload again to
-  start it where it ran, or restart the proxy to start it at the new ones.
+`config reload failed; keeping current config: [detection.ner] a reload
+cannot start the llm backend at other values than the proxy started with:
+detection.ner.llm.url changed (…)` (the editor's 400): this reload would
+start the backend with the named keys changed. Set them back to the
+values the proxy started with and reload again to start it there, or
+restart the proxy (`serve --check` first) to start it at the new ones.
 
-So is a reload the kept `url` makes invalid (`url is the server's base URL,
-without /v1 … — the running url is kept on a reload`: a changed `api`);
-restart the proxy to apply the file as written. Each message names keys,
-never a value. A re-activation the reload allows builds as the startup
-does: an unset key variable (above), a server that does not answer or no
-longer serves the pinned model refuses it with the running configuration
-kept.
+A reload the kept `url` makes invalid is refused too (`url is the server's
+base URL, without /v1 … — the running url is kept on a reload`: a changed
+`api`); restart the proxy to apply the file as written. Each message names keys,
+never a value. A start the reload allows builds as the startup does: an
+unset key variable (above), a server that does not answer or no longer
+serves the pinned model refuses it with the running configuration kept.
 
 ## "[detection.ner.llm] api_key_env must name an environment variable …" / "… must not name an LLM_REDACT_ variable …"
 

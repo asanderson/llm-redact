@@ -121,16 +121,23 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   counts). Of values forwarded as sent that overlap one another, only those the sweep takes
   count: one value two detectors find counts once, and a warn-mode value overlapping a block-mode
   or another warn-mode value taken before it does not count, also where something else redacts
-  part of it. A warn-mode `llm` backend finding counts once however many pieces of it the other
-  values leave, and also when the additive sweep drops it for another `llm` finding redacted in
-  its place, as long as part of it is sent. A text refused for a block-mode value counts what it
-  would with every refusing value approved, wherever the refusing value stands (the warn-mode
-  values after the first block were not counted); an approved value counts as an override used
-  (`llm_redact_overrides_used_total`), not as a warning, and where the proxy cannot rewrite the
-  text (a verbatim field, an upload's extracted text) and sends it as it is, every value found is
-  read as sent, so an approved one hides a warn-mode value it overlaps. What is redacted or
-  refused, the placeholders issued and the refusal overrides consulted are unchanged (a
-  differential test against the redactor before the rule pins them). Where the
+  part of it and also where it is sent whole — a warn-mode value 1.12.1 counted as a winner is
+  not counted when a value sent only in part overlaps it and is read first, and where that value
+  is in block mode but lost the overlap resolution to a value redacted in its place (so its rest
+  goes upstream unrefused), the warn-mode value goes upstream counted nowhere. A warn-mode `llm`
+  backend finding counts once however many pieces of it the other values leave, and also when the
+  additive sweep drops it for another `llm` finding redacted in its place, as long as part of it
+  is sent; `llm` findings are read after the other detectors' values, for what they send beyond
+  them, so a crafted span never takes a warning from a rule's value. A text refused for a
+  block-mode value counts what it would with every refusing value approved, wherever the refusing
+  value stands (the warn-mode values after the first block were not counted); an approved value
+  counts as an override used (`llm_redact_overrides_used_total`), not as a warning. Where the
+  proxy cannot rewrite the text (a verbatim field, an upload's extracted text) and sends it as it
+  is, nothing is replaced and the values the overrides let through are read as sent besides those
+  in warn or block mode, so an approved one hides a warn-mode value it overlaps (there, approving
+  the values that refuse a text can change what is counted). What is redacted or refused, the
+  placeholders issued and the refusal overrides consulted are unchanged (a differential test
+  against the redactor before the rule pins them). Where the
   proxy cannot rewrite the text (a
   verbatim field, an upload's extracted text), a span joining two or more such values is put to
   refusal overrides value by value: the refusal's code names every value, one approval of it

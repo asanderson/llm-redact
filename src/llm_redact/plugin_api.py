@@ -912,12 +912,16 @@ class ContentFacts:
       or added by ``DetectionOverlay``, alike wherever they replace the
       same characters), a value redacted in its place, a value it is joined
       with, an ``llm`` backend finding; an ``llm`` finding counts once
-      however many pieces of it are sent. One the redacted values cover
-      whole does not count, nor one overlapping another value forwarded as
-      sent that the overlap sweep takes before it — that one counts as what
-      it is: a warn-mode value here, an approved block (or, where the proxy
-      cannot rewrite the text, any value an approved override passes) in
-      ``overridden_types``, never here.
+      however many pieces of it are sent, read after the other detectors'
+      values (it never takes a warning from one of them). One the redacted
+      values cover whole does not count, nor one overlapping another value
+      forwarded as sent that the overlap sweep takes before it, even one
+      sent whole. That other value is counted as what it is: a warn-mode
+      value here, an approved block (or, where the proxy cannot rewrite the
+      text, any value an approved override passes) in ``overridden_types``
+      — but a block-mode value that lost the overlap resolution to a value
+      redacted in its place is neither refused nor approved: its rest and
+      the warn-mode value it hides go upstream counted nowhere.
     - ``unscanned_parts``: the binary upload file parts this request
       forwards unscanned (``[detection] binary_uploads = "forward"``, or an
       approved ``binary_upload`` override).

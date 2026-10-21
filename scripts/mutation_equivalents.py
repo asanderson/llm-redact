@@ -142,7 +142,7 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
     "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_19": (
         "default 'redact' -> 'REDACT': a non-'block'/'warn' default redacts identically."
     ),
-    "llm_redact.redactor.xǁRedactorǁscan__mutmut_14": (
+    "llm_redact.redactor.xǁRedactorǁscan__mutmut_15": (
         "sent = False -> sent = None in Redactor.scan: the flag is read once, as "
         "`detected and sent` in the finally, and None is falsy like False; a "
         "completed loop reassigns it to a bool before it is read, so None only ever "

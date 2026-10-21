@@ -4,17 +4,20 @@ replaced (docs/detection.md "Per-rule modes"; ``Redactor._count_warned``).
 The candidates are the configured detections the redaction read that are
 forwarded as sent, or would be — in warn or block mode (a block-mode value
 whether or not an override approves it), an llm finding as found, never a
-deny string — or, in text a scan sends upstream as it is, every value
-found. Those with a character outside what the text's fate replaces are read
-by the overlap sweep, and each warn-mode value it takes counts once. Counted
-once per text, before anything acts on the winners: a text refused for a
-block — in the winner loop or while resolving — counts what it counts with
-every block approved.
+deny string — and, in text a scan sends upstream as it is, the values the
+overrides let through. Those with a character outside what the text's fate
+replaces are read by the overlap sweep — the llm findings after the other
+values, for what they send beyond them — and each warn-mode value it takes
+counts once. Counted once per text, before anything acts on the winners: a
+text refused for a block — in the winner loop or while resolving — counts
+what it counts with every block approved.
 
 So a deny string counts alike configured or added wherever it replaces the
 same characters, an llm finding counts once however many pieces of it are
-sent (and when the additive sweep drops it, when part of it is sent), and a
-refusing value never changes what is counted, wherever it stands. Nothing
+sent (and when the additive sweep drops it, when part of it is sent) and
+never takes a warning from another detector's value, a value no override was
+asked about hides nothing, and a refusing value never changes what is
+counted, wherever it stands. Nothing
 else the redaction does changes: a differential against the redactor before
 the rule (tests/redactor_before_warn_rule.py, a frozen copy) pins output,
 refusals, issued placeholders, ``Redactor.counts``, the overrides consulted
@@ -38,7 +41,7 @@ from llm_redact.detection.deny import DenyDetector, DenyEntry
 from llm_redact.detection.engine import Allowlist, DetectorPlan
 from llm_redact.redactor import BlockedRequest, Redactor
 from llm_redact.vault import InMemoryVault
-from warn_oracle import Every, expected_warnings, replaced
+from warn_oracle import Every, expected_warnings, let_through, replaced
 
 # Every character once, none a case-insensitive match of another: a string
 # occurs at one place, so spans and deny strings are positions.
@@ -344,7 +347,7 @@ def test_touching_spans_cover_a_value_together() -> None:
 @pytest.mark.parametrize(
     ("approve", "warned"),
     [
-        # Sent as it is (the redact-mode value approved): every value found
+        # Sent as it is (the redact-mode value approved): the approved value
         # is forwarded as sent and read as such — R, read first, hides W.
         (("ABCDEF",), Counter()),
         # Refused by the caller (R found): counted as redact_text counts
@@ -352,7 +355,7 @@ def test_touching_spans_cover_a_value_together() -> None:
         ((), Counter({"W": 1})),
     ],
 )
-def test_a_scan_sent_as_it_is_reads_every_value_found(
+def test_a_scan_sent_as_it_is_reads_the_values_approved_as_sent(
     approve: tuple[str, ...], warned: Counter[str]
 ) -> None:
     found = (_at(0, 6, "R"), _at(3, 9, "W"))
@@ -361,14 +364,182 @@ def test_a_scan_sent_as_it_is_reads_every_value_found(
     assert redactor.warn_counts == warned
 
 
-def test_no_warn_mode_no_count_and_no_second_resolution() -> None:
-    # Without a rule in warn mode nothing is counted and a text refused
-    # while resolving is not resolved again (nothing consulted twice).
+# Letters apart, so an llm finding can be cut into pieces of blanks only.
+SPACED = "AB  CD  EF  GH  IJ  KL"
+
+
+def _spaced(start: int, end: int, kind: str, tier: int = 1, *, joins: bool = False) -> Detection:
+    return Detection(start, end, kind, SPACED[start:end], 120 if tier else 0, tier, joins)
+
+
+@pytest.mark.parametrize(
+    ("text", "found"),
+    [
+        # A redact-mode llm finding (AB  CD) whose only piece left between
+        # two warn-mode values is blanks: never a winner, never asked about.
+        (
+            SPACED,
+            (
+                _spaced(0, 2, "EMAIL"),
+                _spaced(0, 6, "PERSON", ADDITIVE_TIER),
+                _spaced(4, 10, "PHONE"),
+            ),
+        ),
+        # A redact-mode llm finding (E..L) the additive sweep drops for a
+        # warn-mode one (C..F): never a winner either.
+        (
+            TEXT,
+            (
+                _at(0, 3, "EMAIL"),
+                _at(2, 6, "NAME", ADDITIVE_TIER),
+                _at(4, 12, "PERSON", ADDITIVE_TIER),
+                _at(10, 14, "PHONE"),
+            ),
+        ),
+    ],
+)
+def test_a_value_no_override_was_asked_about_hides_nothing_in_a_scan(
+    text: str, found: tuple[Detection, ...]
+) -> None:
+    # Nothing to approve: the scan sends the text as it is and counts what
+    # redact_text counts (nothing replaced either way) — the warn-mode
+    # values, the rules' sent whole.
+    modes = {"EMAIL": "warn", "PHONE": "warn", "NAME": "warn"}
     asked = Asked()
-    redactor = _redactor(JOINED, {"K": "block"}).with_overrides(asked)
-    with pytest.raises(BlockedRequest):
-        redactor.redact_text(TEXT)
-    assert asked.log == [("allows", "K", "IJKL")]
+    scanning = Redactor([Spans(found)], InMemoryVault(), Allowlist(), modes=modes)
+    scanning = scanning.with_overrides(asked)
+    assert scanning.scan(text) == (Counter(), False)
+    assert asked.log == []
+    redacting = Redactor([Spans(found)], InMemoryVault(), Allowlist(), modes=modes)
+    assert redacting.redact_text(text) == text
+    assert scanning.warn_counts == redacting.warn_counts
+    assert scanning.warn_counts["EMAIL"] == scanning.warn_counts["PHONE"] == 1
+
+
+def test_a_scan_sent_as_it_is_reads_each_value_a_joined_span_was_approved_for() -> None:
+    # R and a joining value J become one span; the warn-mode W inside it is
+    # forwarded only where nothing covers it. Approved, the span goes
+    # upstream as sent: R and J are values sent, and R, read first, hides W.
+    found = (_at(0, 8, "R"), _at(2, 12, "J", joins=True), _at(4, 10, "W"))
+    asked = Asked("ABCDEFGH", "CDEFGHIJKL")
+    redactor = _redactor(found, {"W": "warn"}).with_overrides(asked)
+    assert redactor.scan(TEXT) == (Counter(), True)
+    assert redactor.warn_counts == Counter()
+    # One of them refused: the span is found, W covered whole by it.
+    refused = _redactor(found, {"W": "warn"}).with_overrides(Asked("ABCDEFGH"))
+    assert refused.scan(TEXT) == (Counter({"R": 1}), False)
+    assert refused.warn_counts == Counter()
+
+
+def test_a_scan_sent_as_it_is_reads_an_approved_llm_finding_whole() -> None:
+    # A redact-mode llm finding P cut in two by a warn-mode value X: both
+    # pieces approved, P is a value sent — as found — and hides the
+    # warn-mode llm finding Q the additive sweep dropped for it.
+    found = (
+        _at(0, 10, "P", ADDITIVE_TIER),
+        _at(4, 6, "X"),
+        _at(8, 14, "Q", ADDITIVE_TIER),
+    )
+    modes = {"X": "warn", "Q": "warn"}
+    asked = Asked("ABCD", "GHIJ")
+    redactor = _redactor(found, modes).with_overrides(asked)
+    assert redactor.scan(TEXT) == (Counter(), True)
+    assert asked.log == [("allows", "P", "ABCD"), ("allows", "P", "GHIJ")]
+    assert redactor.warn_counts == Counter({"X": 1})
+    # Redacted, P is replaced and Q sends its tail: a warning.
+    redacting = _redactor(found, modes)
+    assert redacting.redact_text(TEXT) == "«P_001»EF«P_002»KLMNOPQRSTUVWX"
+    assert redacting.warn_counts == Counter({"X": 1, "Q": 1})
+
+
+@pytest.mark.parametrize("scanning", [False, True])
+def test_an_llm_finding_never_hides_another_detectors_value(scanning: bool) -> None:
+    # A warn-mode llm finding starting just before a warn-mode rule's value
+    # and longer, as a crafted answer could: the rule's value, sent whole,
+    # counts — the llm finding is read after it, as overlap resolution
+    # reads it — and so does the llm finding, for what it sends before it.
+    found = (_at(0, 10, "PERSON", ADDITIVE_TIER), _at(5, 15, "EMAIL"))
+    redactor = _redactor(found, {"PERSON": "warn", "EMAIL": "warn"})
+    if scanning:
+        assert redactor.scan(TEXT) == (Counter(), False)
+    else:
+        assert redactor.redact_text(TEXT) == TEXT
+    assert redactor.warn_counts == Counter({"EMAIL": 1, "PERSON": 1})
+    # Inside the rule's value, it sends nothing of its own: not counted.
+    modes = {"PERSON": "warn", "EMAIL": "warn"}
+    inside = _redactor((_at(6, 10, "PERSON", ADDITIVE_TIER), found[1]), modes)
+    inside.redact_text(TEXT)
+    assert inside.warn_counts == Counter({"EMAIL": 1})
+
+
+def test_an_llm_finding_is_read_against_the_replaced_and_taken_values_together() -> None:
+    # A configured deny string (CD) inside a warn-mode value W (A..L): W is
+    # sent in part and counts. The warn-mode llm findings AB and GHIJ lie
+    # inside W (the first beside the deny string): they send nothing W does
+    # not, and do not count.
+    found = (
+        _at(0, 2, "PERSON", ADDITIVE_TIER),
+        _at(0, 12, "W"),
+        _at(6, 10, "PERSON", ADDITIVE_TIER),
+    )
+    redactor = _redactor(found, {"W": "warn", "PERSON": "warn"}, configured=("CD",))
+    assert redactor.redact_text(TEXT) == "AB«DENY_001»EFGHIJKLMNOPQRSTUVWX"
+    assert redactor.warn_counts == Counter({"W": 1})
+
+
+def test_a_block_mode_value_that_lost_to_a_redacted_one_hides_a_warn_value() -> None:
+    # K (block mode) loses to R (redact mode), which starts first: it is
+    # neither refused nor asked about, and its tail IJKL goes upstream. It
+    # is a value forwarded as sent all the same (a block-mode value, whether
+    # or not anything refuses it), read before W: W, sent whole, is not
+    # counted — the rule's documented consequence (docs/detection.md).
+    found = (_at(0, 8, "R"), _at(4, 12, "K"), _at(10, 14, "W"))
+    asked = Asked()
+    redactor = _redactor(found, {"K": "block", "W": "warn"}).with_overrides(asked)
+    assert redactor.redact_text(TEXT) == "«R_001»IJKLMNOPQRSTUVWX"
+    assert asked.log == []
+    assert redactor.warn_counts == Counter()
+
+
+def test_without_a_warn_mode_nothing_is_counted_or_resolved_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Without a rule in warn mode no text is counted, and one refused while
+    # resolving is not resolved again for its count (only the work saved:
+    # the count would be empty); with one, it is, once.
+    resolutions: list[str] = []
+    counts: list[str] = []
+    resolution, count_warned = Redactor._resolution, Redactor._count_warned
+
+    def spy_resolution(self: Redactor, *args: Any) -> Any:
+        resolutions.append(args[0])
+        return resolution(self, *args)
+
+    def spy_count(self: Redactor, *args: Any) -> Any:
+        counts.append("counted")
+        return count_warned(self, *args)
+
+    monkeypatch.setattr(Redactor, "_resolution", spy_resolution)
+    monkeypatch.setattr(Redactor, "_count_warned", spy_count)
+    for modes, resolved in (({"K": "block"}, 1), ({"K": "block", "W": "warn"}, 2)):
+        resolutions.clear()
+        counts.clear()
+        asked = Asked()
+        redactor = _redactor(JOINED, modes).with_overrides(asked)
+        with pytest.raises(BlockedRequest):
+            redactor.redact_text(TEXT)
+        # The requester's overrides are asked once, by the refusal itself.
+        assert asked.log == [("allows", "K", "IJKL")]
+        assert len(resolutions) == resolved
+        assert len(counts) == resolved - 1
+    # Nor a text redacted or scanned.
+    resolutions.clear()
+    counts.clear()
+    redactor = _redactor(EARLY, {"K": "redact"})
+    redactor.redact_text(TEXT)
+    redactor.scan(TEXT)
+    redactor.scan(TEXT, redactable=True)
+    assert counts == [] and len(resolutions) == 3
     assert redactor.warn_counts == Counter()
 
 
@@ -548,6 +719,142 @@ def test_a_refused_text_counts_what_it_counts_with_every_block_approved(
         scan = twin.scan(TEXT, redactable=redactable)
         if redactable or scan.found:
             assert scanning.warn_counts == twin.warn_counts
+
+
+SPACED_SPANS = st.lists(
+    st.tuples(
+        st.integers(0, len(SPACED) - 1),
+        st.integers(1, 10),
+        st.sampled_from(TYPES),
+        # A configured deny string, a value, an llm finding (often: its
+        # pieces may be blanks only).
+        st.sampled_from([0, 1, 1, ADDITIVE_TIER, ADDITIVE_TIER]),
+        st.booleans(),
+        st.sampled_from([110, 120]),
+    ),
+    max_size=7,
+)
+
+
+@settings(deadline=None, max_examples=1500)
+@given(
+    spans=SPACED_SPANS,
+    added=st.lists(st.tuples(st.integers(0, len(SPACED) - 1), st.integers(1, 6)), max_size=2),
+    modes=MODES,
+    approve=APPROVE,
+    redactable=st.booleans(),
+)
+def test_a_scan_counts_the_values_its_text_sends_by_their_mode_or_an_approval(
+    spans: list[tuple[int, int, str, int, bool, int]],
+    added: list[tuple[int, int]],
+    modes: dict[str, str],
+    approve: set[int],
+    redactable: bool,
+) -> None:
+    # Text with blanks between its letters, so an llm finding can be cut
+    # into pieces of blanks only. A scan counts as the rule says: where it
+    # sends the text as it is, the values sent are those in warn or block
+    # mode and those an override let through — never one no override was
+    # asked about — and where nothing was asked, exactly what redact_text
+    # counts; else what redact_text replaces with every refusing value
+    # approved.
+    found = []
+    for start, length, kind, tier, joins, priority in spans:
+        end = min(start + length, len(SPACED))
+        if SPACED[start:end].strip():
+            joining = joins and tier == 1
+            found.append(Detection(start, end, kind, SPACED[start:end], priority, tier, joining))
+    values = {found[i].value for i in approve if i < len(found)}
+    strings = tuple(
+        dict.fromkeys(SPACED[a : a + n].strip() for a, n in added if SPACED[a : a + n].strip())
+    )
+
+    def redactor(vault: InMemoryVault | None = None) -> Redactor:
+        return _redactor(found, modes, added=strings, vault=vault)
+
+    asked = Asked(*values)
+    scanner = redactor().with_overrides(asked)
+    twin_vault = InMemoryVault()
+    twin = redactor(twin_vault).with_overrides(Every())
+    redacted = replaced(SPACED, twin.redact_text(SPACED), twin_vault)
+    detections = scanner.plan.detect(SPACED, Allowlist())
+    try:
+        scan = scanner.scan(SPACED, redactable=redactable)
+    except BlockedRequest:
+        assert scanner.warn_counts == expected_warnings(detections, modes, redacted)
+        return
+    if redactable or scan.found:
+        assert scanner.warn_counts == expected_warnings(detections, modes, redacted)
+        return
+    winners = redactor().with_overrides(Asked(*values))._winners(SPACED)
+    through = let_through(detections, winners, modes)
+    assert scanner.warn_counts == expected_warnings(detections, modes, set(), through=through)
+    if not asked.log:
+        redacting = redactor()
+        assert redacting.redact_text(SPACED) == SPACED
+        assert scanner.warn_counts == redacting.warn_counts
+
+
+LLM_FINDINGS = st.lists(
+    st.tuples(
+        st.integers(0, len(TEXT) - 1),
+        st.integers(1, 12),
+        st.sampled_from(["PERSON", "NAME"]),
+        st.sampled_from([110, 120]),
+    ),
+    min_size=1,
+    max_size=4,
+)
+
+
+@settings(deadline=None, max_examples=1500)
+@given(
+    spans=SPANS,
+    deny=STRINGS,
+    findings=LLM_FINDINGS,
+    modes=MODES,
+    approve=APPROVE,
+    redactable=st.booleans(),
+    configured=st.booleans(),
+)
+def test_a_warn_mode_llm_finding_never_takes_a_warning_from_another_detector(
+    spans: list[tuple[int, int, str, int, bool, int]],
+    deny: list[tuple[int, int]],
+    findings: list[tuple[int, int, str, int]],
+    modes: dict[str, str],
+    approve: set[int],
+    redactable: bool,
+    configured: bool,
+) -> None:
+    # A model the scanned text can instruct may return any span: one in
+    # warn mode (of its own types) replaces nothing and refuses nothing, so
+    # with it the other detectors' values count exactly as without it —
+    # in redact_text and in a scan, refused or not, deny strings configured
+    # or added — whatever it overlaps. (Of llm findings that overlap one
+    # another, the sweep counts those it takes, as for every value.)
+    found = [d for d in _found(spans) if d.tier != ADDITIVE_TIER]
+    llm = [
+        Detection(a, min(a + n, len(TEXT)), kind, TEXT[a : min(a + n, len(TEXT))], p, ADDITIVE_TIER)
+        for a, n, kind, p in findings
+    ]
+    values = {found[i].value for i in approve if i < len(found)}
+    where = {"configured" if configured else "added": _strings(deny)}
+    warn = {**modes, "PERSON": "warn", "NAME": "warn"}
+    counted = []
+    for detections in (found, found + llm):
+        redacting = _redactor(detections, warn, **where).with_overrides(Asked(*values))
+        scanning = _redactor(detections, warn, **where).with_overrides(Asked(*values))
+        with contextlib.suppress(BlockedRequest):
+            redacting.redact_text(TEXT)
+        with contextlib.suppress(BlockedRequest):
+            scanning.scan(TEXT, redactable=redactable)
+        counted.append(
+            [
+                Counter({t: n for t, n in c.items() if t in TYPES})
+                for c in (redacting.warn_counts, scanning.warn_counts)
+            ]
+        )
+    assert counted[0] == counted[1]
 
 
 def _run(cls: Any, call: str, found: list[Detection], modes: dict[str, str], **kw: Any) -> Any:

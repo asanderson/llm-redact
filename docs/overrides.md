@@ -93,10 +93,14 @@ overlapping it is no warning when the overlap sweep takes the approved value
 first: of values forwarded as sent that overlap one another, only those the
 sweep takes count, [detection.md](detection.md#per-rule-modes-redact-warn-block)).
 A block-mode value counts as a value forwarded as sent whether or not it is
-approved, so a request refused for one counts its warn-mode values exactly
-as it would with the refusal approved: approving a block-mode value never
-changes the warnings counted. Every use is counted and marked on the
-request's row, the same way warn mode is.
+approved, so where the proxy rewrites the text a request refused for one
+counts its warn-mode values exactly as it would with the refusal approved:
+approving a block-mode value never changes the warnings counted there. In
+text the proxy cannot rewrite (a verbatim field, an upload's extracted
+text), an approval that lets the whole text go upstream as it is can: once
+nothing of it is replaced, the values the overrides let through are read as
+sent, and a warn-mode value one of them overlaps is no warning. Every use is
+counted and marked on the request's row, the same way warn mode is.
 
 ## What can be overridden
 

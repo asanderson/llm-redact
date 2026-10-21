@@ -38,7 +38,7 @@ from llm_redact.plugin_api import Inspection
 from llm_redact.redactor import BlockedRequest, Redactor
 from llm_redact.upload_inspection import judge
 from llm_redact.vault import InMemoryVault
-from warn_oracle import Every, expected_warnings, replaced, sent_as_is
+from warn_oracle import Every, expected_warnings, let_through, replaced, sent_as_is
 
 EMAIL = "bob.private@acme-corp.example"
 
@@ -605,8 +605,7 @@ def test_a_warn_value_that_lost_only_to_a_value_forwarded_as_sent_is_not_counted
     assert blocking.redact_text(text) == text
     assert blocking.warn_counts == Counter()
     assert approved.asked == [("LEAD", MAILER)]
-    # One that lost to such a value but that a deny string cuts elsewhere
-    # is cut all the same: a warning besides the winner's.
+    # One that lost to such a value, cut elsewhere by a deny string:
     cut = _redactor(
         DetectionConfig(
             modes=(("email", "warn"), ("lead", "warn")),
@@ -1311,7 +1310,8 @@ def test_a_scan_counts_a_warn_value_cut_by_what_it_refuses_the_text_for(
     # block, wherever it is, while resolving too; or by the caller, for a
     # value found) or, redactable, redacted after all — unless the text
     # goes upstream as sent, every value that would refuse it approved:
-    # then nothing of it is replaced and every value found is sent.
+    # then nothing of it is replaced, and the values the overrides let
+    # through are sent besides the ones in warn or block mode.
     text = _LETTERS
     found = []
     for start, length, kind, tier, joins, priority in spans:
@@ -1350,9 +1350,13 @@ def test_a_scan_counts_a_warn_value_cut_by_what_it_refuses_the_text_for(
         winners = redactor()._winners(text)
         assert sent == sent_as_is(winners, modes, values, redactable=redactable)
     detections = scanner.plan.detect(text, Allowlist())
-    assert scanner.warn_counts == expected_warnings(
-        detections, modes, set() if sent else redacted, sent=sent
-    )
+    if sent:
+        expected = expected_warnings(
+            detections, modes, set(), through=let_through(detections, winners, modes)
+        )
+    else:
+        expected = expected_warnings(detections, modes, redacted)
+    assert scanner.warn_counts == expected
     # Refused or redacted after all: as redact_text counts it.
     assert sent or scanner.warn_counts == redacting.warn_counts
 
@@ -1386,23 +1390,23 @@ def test_an_approved_block_mode_llm_finding_an_added_string_cuts_is_no_warning(
 @pytest.mark.parametrize(
     ("person", "warned"),
     [
-        # Longer, so read first at the same start: the llm finding counts,
-        # the email it overlaps does not — once, though two pieces of it go
-        # upstream.
-        (15, Counter({"PERSON": 1})),
-        # Shorter: the email is read first and counts, the llm finding it
-        # overlaps does not.
+        # Longer: the email counts all the same, and the llm finding counts
+        # for what it sends beyond it (KLMNO) — once, though two pieces of
+        # it go upstream.
+        (15, Counter({"EMAIL": 1, "PERSON": 1})),
+        # Shorter: inside the email, it sends nothing of its own.
         (8, Counter({"EMAIL": 1})),
     ],
 )
-def test_an_llm_finding_is_swept_as_found_with_the_other_values_sent(
+def test_an_llm_finding_is_read_as_found_after_the_other_values_sent(
     person: int, warned: Counter[str]
 ) -> None:
     # A configured deny string (I) cuts a warn-mode value (FGHIJ, EMAIL)
     # and an llm finding starting where it starts (PERSON) into pieces; an
     # added string (G) takes part of the first piece. The values sent in
-    # part are read as found — the llm finding whole, never its pieces — in
-    # the overlap sweep's order: by start, the longest first.
+    # part are read as found — the llm finding whole, never its pieces —
+    # and the llm finding after the email, as overlap resolution reads it:
+    # it never hides another detector's value, longer or not.
     text = _LETTERS
     found = [
         Detection(5, 10, "EMAIL", text[5:10]),

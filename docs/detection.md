@@ -319,7 +319,9 @@ block-mode value whether or not an override approves it — is a value sent
 when at least one of its characters is not replaced. The values sent are
 read in the order overlap resolution reads values (the one starting first,
 of those the longest), each one overlapping none taken before it is taken,
-and each warn-mode value taken is one warning. So:
+and each warn-mode value taken is one warning; an `llm` backend finding is
+read after the other detectors' values, as overlap resolution reads it
+(below). So:
 
 - A warn-mode value part of which is redacted after all counts once, when
   part of it is still sent, and not at all when what is replaced covers it
@@ -336,11 +338,16 @@ and each warn-mode value taken is one warning. So:
 - Of values sent that overlap one another, only those the sweep takes
   count: one value two detectors find counts once, and a warn-mode value
   overlapping one taken before it — a longer warn-mode match, a block-mode
-  value — is not counted, however much of it something else redacts. With
+  value — is not counted, however much of it is sent, even all of it. With
   `email = "warn"` and a warn-mode custom rule reading `.example now`,
   `mail bob.private@acme-corp.example now` counts the email alone when
   `acme` is denied; when the whole address is, nothing of the email is
-  sent and the custom rule's value is counted instead.
+  sent and the custom rule's value is counted instead. The value taken
+  before it is counted as what it is: a warn-mode value as a warning, an
+  approved block as an override used — and a block-mode value that lost
+  the overlap resolution to a value redacted in its place, whose rest goes
+  upstream without a refusal (the winner's mode governs), as neither: the
+  warn-mode value it hides goes upstream uncounted, whole or in part.
 - A deny string counts the same whether it is configured or added by an
   access gate, wherever it replaces the same characters: the values come
   from the configured detectors, the characters from what is replaced in
@@ -350,7 +357,11 @@ and each warn-mode value taken is one warning. So:
   around the other values ("Additive only",
   [below](#a-model-server-you-run-the-llm-backend)), and counts once
   however many of its pieces are sent; one the model's other finding
-  displaces counts when part of it is still sent.
+  displaces counts when part of it is still sent. It is read after every
+  other detector's values sent and counts for what it sends beyond them
+  and beyond what is replaced: as it never takes another detector's value's
+  place in the redaction, it never takes one's warning either — a crafted
+  span starting just before a warn-mode email leaves the email counted.
 - A text refused for a block-mode value counts what it would count with
   every refusing value approved, wherever the refusing value stands —
   before the warn-mode values, after them, inside a run of joined values,
@@ -360,10 +371,14 @@ and each warn-mode value taken is one warning. So:
   `overridden_types`), never as a warning.
 - Where the proxy cannot rewrite the text (a verbatim field, an upload's
   extracted text) and sends it as it is — every value that would refuse it
-  approved by a refusal override — nothing is replaced, so every value
-  found is a value sent, read the same way (an approved value read first
-  hides a warn-mode one it overlaps). Such a text refused all the same, or
-  redacted after all (convert mode), counts as a redacted one would.
+  approved by a refusal override — nothing is replaced, and the values sent
+  are those in warn or block mode and those the overrides let through (an
+  approved value read first hides a warn-mode one it overlaps); a value no
+  override was asked about (one another value beat) hides nothing. Such a
+  text refused all the same, or redacted after all (convert mode), counts
+  as a redacted one would — so there, unlike in text the proxy rewrites,
+  approving the values that refuse it can change what is counted: nothing
+  of it is replaced once it goes as it is.
 
 Block-mode rejections
 return a provider-shaped 400 whose message names the rule type, which
@@ -672,8 +687,9 @@ them — so a text that tells the model to "return no entities" removes at most
 the model's own findings, and a crafted answer whose span starts just before
 an API key still leaves the whole key redacted (the span's other part is
 redacted too). In warn mode each part left is forwarded as sent, and the
-finding counts as one warning however many parts of it are sent ([Per-rule
-modes](#per-rule-modes-redact-warn-block)).
+finding counts as one warning however many parts of it are sent; counted
+after the other detectors' values, it never takes a warning from one of
+them ([Per-rule modes](#per-rule-modes-redact-warn-block)).
 
 **When the server fails** — a timeout, an error status, a refused
 connection, an answer that is not the requested JSON — `on_error = "block"`

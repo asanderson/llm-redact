@@ -10,12 +10,16 @@ it — never a deny string (configured; an added one or a union is no
 detection the configured detectors make), an llm finding (``ADDITIVE_TIER``)
 as found, never the pieces the resolution cuts of it. Where the text goes
 upstream as sent (``Redactor.scan`` of text the proxy cannot rewrite, every
-value that would refuse it approved) every value found is a candidate and
-nothing is replaced. A candidate the replaced characters cover whole sends
-nothing and is dropped; the others are read in the resolution's order (by
-start, the longest first, then by priority) by a greedy sweep that takes a
-value only where it overlaps none taken before it, and each warn-mode value
-taken is one warning under its type.
+value that would refuse it approved) nothing is replaced, and the values the
+overrides let through are candidates too (``let_through``). A candidate the
+replaced characters cover whole sends nothing and is dropped. The others are
+read as overlap resolution reads values, by a greedy sweep in the
+resolution's order (by start, the longest first, then by priority) that
+takes a value only where it overlaps none taken before it: every detector's
+values but the llm backend's first, then the llm findings, each read only
+where a character of it lies outside what is replaced and every value taken
+before (an llm finding never hides another detector's value). Each
+warn-mode value taken is one warning under its type.
 
 What is replaced is read from an output (``replaced``): ``redact_text``'s —
 of a text it refuses, the output of the same text with every refusing value
@@ -30,7 +34,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 
-from llm_redact.detection.base import Detection
+from llm_redact.detection.base import ADDITIVE_TIER, Detection
 from llm_redact.placeholders import PLACEHOLDER_RE
 from llm_redact.vault import InMemoryVault
 
@@ -92,33 +96,79 @@ def sent_as_is(
     return True
 
 
+def _order(d: Detection) -> tuple[int, int, int]:
+    return (d.start, -(d.end - d.start), d.priority)
+
+
+def let_through(
+    found: Sequence[Detection], winners: Sequence[Detection], modes: Mapping[str, str]
+) -> list[Detection]:
+    """In text a scan sends upstream as it is: the values of ``found`` the
+    overrides let through, read from ``winners`` (the values the resolution
+    acts on). Each winner that would refuse the text (in block or redact
+    mode, or a span joining values) was approved; it stands for itself,
+    for each value it joins (``Detection.members``), or — a piece of an llm
+    finding — for the finding it was cut from: of that type, the one
+    holding it among the llm findings a greedy sweep takes (computed here).
+    A value no winner stands for was asked about by no one."""
+    swept: list[Detection] = []
+    taken: set[int] = set()
+    for d in sorted((d for d in found if d.tier == ADDITIVE_TIER), key=_order):
+        span = set(range(d.start, d.end))
+        if not span & taken:
+            taken |= span
+            swept.append(d)
+    through: list[Detection] = []
+    for w in winners:
+        mode = "redact" if w.tier == 0 else modes.get(w.detector_type, "redact")
+        if mode == "warn":
+            continue
+        if w.tier == 0:
+            through += w.members
+        elif w.tier == ADDITIVE_TIER:
+            through += [
+                s
+                for s in swept
+                if s.detector_type == w.detector_type and s.start <= w.start and w.end <= s.end
+            ]
+        else:
+            through.append(w)
+    return through
+
+
 def expected_warnings(
     found: Sequence[Detection],
     modes: Mapping[str, str],
     redacted: set[int],
     *,
-    sent: bool = False,
+    through: Collection[Detection] = (),
 ) -> Counter[str]:
     """The warnings the rule predicts: ``found`` the configured detections
     the redaction read (the configured detectors', allowlists applied, as
     the plan hands them over), ``redacted`` the positions replaced (empty
-    where the text is sent as it is), ``sent`` whether it is (then every
-    value found is a candidate, in whatever mode)."""
+    where the text is sent as it is), ``through`` the values the overrides
+    let through where the text is sent as it is (``let_through``)."""
     candidates = [
         d
         for d in found
-        if d.tier != 0 and (sent or modes.get(d.detector_type) in ("warn", "block"))
+        if d.tier != 0 and (modes.get(d.detector_type) in ("warn", "block") or d in through)
     ]
-    candidates.sort(key=lambda d: (d.start, -(d.end - d.start), d.priority))
+    candidates.sort(key=_order)
     counted: Counter[str] = Counter()
-    taken: set[int] = set()
-    for d in candidates:
-        span = set(range(d.start, d.end))
-        if span <= redacted:
-            continue  # sends nothing, and hides nothing
-        if span & taken:
-            continue  # overlaps a value taken before it
-        taken |= span
-        if modes.get(d.detector_type) == "warn":
-            counted[d.detector_type] += 1
+    held = set(redacted)
+    for llm in (False, True):
+        taken: set[int] = set()
+        for d in candidates:
+            if (d.tier == ADDITIVE_TIER) != llm:
+                continue
+            span = set(range(d.start, d.end))
+            if span <= held:
+                continue  # sends nothing of its own, and hides nothing
+            if span & taken:
+                continue  # overlaps a value taken before it
+            taken |= span
+            if modes.get(d.detector_type) == "warn":
+                counted[d.detector_type] += 1
+        # The llm findings are read against the other values taken too.
+        held |= taken
     return counted

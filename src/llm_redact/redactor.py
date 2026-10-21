@@ -292,7 +292,7 @@ def _clear_of(spans: list[Detection], others: list[Detection]) -> list[Detection
 
 def _not_covered(spans: list[Detection], values: Sequence[Detection]) -> list[Detection]:
     """Those of ``values`` with a character outside every one of ``spans``
-    (disjoint, start-sorted), in their order. Touching spans are merged
+    (start-sorted), in their order. Spans that overlap or touch are merged
     into the stretches they cover together, so a binary search finds the
     one stretch that may hold a value's first character (the first ending
     after its start): the value lies inside the spans exactly when it lies
@@ -300,8 +300,8 @@ def _not_covered(spans: list[Detection], values: Sequence[Detection]) -> list[De
     starts: list[int] = []
     ends: list[int] = []
     for d in spans:
-        if ends and d.start == ends[-1]:
-            ends[-1] = d.end
+        if ends and d.start <= ends[-1]:
+            ends[-1] = max(ends[-1], d.end)
         else:
             starts.append(d.start)
             ends.append(d.end)
@@ -603,14 +603,42 @@ class Redactor:
         be: those in warn or block mode — a block-mode value counts as
         forwarded whether or not an approval passes it, so a refusing value
         never changes what is counted. Never a deny string (configured; an
-        added one is not among them, nor a union): it takes no mode and is
-        always replaced. An ``llm`` finding (``ADDITIVE_TIER``) is one value
-        as found, never the pieces the resolution cuts of it. (In text a
-        scan sends upstream as it is, every value found is forwarded as
-        sent: ``scan``.)"""
+        added one is not among them, nor a union): it takes no mode, so no
+        mode forwards it as sent. An ``llm`` finding (``ADDITIVE_TIER``) is
+        one value as found, never the pieces the resolution cuts of it. (In
+        text a scan sends upstream as it is, the values the overrides let
+        through are forwarded as sent too: ``_let_through``.)"""
         return [
             d for d in found if d.tier and self._modes.get(d.detector_type) in ("warn", "block")
         ]
+
+    def _let_through(self, found: list[Detection], approved: list[Detection]) -> list[Detection]:
+        """The values of ``found`` (the configured detections the redaction
+        read, in the resolution's order) forwarded as sent in text a scan
+        sends upstream as it is (``scan``: every winner that would refuse it
+        approved): those in warn or block mode (``_forwarded``) and the ones
+        the requester's overrides let through — what each winner of
+        ``approved`` stands for: itself, each value of a span joining
+        values (``Detection.members``), or, for a piece of an ``llm``
+        finding, the finding it was cut from (of the findings the additive
+        sweep takes, which are disjoint, the one holding it). A value no
+        override was asked about (one another value beat; an llm finding
+        the additive sweep dropped, or whose pieces were only blanks) is no
+        such value, as in ``redact_text``: it hides nothing."""
+        through: set[Detection] = set()
+        pieces: list[Detection] = []
+        for d in approved:
+            if d.tier == ADDITIVE_TIER:
+                pieces.append(d)
+            else:
+                through.update(d.members or (d,))
+        if pieces:
+            # In the resolution's order, as ``_resolve_overlaps`` sweeps them.
+            swept = _sweep([d for d in found if d.tier == ADDITIVE_TIER])
+            ends = [d.end for d in swept]
+            through.update(swept[bisect_right(ends, d.start)] for d in pieces)
+        forwarded = set(self._forwarded(found))
+        return [d for d in found if d in through or d in forwarded]
 
     def _replaced(self, winners: list[Detection]) -> list[Detection]:
         """Those of ``winners`` (disjoint, start-sorted) ``redact_text``
@@ -626,24 +654,39 @@ class Redactor:
     def _count_warned(self, values: list[Detection], replaced: list[Detection]) -> None:
         """Counts in ``warn_counts`` the warn-mode values a text forwards as
         sent, whole or in part — the one rule, which depends only on the
-        values found and on what is replaced. Of ``values`` (the values
-        forwarded as sent, or that would be, ``_forwarded``, in the
-        resolution's order: by start, the longest first, then by
-        priority), those with a character outside every span ``replaced``
-        (disjoint, start-sorted: what the text's fate replaces by
-        placeholders, ``_not_covered``) are read by the overlap sweep
-        (``_sweep``), and each warn-mode value it takes counts once, under
-        its type. So two detectors finding one value count it once; of
-        values forwarded as sent that overlap one another, the sweep counts
-        the ones it takes, as it would take winners — a warn-mode value
+        values found and on what is replaced. ``values``: the values
+        forwarded as sent, or that would be (``_forwarded``; in text a scan
+        sends as it is, ``_let_through``), in the resolution's order (by
+        start, the longest first, then by priority); ``replaced``: the
+        spans the text's fate replaces by placeholders (disjoint,
+        start-sorted). A value they cover whole sends nothing: it is not
+        counted, nor does it hide another (``_not_covered``). The others
+        are read as overlap resolution reads values: the overlap sweep
+        (``_sweep``) takes the values of every detector but the ``llm``
+        backend first, then, among themselves, the ``llm`` backend's
+        findings (``ADDITIVE_TIER``) with a character outside every
+        replaced span and every value taken before — so an llm finding,
+        which never takes another detector's place in the resolution
+        (``_resolve_overlaps``), never hides another detector's value here
+        either, and counts for what it sends beyond them. Each warn-mode
+        value taken counts once, under its type: two detectors finding one
+        value count it once, and of values forwarded as sent that overlap
+        one another the sweep counts those it takes — a warn-mode value
         overlapping a block-mode or another warn-mode value taken before it
-        is not counted, however much of it is sent; one the replaced spans
-        cover whole sends nothing and is not counted, nor does it hide
-        another. A deny string replacing the same characters counts alike
-        whether configured or added by an access gate (the values come from
-        the configured detections, the spans from the final winners).
-        Linear, but for a binary search per value."""
-        for d in _sweep(_not_covered(replaced, values)):
+        is not counted, however much of it is sent (whole, too). A deny
+        string replacing the same characters counts alike whether
+        configured or added by an access gate (the values come from the
+        configured detections, the spans from the final winners). Linear,
+        but for a binary search per value and, with an llm finding among
+        them, a sort of the spans it is read against."""
+        rules = [d for d in values if d.tier != ADDITIVE_TIER]
+        taken = _sweep(_not_covered(replaced, rules))
+        findings = [d for d in values if d.tier == ADDITIVE_TIER]
+        if findings:
+            # The replaced spans and the values taken may overlap: merged.
+            held = sorted(replaced + taken, key=lambda d: d.start)
+            taken += _sweep(_not_covered(held, findings))
+        for d in taken:
             if self._modes.get(d.detector_type) == "warn":
                 self.warn_counts[d.detector_type] += 1
 
@@ -813,8 +856,9 @@ class Redactor:
         or by the caller (a value found) — or redacted after all
         (``redactable``); where it goes upstream as sent (not
         ``redactable``, every value that would refuse it approved: nothing
-        found) nothing is replaced, so every value found is forwarded as
-        sent and read as such, an approved one included.
+        found) nothing is replaced, and the values forwarded as sent are
+        those in warn or block mode and those the overrides let through
+        (``_let_through``) — never a value no override was asked about.
 
         Every refusing winner but a deny string is first put to the
         requester's overrides (``with_overrides``): an approved value is
@@ -837,6 +881,9 @@ class Redactor:
         # warn-mode values are counted once it is known whether the text
         # goes upstream as sent (``_settled``).
         detected: list[Detection] = []
+        # The winners the overrides let through (read where the text goes
+        # upstream as sent: ``_let_through``).
+        approved: list[Detection] = []
         winners = self._winners(text, detected)
         sent = False
         try:
@@ -853,6 +900,7 @@ class Redactor:
                         and self._joined_passes(d, overrides)
                     ):
                         overridden = True
+                        approved.append(d)
                     else:
                         found[d.detector_type] += 1
                     continue
@@ -862,6 +910,7 @@ class Redactor:
                     continue
                 if (mode == "block" or not redactable) and self._overridden(d):
                     overridden = True
+                    approved.append(d)
                 elif mode == "block":
                     raise BlockedRequest(d.detector_type)
                 else:
@@ -877,9 +926,10 @@ class Redactor:
             # whatever the overrides approved and wherever in the text the
             # refusing value is.
             if detected and sent:
-                # Every value found goes upstream as sent, whatever its mode
-                # (none is a deny string: one refuses such a text for good).
-                self._count_warned(detected, [])
+                # Nothing replaced; the values forwarded as sent are those
+                # their mode or an approval forwards (no deny string is
+                # among them: one refuses such a text for good).
+                self._count_warned(self._let_through(detected, approved), [])
             elif detected:
                 self._count_warned(self._forwarded(detected), self._replaced(winners))
         return TextScan(found, overridden)

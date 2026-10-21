@@ -594,6 +594,60 @@ def test_every_definition_of_the_inline_counter_counts_a_preview() -> None:
         clause = definition.split("preview", 1)[1]
         for phrase in ("worker thread", "event loop", "after 0.17.1", "0.17.1 and earlier"):
             assert phrase in clause, (where, phrase)
+        # And what is counted: every call attempted inline (DetectorPlan's
+        # _inline counts in a finally), one that raised — the llm backend's
+        # DetectorUnavailable, any other fault — like one that returned
+        # (tests/test_ner_prefetch.py). The counter once skipped every call
+        # that raised, and no definition said which it counted.
+        assert "every call attempted, whether it returned or raised" in definition, where
+
+
+def test_every_definition_of_a_prefetch_miss_says_when_it_is_not_inline() -> None:
+    # A miss is counted on every heavy detector before any of them runs
+    # (DetectorPlan.count_prefetch_miss), and they run in list order: a
+    # backend listed after a detector that raised on the string (the llm
+    # backend's on_error = "block" failure, any other fault) never runs on
+    # it, so it counts the miss and no inline call
+    # (tests/test_ner_prefetch.py). Every place defining
+    # llm_redact_ner_prefetch_misses_total once said each miss is also an
+    # inline call, without that exception.
+    from llm_redact.detection.engine import DetectorPlan
+    from llm_redact.metrics import Metrics
+
+    text = Metrics("0").render(
+        detections=Counter(),
+        rehydrations=Counter(),
+        warnings=Counter(),
+        blocked=Counter(),
+        vault_entries=0,
+        vault_sessions=0,
+        ner_stats=[("hf", NerStats())],
+    )
+    (help_line,) = [
+        line
+        for line in text.splitlines()
+        if line.startswith("# HELP llm_redact_ner_prefetch_misses_total ")
+    ]
+    dashboard = json.loads((REPO / "deploy" / "grafana-dashboard.json").read_text("utf-8"))
+    (panel,) = [
+        p
+        for p in dashboard["panels"]
+        if "llm_redact_ner_prefetch_misses_total" in json.dumps(p.get("targets", []))
+    ]
+    coverage_row = _list_item("observability.md", "- strings by outcome;")
+    definitions = {
+        "HELP": help_line,
+        "observability.md": _table_row(
+            "observability.md", "| `llm_redact_ner_prefetch_misses_total` |"
+        ),
+        "detection.md": _table_row("detection.md", "| `prefetch_misses` |"),
+        "dashboard": panel["description"].split("prefetch misses =", 1)[1],
+        "observability.md NER coverage row": coverage_row.split("`prefetch misses`", 1)[1],
+        "count_prefetch_miss": _flat(DetectorPlan.count_prefetch_miss.__doc__),
+    }
+    for where, definition in definitions.items():
+        assert "inline" in definition, where
+        assert "raised on that string first" in definition, where
 
 
 def _flat(text: str | None) -> str:

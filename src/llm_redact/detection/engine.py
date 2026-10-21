@@ -1081,12 +1081,17 @@ def _inline(det: Detector, heavy: _Heavy, prepared: PreparedText) -> list[Detect
     request's path the event loop's own thread, for a preview its caller's:
     under its model's lock — so a NER worker running it meanwhile holds
     this caller up for at most the string it is on — and counted
-    (``inline_calls``, under the lock like the backend's own counters)."""
+    (``inline_calls``, under the lock like the backend's own counters):
+    every call attempted, once, whether it returned or raised: one that
+    raised (a DetectorUnavailable, a timeout, any other fault) held its
+    caller up for as long as it ran too. The exception propagates
+    unchanged."""
     with heavy.lock:
-        found = list(det.detect(prepared.text))
-        if heavy.stats is not None:
-            heavy.stats.inline_calls += 1
-    return found
+        try:
+            return list(det.detect(prepared.text))
+        finally:
+            if heavy.stats is not None:
+                heavy.stats.inline_calls += 1
 
 
 def _runner(det: Detector, heavy: _Heavy | None) -> Callable[[PreparedText], Iterable[Detection]]:
@@ -1197,8 +1202,8 @@ class DetectorPlan:
     detections from ``precomputed`` instead of calling them — the
     allowlist, the sort and everything else unchanged. A heavy detector the
     plan runs itself runs under its model's lock (``heavy_lock``) and is
-    counted (``NerStats.inline_calls``): on a request's path it held up the
-    event loop.
+    counted (``NerStats.inline_calls``, whether the call returned or
+    raised): on a request's path it held up the event loop.
     """
 
     def __init__(
@@ -1331,9 +1336,12 @@ class DetectorPlan:
     def count_prefetch_miss(self) -> None:
         """One text a request's redaction found no precomputed results for
         (``Redactor.with_precomputed``): counted on every heavy detector
-        (``NerStats.prefetch_misses``), each of which now runs it inline.
-        Only the event loop counts a miss, so no lock is taken (a worker
-        holding one may be mid-inference)."""
+        (``NerStats.prefetch_misses``) before any of them runs, each of
+        which then runs it inline — unless a detector listed before it
+        raised on that string first, ending its detection: that one then
+        keeps the miss and never runs on it. Only the event loop counts a
+        miss, so no lock is taken (a worker holding one may be
+        mid-inference)."""
         for heavy in self._heavy.values():
             if heavy.stats is not None:
                 heavy.stats.prefetch_misses += 1

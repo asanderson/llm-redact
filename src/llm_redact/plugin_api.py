@@ -917,11 +917,12 @@ class ContentFacts:
       values cover whole does not count, nor one overlapping another value
       forwarded as sent that the overlap sweep takes before it, even one
       sent whole. That other value is counted as what it is: a warn-mode
-      value here, an approved block (or, where the proxy cannot rewrite the
-      text, any value an approved override passes) in ``overridden_types``
-      — but a block-mode value that lost the overlap resolution to a value
-      redacted in its place is neither refused nor approved: its rest and
-      the warn-mode value it hides go upstream counted nowhere.
+      value here, an approved block in ``overridden_types`` — but a
+      block-mode value that lost the overlap resolution to a value redacted
+      in its place is neither refused nor approved: its rest and the
+      warn-mode value it hides go upstream counted nowhere. Approving
+      values never changes the count, also where the proxy cannot rewrite
+      the text and an approval sends it as it is.
     - ``unscanned_parts``: the binary upload file parts this request
       forwards unscanned (``[detection] binary_uploads = "forward"``, or an
       approved ``binary_upload`` override).

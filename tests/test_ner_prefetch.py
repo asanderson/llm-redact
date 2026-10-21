@@ -383,7 +383,7 @@ def test_an_unhashable_heavy_detector_gets_a_lock_of_its_own() -> None:
     # No counters: its inline calls and misses count nowhere, and break nothing.
     assert plan._heavy[0].stats is None
     assert plan.detect("x", ALLOW) == []
-    plan.count_prefetch_miss()
+    assert plan.detect("x", ALLOW, missed=True) == []
 
 
 def test_inline_runs_take_the_models_lock() -> None:
@@ -551,30 +551,48 @@ async def test_a_prefetch_that_raises_counts_no_inline_call(
     assert not heavy_lock(model).locked()
 
 
-def test_a_miss_counts_on_every_heavy_detector() -> None:
+def test_a_miss_counts_on_every_heavy_detector_that_runs() -> None:
     first, second = FakeModel(), FakeModel()
     plan = DetectorPlan([Light(), first, second])
-    plan.count_prefetch_miss()
-    plan.count_prefetch_miss()
-    assert first.stats.prefetch_misses == second.stats.prefetch_misses == 2
-    assert first.stats.inline_calls == 0
+    plan.detect("Jane Doe", ALLOW, missed=True)
+    plan.detect_sourced("Bob Jones", ALLOW, missed=True)
+    # Each one ran on both strings: two misses, two inline calls.
+    for model in (first, second):
+        assert (model.stats.prefetch_misses, model.stats.inline_calls) == (2, 2)
+    # Without the flag (no table attached: a preview, a bare plan), an
+    # inline call is no miss; with a row, nothing runs inline at all.
+    plan.detect("Carol King", ALLOW)
+    plan.detect("Dan Brown", ALLOW, plan.detect_heavy("Dan Brown"))
+    for model in (first, second):
+        assert (model.stats.prefetch_misses, model.stats.inline_calls) == (2, 3)
 
 
-def test_a_miss_a_raising_detector_cut_short_is_never_run_inline() -> None:
-    # A miss is counted on every heavy detector before any of them runs,
-    # and they run in list order: when one raises on the string (the llm
-    # backend's on_error = "block" failure refusing its request), the ones
-    # listed after it never run on it, so each keeps its miss with no
-    # inline call — every definition of prefetch_misses says so
-    # (test_ner_stats.py).
+@pytest.mark.parametrize("recorded", [False, True], ids=["detect", "detect_sourced"])
+def test_a_detector_a_raising_one_cut_short_counts_no_miss(recorded: bool) -> None:
+    # A miss is counted only where the backend ran on the string, as each
+    # heavy detector starts its call, and they run in list order: when one
+    # raises on it (the llm backend's on_error = "block" failure refusing
+    # its request), the ones listed after it never run on it and count
+    # neither a miss nor an inline call — so every miss is an inline call,
+    # as every definition of prefetch_misses says (test_ner_stats.py). A
+    # miss was once counted on every heavy detector before any of them ran.
     first = _Raising(DetectorUnavailable("llm", "timeout"))
     second = FakeModel()
     redactor = _redactor([first, second])
+    if recorded:
+        redactor = redactor.with_recorder(_Recorder())
     with pytest.raises(DetectorUnavailable):
         redactor.with_precomputed({}, redactor.plan).redact_text("Jane Doe")
     assert (first.stats.prefetch_misses, first.stats.inline_calls) == (1, 1)
-    assert (second.stats.prefetch_misses, second.stats.inline_calls) == (1, 0)
+    assert (second.stats.prefetch_misses, second.stats.inline_calls) == (0, 0)
     assert second.calls == []
+
+
+class _Recorder:
+    """A scan sink's recorder that keeps nothing (``Redactor.with_recorder``)."""
+
+    def record(self, text: str, found: object) -> None:
+        pass
 
 
 def test_the_redactor_names_its_plan() -> None:

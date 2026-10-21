@@ -1269,17 +1269,20 @@ class DetectorPlan:
         text: str,
         allowlist: Allowlist,
         precomputed: Mapping[int, Sequence[Detection]] | None = None,
+        *,
+        missed: bool = False,
     ) -> list[Detection]:
         """The detections in ``text`` (allowlist applied, those of no
         characters dropped, sorted). ``precomputed``: heavy detectors' raw detections in ``text`` by
         index (``detect_heavy``, a row of a ``PrecomputedTable``), taken
-        instead of running them."""
+        instead of running them. ``missed``: ``text`` is one a request's
+        redaction found no precomputed results for (``_run``)."""
         # One PreparedText per string: regex detectors share it so their
         # required-literal prefilters (and the derived haystacks behind
         # them) are computed once, not per rule.
         prepared = PreparedText(text)
         order = self._every if len(text) > self.gated_max_chars else self.candidates(prepared)
-        return self._run(order, prepared, allowlist, precomputed)
+        return self._run(order, prepared, allowlist, precomputed, missed)
 
     def detect_each(self, text: str, allowlist: Allowlist) -> list[Detection]:
         """Every detector, ungated: the reference the gated path equals."""
@@ -1312,6 +1315,8 @@ class DetectorPlan:
         text: str,
         allowlist: Allowlist,
         precomputed: Mapping[int, Sequence[Detection]] | None = None,
+        *,
+        missed: bool = False,
     ) -> list[tuple[Detection, DetectorSource]]:
         """``detect``'s detections, each with the detector that found it
         (``sources``): the same detections in the same order. Every
@@ -1328,23 +1333,17 @@ class DetectorPlan:
         found = [
             (d, sources[index])
             for index in order
-            for d in self._run((index,), prepared, allowlist, precomputed)
+            for d in self._run((index,), prepared, allowlist, precomputed, missed)
         ]
         found.sort(key=lambda pair: _detection_order(pair[0]))
         return found
 
-    def count_prefetch_miss(self) -> None:
-        """One text a request's redaction found no precomputed results for
-        (``Redactor.with_precomputed``): counted on every heavy detector
-        (``NerStats.prefetch_misses``) before any of them runs, each of
-        which then runs it inline — unless a detector listed before it
-        raised on that string first, ending its detection: that one then
-        keeps the miss and never runs on it. Only the event loop counts a
-        miss, so no lock is taken (a worker holding one may be
-        mid-inference)."""
-        for heavy in self._heavy.values():
-            if heavy.stats is not None:
-                heavy.stats.prefetch_misses += 1
+    def _count_miss(self, index: int) -> None:
+        """A prefetch miss on the detector at ``index`` when it is a heavy
+        one with counters (``_run``)."""
+        heavy = self._heavy.get(index)
+        if heavy is not None and heavy.stats is not None:
+            heavy.stats.prefetch_misses += 1
 
     def _run(
         self,
@@ -1352,7 +1351,17 @@ class DetectorPlan:
         prepared: PreparedText,
         allowlist: Allowlist,
         precomputed: Mapping[int, Sequence[Detection]] | None = None,
+        missed: bool = False,
     ) -> list[Detection]:
+        """The detections of the detectors at ``order``'s indices in the
+        prepared text. ``missed``: a request's redaction found no
+        precomputed results for it (``Redactor.with_precomputed``), counted
+        as a miss (``NerStats.prefetch_misses``) only where the backend ran
+        on that string: on each heavy detector as it starts the call, which
+        ``_inline`` counts as an inline call too — one listed after a
+        detector that raised on the text never runs on it and counts
+        neither. Only the event loop counts a miss, so no lock is taken (a
+        worker holding one may be mid-inference)."""
         detections: list[Detection] = []
         runners = self._runners
         allows = allowlist.allows_for
@@ -1361,6 +1370,8 @@ class DetectorPlan:
             if precomputed is not None and index in precomputed:
                 found = precomputed[index]
             else:
+                if missed:
+                    self._count_miss(index)
                 found = runners[index](prepared)
             # A detection of no characters is no value and is dropped, from
             # every detector: a custom rule's pattern can match the empty

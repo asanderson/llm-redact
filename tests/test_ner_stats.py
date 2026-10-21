@@ -602,15 +602,15 @@ def test_every_definition_of_the_inline_counter_counts_a_preview() -> None:
         assert "every call attempted, whether it returned or raised" in definition, where
 
 
-def test_every_definition_of_a_prefetch_miss_says_when_it_is_not_inline() -> None:
-    # A miss is counted on every heavy detector before any of them runs
-    # (DetectorPlan.count_prefetch_miss), and they run in list order: a
-    # backend listed after a detector that raised on the string (the llm
-    # backend's on_error = "block" failure, any other fault) never runs on
-    # it, so it counts the miss and no inline call
-    # (tests/test_ner_prefetch.py). Every place defining
-    # llm_redact_ner_prefetch_misses_total once said each miss is also an
-    # inline call, without that exception.
+def test_every_definition_of_a_prefetch_miss_says_it_is_also_inline() -> None:
+    # A miss is counted only where the backend ran on the string
+    # (DetectorPlan._run, as each heavy detector starts the call), so every
+    # miss is an inline call too: a backend listed after a detector that
+    # raised on the string (the llm backend's on_error = "block" failure,
+    # any other fault) never runs on it and counts neither
+    # (tests/test_ner_prefetch.py). It once counted a miss on every heavy
+    # detector before any of them ran, and every definition carried that
+    # exception; none may now.
     from llm_redact.detection.engine import DetectorPlan
     from llm_redact.metrics import Metrics
 
@@ -643,11 +643,12 @@ def test_every_definition_of_a_prefetch_miss_says_when_it_is_not_inline() -> Non
         "detection.md": _table_row("detection.md", "| `prefetch_misses` |"),
         "dashboard": panel["description"].split("prefetch misses =", 1)[1],
         "observability.md NER coverage row": coverage_row.split("`prefetch misses`", 1)[1],
-        "count_prefetch_miss": _flat(DetectorPlan.count_prefetch_miss.__doc__),
+        "DetectorPlan._run": _flat(DetectorPlan._run.__doc__),
     }
     for where, definition in definitions.items():
         assert "inline" in definition, where
-        assert "raised on that string first" in definition, where
+        assert "only where the backend ran on that string" in definition, where
+        assert "raised on that string first" not in definition, where
 
 
 def _flat(text: str | None) -> str:

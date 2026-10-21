@@ -369,16 +369,13 @@ read after the other detectors' values, as overlap resolution reads it
   An approved value counts as an override used
   (`llm_redact_overrides_used_total`, the content facts'
   `overridden_types`), never as a warning.
-- Where the proxy cannot rewrite the text (a verbatim field, an upload's
-  extracted text) and sends it as it is — every value that would refuse it
-  approved by a refusal override — nothing is replaced, and the values sent
-  are those in warn or block mode and those the overrides let through (an
-  approved value read first hides a warn-mode one it overlaps); a value no
-  override was asked about (one another value beat) hides nothing. Such a
-  text refused all the same, or redacted after all (convert mode), counts
-  as a redacted one would — so there, unlike in text the proxy rewrites,
-  approving the values that refuse it can change what is counted: nothing
-  of it is replaced once it goes as it is.
+- Text the proxy cannot rewrite (a verbatim field, an upload's extracted
+  text) counts as text it rewrites would: against what the redaction would
+  replace, whether the text is refused, redacted after all (convert mode)
+  or sent as it is — every value that would refuse it approved by a
+  refusal override. So approving values never changes what is counted
+  there either: a redact-mode value an approval lets through still cuts a
+  warn-mode value it overlaps, which counts when part of it lies outside.
 
 Block-mode rejections
 return a provider-shaped 400 whose message names the rule type, which
@@ -1637,7 +1634,7 @@ existing `detection.ner_enabled`):
 | `breaker_opens` | `llm` only: times its circuit breaker opened (`breaker_failures` timeouts, transport faults or HTTP 5xx answers in a row; a failed probe opens it again at once) |
 | `breaker_short_circuits` | `llm` only: strings failed at once, without asking its model server, because its circuit breaker was open (each also in `errors`) |
 | `inline_calls` | strings the backend was run on by the redaction itself instead of ahead of it on the NER worker thread, every call attempted, whether it returned or raised: on a request's path that is the event loop, every other request waiting for that string's inference; a redaction preview in the llm-redact-pro dashboard counts too — on a worker thread of its own in llm-redact-pro releases after 0.17.1, on the event loop in 0.17.1 and earlier |
-| `prefetch_misses` | strings a request's redaction did not find among its precomputed NER results (or found computed for detectors a reload has since replaced), run inline instead and counted in `inline_calls` too — unless a detector listed before the backend raised on that string first (the `llm` backend's `on_error = "block"` failure refusing its request, any other fault): the backend then never ran on it |
+| `prefetch_misses` | strings a request's redaction did not find among its precomputed NER results (or found computed for detectors a reload has since replaced), run inline instead: counted only where the backend ran on that string, so each is counted in `inline_calls` too — a backend listed after a detector that raised on the string (the `llm` backend's `on_error = "block"` failure refusing its request, any other fault) never runs on it and counts neither |
 
 Each string a backend is handed counts once, under `scanned_whole`,
 `scanned_windowed` or `skipped_max_chars`; with several backends each one

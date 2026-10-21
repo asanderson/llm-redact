@@ -131,11 +131,10 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   them, so a crafted span never takes a warning from a rule's value. A text refused for a
   block-mode value counts what it would with every refusing value approved, wherever the refusing
   value stands (the warn-mode values after the first block were not counted); an approved value
-  counts as an override used (`llm_redact_overrides_used_total`), not as a warning. Where the
-  proxy cannot rewrite the text (a verbatim field, an upload's extracted text) and sends it as it
-  is, nothing is replaced and the values the overrides let through are read as sent besides those
-  in warn or block mode, so an approved one hides a warn-mode value it overlaps (there, approving
-  the values that refuse a text can change what is counted). What is redacted or refused, the
+  counts as an override used (`llm_redact_overrides_used_total`), not as a warning. Text the
+  proxy cannot rewrite (a verbatim field, an upload's extracted text) counts the same way, against
+  what the redaction would replace, also where an approval sends it as it is: approving values
+  never changes what is counted. What is redacted or refused, the
   placeholders issued and the refusal overrides consulted are unchanged (a differential test
   against the redactor before the rule pins them). Where the
   proxy cannot rewrite the text (a
@@ -343,8 +342,8 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   a worker thread of its own in llm-redact-pro releases after 0.17.1, on the event loop in
   0.17.1 and earlier) and `llm_redact_ner_prefetch_misses_total` (strings a request's redaction
   did not find among the results its prefetch computed — a reload replaced the detectors while
-  it waited — each also counted inline unless a detector listed before the backend raised on
-  that string first, so the backend never ran on it), until now on `/status` and `/metrics`
+  it waited — counted only where the backend ran on that string, so each is also counted
+  inline), until now on `/status` and `/metrics`
   only. Both stay at zero while every request is prefetched and nobody runs a preview. The row's
   panels are now three to a line. The counter's `# HELP` text, the metrics reference
   (docs/observability.md) and the NER counter table (docs/detection.md) now define it the same
@@ -353,9 +352,10 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   that raised (the `llm` backend's `on_error = "block"` failure refusing its request, any other
   fault) once, like one that returned: it counted only the calls that returned, though a failed
   one held its caller up just the same. The NER prefetch worker's calls still never count as
-  inline, and every definition of the prefetch misses now says when one is not also an inline
-  call: a miss is counted on every backend before any of them runs, so a backend listed after
-  a detector that raised on the string counts the miss without running. The preview's own contract
+  inline. A prefetch miss is now counted only where the backend ran on the string, so every
+  miss is an inline call too: it was counted on every backend before any of them ran, so a
+  backend listed after a detector that raised on the string (the `llm` backend refusing its
+  request) counted a miss without running. The preview's own contract
   (`plugin_api.DashboardHost`, `ProxyState.preview`) and docs/dashboard.md said it wrote no
   metrics: it runs the live detectors, so the NER coverage counters count its strings and the
   `llm` backend's circuit breaker its model server's failures, as for a request's; the live

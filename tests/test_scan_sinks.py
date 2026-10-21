@@ -677,9 +677,9 @@ async def test_only_a_sink_that_wants_a_request_gets_it(
     sourced: list[str] = []
     real = DetectorPlan.detect_sourced
 
-    def spy(self: DetectorPlan, text: str, *args: Any) -> Any:
+    def spy(self: DetectorPlan, text: str, *args: Any, **kwargs: Any) -> Any:
         sourced.append(text)
-        return real(self, text, *args)
+        return real(self, text, *args, **kwargs)
 
     monkeypatch.setattr(DetectorPlan, "detect_sourced", spy)
     app = create_app(Config(), upstream_transport=httpx.MockTransport(Upstream()))

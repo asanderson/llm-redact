@@ -41,7 +41,7 @@ from llm_redact.detection.deny import DenyDetector, DenyEntry
 from llm_redact.detection.engine import Allowlist, DetectorPlan
 from llm_redact.redactor import BlockedRequest, Redactor
 from llm_redact.vault import InMemoryVault
-from warn_oracle import Every, expected_warnings, let_through, replaced
+from warn_oracle import Every, expected_warnings, replaced
 
 # Every character once, none a case-insensitive match of another: a string
 # occurs at one place, so spans and deny strings are positions.
@@ -345,23 +345,28 @@ def test_touching_spans_cover_a_value_together() -> None:
 
 
 @pytest.mark.parametrize(
-    ("approve", "warned"),
+    "approve",
     [
-        # Sent as it is (the redact-mode value approved): the approved value
-        # is forwarded as sent and read as such — R, read first, hides W.
-        (("ABCDEF",), Counter()),
-        # Refused by the caller (R found): counted as redact_text counts
-        # it, R replaced and W's tail sent.
-        ((), Counter({"W": 1})),
+        # Sent as it is (the redact-mode value approved): counted against
+        # what redact_text replaces all the same — R replaced, W's tail
+        # sent. It once read the approved R as sent, which then hid W.
+        ("ABCDEF",),
+        # Refused by the caller (R found): counted as redact_text counts it.
+        (),
     ],
 )
-def test_a_scan_sent_as_it_is_reads_the_values_approved_as_sent(
-    approve: tuple[str, ...], warned: Counter[str]
+def test_a_scan_counts_alike_whether_its_text_is_sent_as_it_is_or_refused(
+    approve: tuple[str, ...],
 ) -> None:
     found = (_at(0, 6, "R"), _at(3, 9, "W"))
     redactor = _redactor(found, {"W": "warn"}).with_overrides(Asked(*approve))
-    redactor.scan(TEXT)
-    assert redactor.warn_counts == warned
+    scan = redactor.scan(TEXT)
+    assert scan.overridden == bool(approve)
+    assert not scan.found if approve else scan.found == Counter({"R": 1})
+    assert redactor.warn_counts == Counter({"W": 1})
+    redacting = _redactor(found, {"W": "warn"})
+    redacting.redact_text(TEXT)
+    assert redacting.warn_counts == Counter({"W": 1})
 
 
 # Letters apart, so an llm finding can be cut into pieces of blanks only.
@@ -416,25 +421,39 @@ def test_a_value_no_override_was_asked_about_hides_nothing_in_a_scan(
     assert scanning.warn_counts["EMAIL"] == scanning.warn_counts["PHONE"] == 1
 
 
-def test_a_scan_sent_as_it_is_reads_each_value_a_joined_span_was_approved_for() -> None:
-    # R and a joining value J become one span; the warn-mode W inside it is
-    # forwarded only where nothing covers it. Approved, the span goes
-    # upstream as sent: R and J are values sent, and R, read first, hides W.
-    found = (_at(0, 8, "R"), _at(2, 12, "J", joins=True), _at(4, 10, "W"))
-    asked = Asked("ABCDEFGH", "CDEFGHIJKL")
-    redactor = _redactor(found, {"W": "warn"}).with_overrides(asked)
-    assert redactor.scan(TEXT) == (Counter(), True)
-    assert redactor.warn_counts == Counter()
-    # One of them refused: the span is found, W covered whole by it.
-    refused = _redactor(found, {"W": "warn"}).with_overrides(Asked("ABCDEFGH"))
-    assert refused.scan(TEXT) == (Counter({"R": 1}), False)
-    assert refused.warn_counts == Counter()
+@pytest.mark.parametrize(
+    ("approve", "scanned"),
+    [
+        # Each value of the span approved: it goes upstream as sent.
+        (("ABCDEFGH", "CDEFGHIJKL"), (Counter(), True)),
+        # One of them not: the text is refused for the span.
+        (("ABCDEFGH",), (Counter({"R": 1}), False)),
+    ],
+)
+@pytest.mark.parametrize(("end", "warned"), [(14, Counter({"W": 1})), (10, Counter())])
+def test_a_scan_counts_against_a_joined_span_approved_or_not(
+    approve: tuple[str, ...], scanned: tuple[Counter[str], bool], end: int, warned: Counter[str]
+) -> None:
+    # R and a joining value J become one span, which redact_text replaces;
+    # the warn-mode W overlapping it is forwarded only where nothing covers
+    # it — its tail, or nothing when the span covers it whole. Approved or
+    # not, W counts as redact_text counts it. Approved, R and J were once
+    # read as values sent, and R, read first, hid W.
+    found = (_at(0, 8, "R"), _at(2, 12, "J", joins=True), _at(4, end, "W"))
+    redactor = _redactor(found, {"W": "warn"}).with_overrides(Asked(*approve))
+    assert redactor.scan(TEXT) == scanned
+    assert redactor.warn_counts == warned
+    redacting = _redactor(found, {"W": "warn"})
+    redacting.redact_text(TEXT)
+    assert redacting.warn_counts == warned
 
 
-def test_a_scan_sent_as_it_is_reads_an_approved_llm_finding_whole() -> None:
+def test_a_scan_counts_against_an_approved_llm_findings_pieces() -> None:
     # A redact-mode llm finding P cut in two by a warn-mode value X: both
-    # pieces approved, P is a value sent — as found — and hides the
-    # warn-mode llm finding Q the additive sweep dropped for it.
+    # pieces approved, the text goes upstream as sent — and counts as
+    # redact_text counts it, P's pieces replaced: X and the tail of the
+    # warn-mode llm finding Q the additive sweep dropped for P are sent.
+    # Approved, P was once read as a value sent, and hid Q.
     found = (
         _at(0, 10, "P", ADDITIVE_TIER),
         _at(4, 6, "X"),
@@ -445,8 +464,7 @@ def test_a_scan_sent_as_it_is_reads_an_approved_llm_finding_whole() -> None:
     redactor = _redactor(found, modes).with_overrides(asked)
     assert redactor.scan(TEXT) == (Counter(), True)
     assert asked.log == [("allows", "P", "ABCD"), ("allows", "P", "GHIJ")]
-    assert redactor.warn_counts == Counter({"X": 1})
-    # Redacted, P is replaced and Q sends its tail: a warning.
+    assert redactor.warn_counts == Counter({"X": 1, "Q": 1})
     redacting = _redactor(found, modes)
     assert redacting.redact_text(TEXT) == "«P_001»EF«P_002»KLMNOPQRSTUVWX"
     assert redacting.warn_counts == Counter({"X": 1, "Q": 1})
@@ -752,12 +770,12 @@ def test_a_scan_counts_the_values_its_text_sends_by_their_mode_or_an_approval(
     redactable: bool,
 ) -> None:
     # Text with blanks between its letters, so an llm finding can be cut
-    # into pieces of blanks only. A scan counts as the rule says: where it
-    # sends the text as it is, the values sent are those in warn or block
-    # mode and those an override let through — never one no override was
-    # asked about — and where nothing was asked, exactly what redact_text
-    # counts; else what redact_text replaces with every refusing value
-    # approved.
+    # into pieces of blanks only. A scan counts as the rule says, against
+    # what redact_text replaces with every refusing value approved — also
+    # where it sends the text as it is (every value that would refuse it
+    # approved), where it once counted nothing replaced and the values an
+    # override let through as sent; where nothing was asked, exactly what
+    # redact_text counts.
     found = []
     for start, length, kind, tier, joins, priority in spans:
         end = min(start + length, len(SPACED))
@@ -783,13 +801,8 @@ def test_a_scan_counts_the_values_its_text_sends_by_their_mode_or_an_approval(
     except BlockedRequest:
         assert scanner.warn_counts == expected_warnings(detections, modes, redacted)
         return
-    if redactable or scan.found:
-        assert scanner.warn_counts == expected_warnings(detections, modes, redacted)
-        return
-    winners = redactor().with_overrides(Asked(*values))._winners(SPACED)
-    through = let_through(detections, winners, modes)
-    assert scanner.warn_counts == expected_warnings(detections, modes, set(), through=through)
-    if not asked.log:
+    assert scanner.warn_counts == expected_warnings(detections, modes, redacted)
+    if not redactable and not scan.found and not asked.log:
         redacting = redactor()
         assert redacting.redact_text(SPACED) == SPACED
         assert scanner.warn_counts == redacting.warn_counts

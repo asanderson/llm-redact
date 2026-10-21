@@ -88,11 +88,11 @@ class NerStats:
     # is prefetched and nobody runs a preview.
     inline_calls: int = 0
     # Strings a request's redaction looked up in its precomputed NER results
-    # and did not find (or found computed for detectors a reload replaced):
-    # run inline instead, and counted in inline_calls too — unless a
-    # detector listed before this backend raised on that string first (the
-    # miss is counted on every heavy detector before any of them runs; the
-    # backend then never ran on it).
+    # and did not find (or found computed for detectors a reload replaced),
+    # run inline instead: counted only where the backend ran on that string,
+    # so each is counted in inline_calls too (a backend listed after a
+    # detector that raised on the string never runs on it and counts
+    # neither).
     prefetch_misses: int = 0
 
     def as_dict(self) -> dict[str, int]:

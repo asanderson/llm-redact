@@ -38,7 +38,7 @@ from llm_redact.plugin_api import Inspection
 from llm_redact.redactor import BlockedRequest, Redactor
 from llm_redact.upload_inspection import judge
 from llm_redact.vault import InMemoryVault
-from warn_oracle import Every, expected_warnings, let_through, replaced, sent_as_is
+from warn_oracle import Every, expected_warnings, replaced, sent_as_is
 
 EMAIL = "bob.private@acme-corp.example"
 
@@ -656,10 +656,13 @@ def _cutting(
 @pytest.mark.parametrize(
     ("mode", "values", "found", "warned"),
     [
-        # Approved, in redact mode or in block mode: R goes upstream as
-        # sent, so W lost only to a value forwarded as sent and is no
-        # warning (R counts as an override used).
-        ("redact", (R.value,), Counter(), Counter()),
+        # Approved in redact mode, R goes upstream as sent — and W counts as
+        # redact_text counts it, R replaced: cut by R, W sends its tail (R
+        # also counts as an override used). Approving R once read it as
+        # sent, and W lost only to it.
+        ("redact", (R.value,), Counter(), Counter({"W": 1})),
+        # In block mode R replaces nothing, approved or not: W lost only to
+        # a value forwarded as sent and is no warning.
         ("block", (R.value,), Counter(), Counter()),
         # Not approved: the text is refused for R (the caller refuses it),
         # and W counts as redact_text counts it.
@@ -675,7 +678,7 @@ def _cutting(
     ("recorded", "added"),
     [(False, ()), (True, ()), (False, ("XY",)), (True, ("XY",)), (False, ("IJ",))],
 )
-def test_a_scan_counts_no_warn_value_cut_only_by_a_value_an_approval_passes(
+def test_a_scan_counts_a_warn_value_cut_by_a_value_redact_text_replaces(
     mode: str,
     values: tuple[str, ...],
     found: Counter[str],
@@ -719,23 +722,24 @@ B = Detection(8, 12, "B", CUT[8:12])
 
 
 @pytest.mark.parametrize(
-    ("values", "found", "warned"),
+    ("values", "found"),
     [
-        # Each value approved: the span goes upstream as sent, and W lost
-        # only to it.
-        ((A.value, B.value), Counter(), Counter()),
+        # Each value approved: the span goes upstream as sent — and still
+        # cuts W, as redact_text replaces it (it once read W as lost only to
+        # values sent, and no warning).
+        ((A.value, B.value), Counter()),
         # One of them: the text is refused for the span, which cuts W.
-        ((A.value,), Counter({"A": 1}), Counter({"W": 1})),
-        ((), Counter({"A": 1}), Counter({"W": 1})),
+        ((A.value,), Counter({"A": 1})),
+        ((), Counter({"A": 1})),
     ],
 )
-def test_a_scan_counts_no_warn_value_cut_only_by_a_union_an_approval_passes(
-    values: tuple[str, ...], found: Counter[str], warned: Counter[str]
+def test_a_scan_counts_a_warn_value_cut_by_a_union_approved_or_not(
+    values: tuple[str, ...], found: Counter[str]
 ) -> None:
     approved = Approved(*values)
     redactor = _cutting(A, W, B, modes={}, approved=approved)
     assert redactor.scan(CUT) == (found, len(values) == 2)
-    assert redactor.warn_counts == warned
+    assert redactor.warn_counts == Counter({"W": 1})
     assert approved.asked == [("A", A.value), ("B", B.value)]
     # The redaction replaces the span whatever was approved: W is cut.
     redacting = _cutting(A, W, B, modes={}, approved=approved)
@@ -774,14 +778,12 @@ def test_a_scan_a_block_refuses_counts_the_values_cut_as_redact_text_does(
     assert redacting.warn_counts == Counter({"W": 1})
 
 
-@pytest.mark.parametrize(
-    ("values", "outcome", "warned"),
-    [((R.value,), "overridden", Counter()), ((), "detected", Counter({"W": 1}))],
-)
-def test_an_inspected_upload_counts_no_warn_value_cut_only_by_an_approved_one(
-    values: tuple[str, ...], outcome: str, warned: Counter[str]
+@pytest.mark.parametrize(("values", "outcome"), [((R.value,), "overridden"), ((), "detected")])
+def test_an_inspected_upload_counts_a_warn_value_cut_approved_or_not(
+    values: tuple[str, ...], outcome: str
 ) -> None:
-    # An upload's extracted text (upload_inspection.judge): the same count.
+    # An upload's extracted text (upload_inspection.judge): the same count,
+    # approved or not.
     redactor = _cutting(R, W, modes={}, approved=Approved(*values))
     verdict = judge(
         {0: Inspection(CUT, True, "x")},
@@ -791,7 +793,7 @@ def test_an_inspected_upload_counts_no_warn_value_cut_only_by_an_approved_one(
         convertible=False,
     )
     assert verdict.outcomes == Counter({outcome: 1})
-    assert redactor.warn_counts == warned
+    assert redactor.warn_counts == Counter({"W": 1})
 
 
 @pytest.mark.parametrize(("priority", "counted"), [(100, "EMAIL"), (90, "MAIL")])
@@ -1308,10 +1310,10 @@ def test_a_scan_counts_a_warn_value_cut_by_what_it_refuses_the_text_for(
     # is a warning exactly as redact_text counts it — what is replaced with
     # every refusing value approved, where the text is refused (here, for a
     # block, wherever it is, while resolving too; or by the caller, for a
-    # value found) or, redactable, redacted after all — unless the text
-    # goes upstream as sent, every value that would refuse it approved:
-    # then nothing of it is replaced, and the values the overrides let
-    # through are sent besides the ones in warn or block mode.
+    # value found), redactable, redacted after all, or sent as it is, every
+    # value that would refuse it approved: approving the values that refuse
+    # a text never changes what it counts (it once counted nothing replaced
+    # there, and the values the overrides let through as sent).
     text = _LETTERS
     found = []
     for start, length, kind, tier, joins, priority in spans:
@@ -1350,15 +1352,9 @@ def test_a_scan_counts_a_warn_value_cut_by_what_it_refuses_the_text_for(
         winners = redactor()._winners(text)
         assert sent == sent_as_is(winners, modes, values, redactable=redactable)
     detections = scanner.plan.detect(text, Allowlist())
-    if sent:
-        expected = expected_warnings(
-            detections, modes, set(), through=let_through(detections, winners, modes)
-        )
-    else:
-        expected = expected_warnings(detections, modes, redacted)
-    assert scanner.warn_counts == expected
-    # Refused or redacted after all: as redact_text counts it.
-    assert sent or scanner.warn_counts == redacting.warn_counts
+    assert scanner.warn_counts == expected_warnings(detections, modes, redacted)
+    # As redact_text counts it, whatever the scan does with the text.
+    assert scanner.warn_counts == redacting.warn_counts
 
 
 @pytest.mark.parametrize("scanning", [False, True])

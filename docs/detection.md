@@ -280,13 +280,27 @@ that the overlap sweep prefers (one starting earlier, or longer), a value
 it is joined with ([above](#values-joined-with-the-ones-they-overlap)), or
 an `llm` backend finding. With `deny = ["acme"]` and `email = "warn"`,
 `bob.private@acme-corp.example` goes upstream as
-`bob.private@«DENY_001»-corp.example` and counts as one warning — exactly
-as when an access gate adds `acme`: the same bytes upstream, the same
-count. A warn-mode value that loses an overlap only to another value
-forwarded as sent (a longer warn-mode match, an approved block) has
-nothing redacted: the winner is what is counted. Of warn-mode values
+`bob.private@«DENY_001»-corp.example` and counts as one warning — as
+when an access gate adds `acme`. A warn-mode value that loses an overlap
+only to another value forwarded as sent (a longer warn-mode match, an
+approved block) has nothing redacted and is not counted; the winner
+counts as what it is — a warn-mode value as a warning, an approved block
+as an override used (`llm_redact_overrides_used_total`, the content
+facts' `overridden_types`), not as a warning. Of warn-mode values
 overlapping one another that are partly redacted, the one the overlap
 sweep reads first counts, so one value two detectors find counts once.
+An `llm` backend finding is the exception to "once": it loses no overlap
+but is cut around the other values ("Additive only",
+[below](#a-model-server-you-run-the-llm-backend)), so a warn-mode one a
+deny string splits counts once per piece left as sent. And a configured deny string takes
+part in overlap resolution while an added one is applied after it: the
+values a configured string overlaps leave the resolution, so a value they
+would have beaten is read on its own. Where warn-mode values overlap one
+another, the same bytes upstream can therefore count differently — with
+`email = "warn"` and a warn-mode custom rule reading `.example now`,
+`mail bob.private@acme-corp.example now` counts the email and that rule's
+value with `acme` configured, the email alone with `acme` added; both
+send `mail bob.private@«DENY_001»-corp.example now`.
 Block-mode rejections
 return a provider-shaped 400 whose message names the rule type, which
 agentic tools surface directly. `llm-redact preview` shows which mode a
@@ -581,7 +595,9 @@ without this backend, and keeps of each `llm` finding only what lies outside
 them — so a text that tells the model to "return no entities" removes at most
 the model's own findings, and a crafted answer whose span starts just before
 an API key still leaves the whole key redacted (the span's other part is
-redacted too).
+redacted too). In warn mode each part left is forwarded as sent and
+counted as a warning of its own ([Per-rule
+modes](#per-rule-modes-redact-warn-block)).
 
 **When the server fails** — a timeout, an error status, a refused
 connection, an answer that is not the requested JSON — `on_error = "block"`

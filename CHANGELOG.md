@@ -106,12 +106,18 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   string redacts part of (a detection overlay: llm-redact-pro roles), and one that loses an
   ordinary overlap to a configured deny string or to a value redacted in its place (with
   `deny = ["acme"]` and `email = "warn"`, `bob.private@«DENY_001»-corp.example` goes upstream
-  and counts as one warning, as with an added `acme`: the same bytes, the same count). Whether
-  part of the value is still sent is decided once everything is redacted: one whose rest an
-  added deny string or an `llm` backend finding redacts is not counted, nor one that lost only
-  to another value forwarded as sent (the winner is what is counted); of overlapping ones, one
-  value two detectors find counts once (docs/detection.md, "Per-rule modes"). What is redacted
-  or refused is unchanged. Where the proxy cannot rewrite the text (a
+  and counts as one warning, as with an added `acme`). Whether part of the value is still sent
+  is decided once everything is redacted: one whose rest an added deny string or an `llm`
+  backend finding redacts is not counted, nor one that lost only to another value forwarded as
+  sent (that one counts as what it is: a warn-mode value as a warning, an approved block as an
+  override used, `llm_redact_overrides_used_total`, not as a warning); of overlapping ones, one
+  value two detectors find counts once. An `llm` backend finding loses no overlap — it is cut
+  around the other values — so a warn-mode one counts once per piece left as sent, as before. A
+  configured deny string takes part in overlap resolution and an added one is applied after it,
+  so where warn-mode values overlap one another the same bytes upstream can still count
+  differently: a value the configured string's overlaps would have beaten counts as well
+  (docs/detection.md, "Per-rule modes"). What is redacted or refused is unchanged. Where the
+  proxy cannot rewrite the text (a
   verbatim field, an upload's extracted text), a span joining two or more such values is put to
   refusal overrides value by value: the refusal's code names every value, one approval of it
   lets the span through as sent (an access gate's content facts count each value once), and a

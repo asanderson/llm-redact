@@ -554,8 +554,12 @@ class Redactor:
         overlap — an ordinary one (``_resolve_overlaps``: to a deny string,
         to a value redacted in its place), in a joined run (``_join``), to an
         added match (``_absorb``) — and what of it lies outside the redacted
-        spans goes upstream as sent: the same bytes count the same, whether
-        the deny string that cuts a value is configured or added. The values
+        spans goes upstream as sent, whether the deny string that cuts it is
+        configured or added. (Which values win still differs between the
+        two: a configured deny string takes part in the resolution, so a
+        value the ones it overlaps would have beaten wins, while an added one
+        is taken in after it — where warn-mode values overlap one another,
+        the same bytes can count differently.) The values
         are those of ``found`` (the configured detections) and the llm
         finding's pieces among the ``configured`` winners (``ADDITIVE_TIER``:
         an llm finding itself is never dropped, only cut around the other
@@ -568,8 +572,10 @@ class Redactor:
 
         Not counted: one the redacted spans cover whole (nothing of it is
         sent); one that lost only to a winner forwarded as sent (another
-        warn-mode value, an approved block: that winner is what is counted)
-        — it overlaps no span they replace; a deny string (never in a mode).
+        warn-mode value, which is counted as a winner; an approved block,
+        counted as an override used, not here) — it overlaps no span they
+        replace; a deny string (never in a mode); an llm finding cut around
+        the other winners (each piece left is a winner, counted as one).
         None of them is a winner, as the winners are disjoint, so none is
         counted twice: ``redact_text`` and ``scan`` count only the
         winners. Each value is looked at a fixed number of times, finding

@@ -643,6 +643,27 @@ def test_one_warn_value_two_detectors_find_is_counted_once_when_cut(
     assert redactor.warn_counts == Counter({counted: 1})
 
 
+def test_overlapping_warn_values_can_count_differently_configured_or_added() -> None:
+    # The documented limit of "the same rule" (docs/detection.md "Per-rule
+    # modes"): a configured deny string takes part in overlap resolution, an
+    # added one is taken in after it. The email overlaps `acme`. Configured,
+    # it leaves the resolution, so the custom rule's value it would have
+    # beaten wins on its own: two warnings. Added, the email beats that value
+    # first and is then cut: one. The same bytes upstream either way.
+    tail = CustomRule(name="tail", detector_type="TAIL", pattern=r"\.example [a-z]+")
+    modes = (("email", "warn"), ("tail", "warn"))
+    text = f"mail {EMAIL} now"
+    sent = "mail bob.private@«DENY_001»-corp.example now"
+    configured = _redactor(
+        DetectionConfig(modes=modes, custom_rules=(tail,), deny_strings=(DenyEntry("acme"),))
+    )
+    assert configured.redact_text(text) == sent
+    assert configured.warn_counts == Counter({"EMAIL": 1, "TAIL": 1})
+    added = _redactor(DetectionConfig(modes=modes, custom_rules=(tail,)), added=("acme",))
+    assert added.redact_text(text) == sent
+    assert added.warn_counts == Counter({"EMAIL": 1})
+
+
 def test_a_deny_string_another_one_wins_against_is_no_warning_whatever_its_type() -> None:
     # Two overlapping deny strings typed after a warn-mode rule's type: the
     # one the deny sweep drops is cut too, but a deny string takes no mode.

@@ -569,8 +569,9 @@ Warn mode has always been observation-only (the matched value IS
 forwarded, and counted in `llm_redact_warnings_total` — also one part of
 which something redacts after all, a configured or added deny string, a
 value redacted in its place, a value it is joined with: the rest of it is
-sent, counted once; one the redacted spans cover whole sends nothing and is
-not counted,
+sent, counted once (a warn-mode `llm` backend finding, cut around the
+other values, once per piece left); one the redacted spans cover whole
+sends nothing and is not counted,
 [detection.md](detection.md#per-rule-modes-redact-warn-block)). Four
 configuration knobs and refusal overrides extend that family — each is a
 conscious decision, and each is surfaced rather than silent:

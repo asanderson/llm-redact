@@ -1067,14 +1067,6 @@ class ProxyState:
         _log_ner_warnings(config.detection, self.detection_snapshot.detectors)
         if config.detection.encrypted_content_passthrough:
             logger.warning("%s", ENCRYPTED_CONTENT_RISK_WARNING)
-        # Whether this process started running the llm backend: the one
-        # startup fact a reload may need that the running config does not
-        # keep (a reload may stop the backend). Written here only, read by
-        # every pin_restart_only_paths of the process (apply_config,
-        # prepare_config, a SIGHUP reload's build off the event loop): a
-        # reload may start the backend again only on a proxy started with
-        # it, at the values it started with.
-        self._llm_at_startup = llm_backend_runs(config.detection.ner)
         # Process-lifetime totals by type (for /status), shared across all
         # per-session redactors/rehydrators.
         self.detection_counts: Counter[str] = Counter()
@@ -1975,53 +1967,38 @@ class ProxyState:
         )
 
     # The running detection objects, read through the snapshot: one
-    # attribute assigned once per change (apply_config), never these three
-    # one at a time. A change is a new DetectionSnapshot: the setters are
-    # TRANSITIONAL, for writers that predate the snapshot (llm-redact-pro's
-    # tests add a detector with ``state.detectors = [...]``) — each derives
-    # a whole new snapshot and swaps it in one assignment (_replace_detection).
+    # attribute assigned once per change (apply_config), never these four
+    # one at a time — all four are READ-ONLY. A change is a new
+    # DetectionSnapshot assigned to ``detection_snapshot`` in one statement
+    # (``dataclasses.replace(state.detection_snapshot, detectors=...)``
+    # derives its plan, overlay builds and generation anew from the objects
+    # it holds): a reader holding the old reference keeps it whole, and a
+    # build prepared against the old generation is no longer adopted. Such
+    # a swap reaches every reader of the snapshot (the preview, per-
+    # conversation and overlay contexts, a realtime relay's admission) but
+    # NOT the static session's own redactor (``self.redactor``, in the
+    # static context every static-mode request without an overlay redacts
+    # with): it keeps the objects it was built over, and only
+    # ``apply_config`` builds it anew.
 
     @property
     def detectors(self) -> Sequence[Detector]:
         return self.detection_snapshot.detectors
 
-    @detectors.setter
-    def detectors(self, detectors: Sequence[Detector]) -> None:
-        self._replace_detection(detectors=detectors)
-
     @property
     def allowlist(self) -> Allowlist:
         return self.detection_snapshot.allowlist
-
-    @allowlist.setter
-    def allowlist(self, allowlist: Allowlist) -> None:
-        self._replace_detection(allowlist=allowlist)
 
     @property
     def modes(self) -> Mapping[str, str]:
         return self.detection_snapshot.modes
 
-    @modes.setter
-    def modes(self, modes: Mapping[str, str]) -> None:
-        self._replace_detection(modes=modes)
-
     @property
     def overlay_builds(self) -> OverlayBuilds:
         """The access gate's detection overlays (authorization.py), built per
         distinct overlay against exactly the running detection objects.
-        Read-only: derived from the snapshot's objects, never assigned."""
+        Derived from the snapshot's objects, never assigned."""
         return self.detection_snapshot.overlay_builds
-
-    def _replace_detection(self, **changes: Any) -> None:
-        """The transitional setters' one write: a NEW snapshot over the
-        running one with ``changes`` (``dataclasses.replace``: its plan,
-        overlay builds and generation derived anew from the objects it
-        holds), swapped in ONE assignment — a reader holding the old
-        reference keeps it whole, and a build prepared against the old
-        generation is no longer adopted. Only the snapshot changes: the
-        static redactor keeps the objects it was built over, as it did when
-        these were plain attributes."""
-        self.detection_snapshot = dataclasses.replace(self.detection_snapshot, **changes)
 
     def reload(self) -> bool:
         """Rebuild hot-swappable config from the file; never crash a running
@@ -2036,10 +2013,11 @@ class ProxyState:
         inject_system_note, max_body_bytes, provider upstreams. Requires
         restart (kept with a warning): vault, audit, host, port, the llm
         backend's url, allow_remote and api_key_env (and a reload that
-        would start that backend is refused unless the proxy was started
-        running it and the reload names the values it started with). An
-        open realtime connection whose provider settings, upstream
-        authorizer or detection policy changed is closed 1012 (reconnect).
+        would start that backend is refused unless it names the values the
+        proxy started with — a dormant table's, or the defaults, on a proxy
+        started without it). An open realtime connection whose provider
+        settings, upstream authorizer or detection policy changed is closed
+        1012 (reconnect).
         The access gate's optional ``reload`` then re-reads its own policy.
         """
         try:
@@ -2081,9 +2059,9 @@ class ProxyState:
         Failures are ``reload``'s, and so are their log lines: a file that
         does not parse, a build that fails (an unknown rule, a missing NER
         extra, a model not cached, a reload that would start the llm
-        backend on a process started without it or at other values than it
-        started with) is logged "config reload failed; keeping current config"
-        and nothing is swapped — after the "changes require restart" lines
+        backend at other values than the proxy started with) is logged
+        "config reload failed; keeping current config" and nothing is
+        swapped — after the "changes require restart" lines
         ``apply_config`` logs before it builds, when the file got that far
         (``_DetectionBuildFailed``: the build failed on the worker, so those
         lines are logged on the loop before the failure, as ``reload`` logs
@@ -2143,7 +2121,7 @@ class ProxyState:
         configuration (``apply_config`` logs its restart-required lines
         before it builds). Assigns nothing on the proxy."""
         fresh = apply_env_overrides(load_config(self.config_path))
-        candidate, _kept = pin_restart_only_paths(fresh, live, llm_at_startup=self._llm_at_startup)
+        candidate, _kept = pin_restart_only_paths(fresh, live)
         try:
             prepared = self._prepare_detection(candidate)
         except Exception as exc:
@@ -2169,17 +2147,15 @@ class ProxyState:
         """``fresh`` with its restart-only paths inside ``[detection]`` kept
         from the running configuration (``pin_restart_only_paths``: a
         ConfigError, before anything is logged, for one that would start
-        the llm backend on a proxy started without it or with any of those
-        paths changed, or that the kept values make invalid), and the
-        names of every restart-only part that differs from the running
-        configuration — RESTART_ONLY_KEYS sections, plugin sections by their
-        names, then the dotted paths — each logged as a WARNING ("changes
-        require restart; keeping current"). What ``apply_config`` logs
+        the llm backend with any of those paths changed, or that the kept
+        values make invalid), and the names of every restart-only part that
+        differs from the running configuration — RESTART_ONLY_KEYS
+        sections, plugin sections by their names, then the dotted paths —
+        each logged as a WARNING ("changes require restart; keeping
+        current"). What ``apply_config`` logs
         before it builds anything; a SIGHUP reload whose build failed off
         the loop logs the same before its failure."""
-        fresh, kept_paths = pin_restart_only_paths(
-            fresh, self.config, llm_at_startup=self._llm_at_startup
-        )
+        fresh, kept_paths = pin_restart_only_paths(fresh, self.config)
         restart_required = [
             field_name
             for field_name in RESTART_ONLY_KEYS
@@ -2211,11 +2187,13 @@ class ProxyState:
         returned (and warned) so callers can surface "restart required" —
         a section's name, a path's dotted one (``detection.ner.llm.url``).
         A ``fresh`` the pinned paths refuse (one that would start the llm
-        backend on a process started without it running, or with any of
-        them changed — a reload starts it again only at the running values,
-        the ones the process started with —, or one they make invalid) is a
+        backend with any of them changed — a reload starts it only at the
+        running values, the ones the process started with, also on a
+        process started without it —, or one they make invalid) is a
         ConfigError before anything is logged or built: the running
-        configuration stays.
+        configuration stays. An apply that starts the llm backend says so
+        once it is live: a WARNING naming the model server's origin (an
+        editor save that only switched NER on may start it).
 
         ``prepared`` (``prepare_config``'s answer, built off the event loop
         for the candidate ``fresh`` came from): a changed ``[detection]`` is
@@ -2239,6 +2217,12 @@ class ProxyState:
         # change is named (and logged) before anything is built.
         fresh, restart_required = self._restart_required(fresh)
         effective = _kept_restart_only(fresh, self.config)
+        # A start of the llm backend (pin_restart_only_paths let it through:
+        # at the startup values) is said once applied — a save that only
+        # switched NER on may start it without the editor showing it.
+        starts_llm = llm_backend_runs(effective.detection.ner) and not llm_backend_runs(
+            self.config.detection.ner
+        )
 
         # Re-resolve the license BEFORE anything is built or swapped:
         # [license] itself is hot, so renewals apply without a restart.
@@ -2348,6 +2332,16 @@ class ProxyState:
             logger.warning("routing: %s", warning)
         if effective.detection.encrypted_content_passthrough:
             logger.warning("%s", ENCRYPTED_CONTENT_RISK_WARNING)
+        if starts_llm:
+            # The server's origin only (llm_ner.server_origin, as /status
+            # names it): never a path, never the key or its variable.
+            from llm_redact.detection.llm_ner import server_origin
+
+            logger.warning(
+                "config reload starts the llm NER backend: model server %s (the url the"
+                " proxy started with) now receives every string it scans, unredacted",
+                server_origin(effective.detection.ner.llm.url),
+            )
         logger.info("config reloaded (%d detection rules)", len(detection.detectors))
         # A SIGHUP reload that failed before this apply no longer describes
         # what runs (/status config_reload ``last.superseded``).
@@ -2410,9 +2404,8 @@ class ProxyState:
 
         Like apply_config, it keeps the running values of the restart-only
         keys inside ``[detection]`` (RESTART_ONLY_PATHS) and refuses a
-        candidate that would start the llm backend on a process started
-        without it running or with any of them changed, or that the kept
-        values make invalid.
+        candidate that would start the llm backend with any of them
+        changed, or that the kept values make invalid.
 
         Safe on a worker thread (a dashboard runs it off the event loop): it
         assigns nothing on the proxy and never touches the event loop; it
@@ -2420,9 +2413,7 @@ class ProxyState:
         apply swapping them meanwhile is either seen whole or not at all
         (and the generation tells apply_config which).
         """
-        candidate, _kept = pin_restart_only_paths(
-            candidate, self.config, llm_at_startup=self._llm_at_startup
-        )
+        candidate, _kept = pin_restart_only_paths(candidate, self.config)
         prepared = self._prepare_detection(candidate)
         try:
             effective = apply_env_overrides(candidate)

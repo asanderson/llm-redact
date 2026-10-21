@@ -32,6 +32,7 @@ from llm_redact.config import (
     resolve_config_path,
     validate_bind_security,
 )
+from llm_redact.detection.engine import LlmNerConfig
 
 _NER_MODULES = {
     "spacy": "spacy",
@@ -730,6 +731,34 @@ def _check_ner_labels(report: _Report, config: Config) -> None:
         report.line("FAIL", "ner", problem)
 
 
+def _check_dormant_llm(report: _Report, llm: LlmNerConfig) -> None:
+    """A ``[detection.ner.llm]`` table the backend does not run (NER off, or
+    "llm" not among the backends: a dormant table) that names a model
+    server off loopback or a key variable: a reload that runs the backend
+    starts it THERE, with no restart (pin_restart_only_paths lets a start
+    at the startup values through), so a WARN says so before the proxy
+    starts. A table on loopback without a key — the defaults, which every
+    configuration without a table holds, or another local server — is left
+    unsaid. Offline: the origin and the variable's NAME only, never a
+    key."""
+    from llm_redact.config import _is_loopback_host
+    from llm_redact.detection.llm_ner import server_origin
+
+    remote = not _is_loopback_host(urllib.parse.urlsplit(llm.url).hostname or "")
+    if not remote and llm.api_key_env is None:
+        return
+    where = "off loopback" if remote else "on loopback"
+    key = "" if llm.api_key_env is None else f", and the key {llm.api_key_env} holds"
+    report.line(
+        "WARN",
+        "llm",
+        f"[detection.ner.llm] names model server {server_origin(llm.url)} ({where}) while the"
+        ' backend does not run: a reload that runs it (NER on, "llm" among the backends)'
+        f" starts it there with no restart, sending it every string it scans unredacted{key}"
+        " — leave the table out of a configuration that is not to run the backend",
+    )
+
+
 def _check_llm(report: _Report, config: Config, offline: bool = False) -> None:
     """The llm backend's model server: where the scanned text goes (WARN off
     loopback: it receives every scanned string UNREDACTED), and the
@@ -737,8 +766,9 @@ def _check_llm(report: _Report, config: Config, offline: bool = False) -> None:
     the configured one and, on Ollama, at the pinned digest (not asked with
     ``--offline``). With ``api_key_env``, that its variable is set — read
     offline, never shown. Sends no text and pulls nothing. Silent unless the
-    backend is enabled."""
-    from llm_redact.config import _is_loopback_host
+    backend is enabled — but for a dormant table naming a destination a
+    reload could switch on (_check_dormant_llm)."""
+    from llm_redact.config import _is_loopback_host, llm_backend_runs
     from llm_redact.detection.llm_ner import (
         MODEL_LIST_SECONDS,
         check_server,
@@ -748,7 +778,8 @@ def _check_llm(report: _Report, config: Config, offline: bool = False) -> None:
     )
 
     ner = config.detection.ner
-    if not (ner.enabled and "llm" in ner.active_backends()):
+    if not llm_backend_runs(ner):
+        _check_dormant_llm(report, ner.llm)
         return
     llm = ner.llm
     origin = server_origin(llm.url)

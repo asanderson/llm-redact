@@ -176,13 +176,21 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     llm-redact-pro config editor) keeps their running values, applies the rest of
     `[detection]` and names them in its "require restart" warning (`detection.ner.llm.url`, …).
     Those running values are the ones the proxy started with (no reload moves them). A reload
-    never starts the backend (`"llm"` added to the backends, NER switched on with it) on a
-    proxy started without it, not even a `[detection.ner.llm]` table the startup file held
-    with NER off; on one started running it, a reload may start it again after a reload
-    stopped it, only at those values — the build reading the key and checking the server as
-    at startup. Any other start is refused with the running configuration kept, naming keys,
-    never a value. Whoever can change `[detection]` can therefore never make a running proxy
-    send scanned text, or a key, somewhere it did not send to from its start.
+    starts the backend (`"llm"` added to the backends, NER switched on with it, again after a
+    reload stopped it) only at those values, also on a proxy started without it: there they
+    are a `[detection.ner.llm]` table the startup file held while the backend did not run
+    (NER off, or `"llm"` not among `[detection.ner] backends`), or the defaults
+    (Ollama on loopback, no key) — the build reading the key and checking the server as at
+    startup. A start with any of the three changed is refused with the running configuration
+    kept, naming keys, never a value. Whoever can change `[detection]` can therefore never make
+    a running proxy send scanned text, or a key, somewhere its startup configuration does not
+    name — but can switch the backend on there, a dormant table's server or the loopback
+    default included (docs/threat-model.md lists it among the residual risks), also with a
+    config editor save that only switches NER on while the file's backends hold `"llm"`. A
+    start by reload is logged once applied, a WARNING naming the model server's origin
+    (`config reload starts the llm NER backend: …`), and `llm-redact doctor` WARNs about a
+    dormant table naming a server off loopback or a key variable: a destination a reload can
+    switch on.
     `config.RESTART_ONLY_PATHS` lists the three for the editor, and `apply_config`'s
     restart-required list (the plugin API's `DashboardHost` contract) now holds their dotted
     names beside the section names: an entry is a name to show, not always a `Config`
@@ -234,7 +242,15 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   NER model once, and a SIGHUP reload builds off the event loop.** The proxy's detectors,
   allowlists and modes are now one immutable snapshot that a reload or a save swaps in a single
   step, and the redaction preview reads it once: a preview a reload overlaps describes the
-  configuration live when it began, never the old detectors with the new modes. Three optional
+  configuration live when it began, never the old detectors with the new modes.
+  `ProxyState.detectors`, `allowlist` and `modes`, plain attributes before, are read-only views
+  of that snapshot: code that assigned one (a plugin's tests adding a detector) assigns a new
+  snapshot instead, `state.detection_snapshot = dataclasses.replace(state.detection_snapshot,
+  detectors=...)`, which derives its plan and overlay builds anew. That swap reaches every
+  reader of the snapshot (the preview, per-conversation and overlay contexts, a new realtime
+  connection's admission) but not the static session's own redactor (`state.redactor`, which
+  static-mode requests redact with), as an attribute assignment never did: it keeps the
+  objects it was built over until an `apply_config` builds it anew. Three optional
   members of `plugin_api.DashboardHost`, read with `getattr` (an older core lacks them), let a
   dashboard plugin use this: `preview_snapshot` (True), `prepare_config(candidate)` — the config
   check, raising the same errors as `validate_config`, keeping the NER models it loaded for a

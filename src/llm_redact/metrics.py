@@ -628,7 +628,9 @@ def _ner_lines(backends: list[tuple[str, "NerStats"]]) -> list[str]:
             "llm_redact_ner_prefetch_misses_total",
             "prefetch_misses",
             "Strings a request's redaction did not find in its precomputed NER results and"
-            " ran inline instead, by backend.",
+            " ran inline instead (each also in llm_redact_ner_inline_calls_total, unless a"
+            " detector listed before the backend raised on that string first: the backend"
+            " then never ran on it), by backend.",
         ),
     ):
         lines.append(f"# HELP {name} {help_text}")

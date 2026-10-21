@@ -328,19 +328,23 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   a worker thread of its own in llm-redact-pro releases after 0.17.1, on the event loop in
   0.17.1 and earlier) and `llm_redact_ner_prefetch_misses_total` (strings a request's redaction
   did not find among the results its prefetch computed — a reload replaced the detectors while
-  it waited — each also counted inline), until now on `/status` and `/metrics` only. Both stay
-  at zero while every request is prefetched and nobody runs a preview. The row's panels are now
-  three to a line. The counter's `# HELP` text, the metrics reference (docs/observability.md)
-  and the NER counter table (docs/detection.md) now define it the same way: they said every
-  inline call ran on the event loop, and llm-redact-pro's preview runs on a worker thread of its
-  own in its releases after 0.17.1. The counter itself now counts a call that raised (the `llm`
-  backend's `on_error = "block"` failure refusing its request, any other fault) once, like one
-  that returned: it counted only the calls that returned, though a failed one held its caller up
-  just the same. The NER prefetch worker's calls still never count as inline. The preview's own
-  contract (`plugin_api.DashboardHost`, `ProxyState.preview`) and docs/dashboard.md said it
-  wrote no metrics: it runs the live detectors, so the NER coverage counters count its strings
-  and the `llm` backend's circuit breaker its model server's failures, as for a request's; the
-  live vault, the audit and the request and detection counters stay untouched, as before.
+  it waited — each also counted inline unless a detector listed before the backend raised on
+  that string first, so the backend never ran on it), until now on `/status` and `/metrics`
+  only. Both stay at zero while every request is prefetched and nobody runs a preview. The row's
+  panels are now three to a line. The counter's `# HELP` text, the metrics reference
+  (docs/observability.md) and the NER counter table (docs/detection.md) now define it the same
+  way: they said every inline call ran on the event loop, and llm-redact-pro's preview runs on a
+  worker thread of its own in its releases after 0.17.1. The counter itself now counts a call
+  that raised (the `llm` backend's `on_error = "block"` failure refusing its request, any other
+  fault) once, like one that returned: it counted only the calls that returned, though a failed
+  one held its caller up just the same. The NER prefetch worker's calls still never count as
+  inline, and every definition of the prefetch misses now says when one is not also an inline
+  call: a miss is counted on every backend before any of them runs, so a backend listed after
+  a detector that raised on the string counts the miss without running. The preview's own contract
+  (`plugin_api.DashboardHost`, `ProxyState.preview`) and docs/dashboard.md said it wrote no
+  metrics: it runs the live detectors, so the NER coverage counters count its strings and the
+  `llm` backend's circuit breaker its model server's failures, as for a request's; the live
+  vault, the audit and the request and detection counters stay untouched, as before.
   (`llm-redact preview` builds detectors of its own, in its own process: nothing it counts
   reaches a running proxy.)
 

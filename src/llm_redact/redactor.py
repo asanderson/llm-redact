@@ -538,9 +538,9 @@ class Redactor:
         strings' matches ``added`` taken in (``_absorb``; None: no overlay),
         the warn-mode values they cut counted (``_count_cut``) — or, with
         ``cut`` given, the warn-mode values they may cut appended to it,
-        uncounted, for a caller that forwards some of the winners that
-        redact as sent after all (``scan``: an approved override passes
-        one) to count once it knows which (``_count_partly_sent``).
+        uncounted, for a caller that may forward the text as sent after all
+        (``scan``: every value that would refuse it approved) to count once
+        it knows (``_count_partly_sent``).
 
         Counted only once resolution is complete: a block-mode value
         refusing the text there (``_join``, ``_absorb``) leaves them
@@ -568,8 +568,8 @@ class Redactor:
         mode, a union, an llm finding's piece), part of it sent (it lies
         partly outside them all, ``_partly_outside``) — or, with ``cut``
         given, appends the values it would decide that for to it, for the
-        caller to count against the spans it replaces or refuses for
-        (``_count_partly_sent``). Such a value lost an
+        caller to count against the same spans unless it forwards the text
+        as sent (``scan``, ``_count_partly_sent``). Such a value lost an
         overlap — an ordinary one (``_resolve_overlaps``: to a deny string,
         to a value redacted in its place), in a joined run (``_join``), to an
         added match (``_absorb``) — and what of it lies outside the redacted
@@ -592,15 +592,17 @@ class Redactor:
         Not counted: one the redacted spans cover whole (nothing of it is
         sent); one that lost only to a winner forwarded as sent (another
         warn-mode value, which is counted as a winner; an approved block,
-        or in text the proxy cannot rewrite any value an approved override
-        passes — ``scan`` — counted as an override used, not here) — it
-        overlaps no span they replace; a deny string (never in a mode); an
-        llm finding cut around the other winners (each piece left is a
-        winner, counted as one). None of them is a winner, as the winners
-        are disjoint, so none is counted twice: ``redact_text`` and
-        ``scan`` count only the winners. Each value is looked at a fixed
-        number of times, finding the span it may overlap by binary search
-        (an llm finding's pieces, when any, sorted in among them first)."""
+        counted as an override used, not here) — it overlaps no span they
+        replace; any in text the proxy cannot rewrite that goes upstream as
+        sent (``scan``: every value that would refuse it approved, each
+        counted as an override used) — nothing of it is replaced; a deny
+        string (never in a mode); an llm finding cut around the other
+        winners (each piece left is a winner, counted as one). None of them
+        is a winner, as the winners are disjoint, so none is counted twice:
+        ``redact_text`` and ``scan`` count only the winners. Each value is
+        looked at a fixed number of times, finding the span it may overlap
+        by binary search (an llm finding's pieces, when any, sorted in among
+        them first)."""
         warned = [
             d
             for d in found
@@ -795,11 +797,12 @@ class Redactor:
         placeholder issued and nothing written to the vault. A block-mode
         winner raises BlockedRequest; a warn-mode winner is counted in
         ``warn_counts`` (its value stays where it is), as is one the winners
-        it acts on cut when part of it is left (``_settled``): those that
-        redact, less the ones an approved override forwards as sent — a
-        value cut only by those has nothing replaced, nor refused for, and
-        is not counted; every other winner — a deny string always — is
-        returned as its detector type, counted.
+        cut when part of it is left (``_settled``), exactly as
+        ``redact_text`` counts them — unless the text goes upstream as sent
+        (not ``redactable``, every refusing value in it approved: nothing
+        found), where nothing is replaced and no value cut; every other
+        winner — a deny string always — is returned as its detector type,
+        counted.
 
         Every refusing winner but a deny string is first put to the
         requester's overrides (``with_overrides``): an approved value is
@@ -816,15 +819,15 @@ class Redactor:
         string."""
         self.charge(1)
         found: Counter[str] = Counter()
+        overridden = False
         overrides = self._overrides
         # The warn-mode values the winners may cut: counted once it is known
-        # which winners an approved override passes (``_count_partly_sent``).
+        # whether the text goes upstream as sent (``_count_partly_sent``).
         warned: list[Detection] = []
         winners = self._winners(text, warned)
-        # Where those passed winners are in ``winners``.
-        passed: set[int] = set()
+        sent = False
         try:
-            for i, d in enumerate(winners):
+            for d in winners:
                 if not d.tier:
                     # Deny strings (tier 0) take no mode, exactly as in
                     # redact_text, and are the operator's always-redact list
@@ -836,7 +839,7 @@ class Redactor:
                         and overrides is not None
                         and self._joined_passes(d, overrides)
                     ):
-                        passed.add(i)
+                        overridden = True
                     else:
                         found[d.detector_type] += 1
                     continue
@@ -844,18 +847,24 @@ class Redactor:
                 if mode == "warn":
                     self.warn_counts[d.detector_type] += 1
                 elif (mode == "block" or not redactable) and self._overridden(d):
-                    passed.add(i)
+                    overridden = True
                 elif mode == "block":
                     raise BlockedRequest(d.detector_type)
                 else:
                     found[d.detector_type] += 1
+            # Nothing found in text the proxy cannot rewrite: it goes
+            # upstream as sent, every value redact_text would replace in it
+            # approved, so none of them cuts a warn-mode value.
+            sent = not redactable and not found
         finally:
-            # Against the spans the text is redacted or refused for, as
-            # redact_text counts them — a text refused here too.
-            if warned:
-                acted = [d for i, d in enumerate(winners) if i not in passed and self._replaces(d)]
-                self._count_partly_sent(warned, acted)
-        return TextScan(found, bool(passed))
+            # Else the text is redacted after all (redactable) or refused —
+            # here (a block) or by the caller (a value found): the values cut
+            # count as redact_text counts them, against every span it
+            # replaces, whatever the overrides approved and wherever in the
+            # text the refusing value is.
+            if warned and not sent:
+                self._count_partly_sent(warned, [d for d in winners if self._replaces(d)])
+        return TextScan(found, overridden)
 
     def _joined_passes(self, d: Detection, overrides: OverrideCheck) -> bool:
         """Whether ``overrides`` let a tier-0 winner of text the proxy

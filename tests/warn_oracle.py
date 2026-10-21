@@ -17,12 +17,13 @@ one value count once). A deny string takes no mode; an llm finding
 only through the pieces the resolution keeps of it. Which characters were
 replaced is read from the output itself (``replaced``). Where the proxy
 cannot rewrite the text (``Redactor.scan``: a verbatim field, an upload's
-extracted text) nothing is replaced: a value is cut there by the values the
-text is refused for — or redacted for, when the caller redacts it after all
-(convert mode) — and a value an approved refusal override lets through is
-forwarded as sent, so one that lost only to such a value is no warning
-either (``scanned``). Shared by tests/test_joined_values.py and
-tests/test_overlay_deny.py.
+extracted text) nothing is replaced: a value is cut there as the redaction
+would cut it — the text is refused (or, convert mode, redacted after all) —
+unless the text goes upstream as sent, every value that would refuse it
+approved: then no value is cut (``scanned``). A text refused for a
+block-mode value counts the cut values all the same, and the warn-mode
+winners before it (``refused_at``): the redaction stops there. Shared by
+tests/test_joined_values.py and tests/test_overlay_deny.py.
 """
 
 from __future__ import annotations
@@ -61,37 +62,45 @@ def scanned(
     *,
     redactable: bool,
 ) -> set[int] | None:
-    """The positions a scan of text the proxy cannot rewrite
-    (``Redactor.scan``) refuses that text for — or, ``redactable`` (convert
-    mode), redacts it for — among ``winners`` (the values the resolution
-    acts on, an access gate's added deny strings taken in): the counterpart
-    of what ``replaced`` reads from a redacted text. A warn-mode value is
-    forwarded as sent; so is one the scan puts to the requester's overrides
-    when they approve it (its value in ``approved``): a value in block mode
-    (None when one is not approved: the scan refuses the text) and, where
-    the text is not ``redactable``, a value in redact mode or a span joining
-    values (``Detection.members``: when each of them is approved; one
-    holding a deny string never). A deny string never is."""
+    """The positions the warn-mode values a scan of text the proxy cannot
+    rewrite (``Redactor.scan``) cuts are counted against, among ``winners``
+    (the values the resolution acts on, an access gate's added deny strings
+    taken in): the counterpart of what ``replaced`` reads from a redacted
+    text. The positions the redaction replaces (a deny string, a span
+    joining values, a value in redact mode) where the text is redacted
+    after all (``redactable``, convert mode) or refused — by the scan (a
+    value in block mode not approved) or by its caller (any other value
+    found) —, wherever in the text the refusing value is; none where the
+    text goes upstream as sent: not ``redactable``, and every value that
+    would refuse it approved (its value in ``approved``) — one in block or
+    redact mode, a span joining values (``Detection.members``) when each of
+    them is; one holding a deny string never, nor a deny string. A
+    warn-mode value never refuses."""
     positions: set[int] = set()
+    sent = not redactable
     for d in winners:
-        if d.tier == 0:
-            members = d.members
-            if (
-                not redactable
-                and members
-                and all(m.tier != 0 and m.value in approved for m in members)
-            ):
-                continue
-        else:
-            mode = modes.get(d.detector_type, "redact")
-            if mode == "warn":
-                continue
-            if mode == "block" and d.value not in approved:
-                return None
-            if (mode == "block" or not redactable) and d.value in approved:
-                continue
-        positions.update(range(d.start, d.end))
-    return positions
+        mode = "redact" if d.tier == 0 else modes.get(d.detector_type, "redact")
+        if mode == "redact":
+            positions.update(range(d.start, d.end))
+        if mode == "warn":
+            continue
+        values = d.members if d.tier == 0 else (d,)
+        if not values or not all(v.tier != 0 and v.value in approved for v in values):
+            sent = False
+    return set() if sent else positions
+
+
+def refused_at(
+    winners: Sequence[Detection], modes: Mapping[str, str], approved: Collection[str]
+) -> int | None:
+    """Where a scan, and the redaction, of a text refuse it for a block-mode
+    value: the start of the first of ``winners`` (start-sorted, disjoint)
+    in block mode whose value is not in ``approved`` — the warn-mode
+    winners after it are never read — else None."""
+    for d in winners:
+        if d.tier and modes.get(d.detector_type) == "block" and d.value not in approved:
+            return d.start
+    return None
 
 
 def cut_warnings(
@@ -132,18 +141,22 @@ def expected_warnings(
     configured: Sequence[Detection],
     modes: Mapping[str, str],
     redacted: set[int],
+    *,
+    refused_at: int | None = None,
 ) -> Counter[str]:
     """Every warning predicted for the text: one per warn-mode winner of
     the ``configured`` resolution no character of which was replaced (left
-    whole as sent; an added deny string overlapping one cuts it instead),
-    plus those the redaction cut (``cut_warnings``). ``redacted``: the
-    positions replaced (``replaced``), or a scan refuses the text for
-    (``scanned``)."""
+    whole as sent; an added deny string overlapping one cuts it instead) —
+    of a text refused for a block-mode value, one starting before it
+    (``refused_at``) —, plus those the redaction cut (``cut_warnings``).
+    ``redacted``: the positions replaced (``replaced``), or a scan counts
+    the cut values against (``scanned``)."""
     whole = Counter(
         d.detector_type
         for d in configured
         if d.tier
         and modes.get(d.detector_type) == "warn"
         and not set(range(d.start, d.end)) & redacted
+        and (refused_at is None or d.start < refused_at)
     )
     return whole + cut_warnings(found, configured, modes, redacted)

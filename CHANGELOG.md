@@ -110,10 +110,11 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   is decided once everything is redacted: one whose rest an added deny string or an `llm`
   backend finding redacts is not counted, nor one that lost only to another value forwarded as
   sent (that one counts as what it is: a warn-mode value as a warning, an approved block — or,
-  where the proxy cannot rewrite the text (a verbatim field, an upload's extracted text), any
-  value an approved refusal override lets through — as an override used,
-  `llm_redact_overrides_used_total`, not as a warning); of overlapping ones, one value two
-  detectors find counts once. An `llm` backend finding loses no overlap — it is cut
+  where the proxy cannot rewrite the text (a verbatim field, an upload's extracted text) and
+  sends it as it is, any value an approved refusal override lets through — as an override used,
+  `llm_redact_overrides_used_total`, not as a warning; such a text refused all the same counts
+  as a redacted one would, wherever the value refusing it is); of overlapping ones, one value
+  two detectors find counts once. An `llm` backend finding loses no overlap — it is cut
   around the other values — so a warn-mode one counts once per piece left as sent, as before. A
   configured deny string takes part in overlap resolution and an added one is applied after it,
   so where warn-mode values overlap one another the same bytes upstream can still count

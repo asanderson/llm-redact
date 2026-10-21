@@ -350,10 +350,10 @@ fuzzy = true
 
 # Strings that must ALWAYS be redacted — the strongest signal there is.
 # Deny matches ignore the allowlist and are never subject to
-# [detection.modes]. Each is joined with the values it overlaps: one
-# redacted in its place (an email it occurs in) or another deny match is
-# redacted with it as one placeholder, and a block-mode value among them
-# refuses the request. Case-insensitive substrings:
+# [detection.modes]. Each is joined with the values it overlaps: a value in
+# redact mode (an email it occurs in) or another deny match is redacted with
+# it as one placeholder, and a block-mode value among them refuses the
+# request. Case-insensitive substrings:
 # deny = ["project aurora", "codename bluebird"]
 # Per-entry options (case sensitivity, placeholder type):
 # [[detection.deny_strings]]

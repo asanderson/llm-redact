@@ -30,7 +30,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from llm_redact.bench.corpus import VALUE_GENERATORS, generate
@@ -738,6 +738,99 @@ def _joining(d: Detection) -> bool:
     """Whether ``d`` is joined with what it overlaps: a value that says so,
     or a deny string."""
     return d.joins or d.tier == 0
+
+
+LLM_SPAN = st.tuples(st.integers(0, 40), st.integers(1, 12), st.sampled_from(("A", "L")))
+LLM_MODES = st.dictionaries(
+    st.sampled_from(("A", "B", "C", "L")), st.sampled_from(("redact", "warn", "block"))
+)
+
+
+# A warn-mode value Q wins the sweep against a redact-mode R and another
+# warn-mode value P; an llm finding L overlaps P past Q's end. Without the
+# deny string inside R, the sweep keeps Q and redacts L's tail; with it,
+# R joins the deny string, Q yields to their union, P is kept — and L's
+# tail goes upstream with P (tests/test_deny.py's real-rule property has no
+# llm finding).
+RESIDUAL = (
+    [
+        (1, 19, "A", False, 0),
+        (2, 6, "B", False, 0),
+        (12, 13, "A", False, 0),
+        (3, 2, "DENY", False, 0),
+    ],
+    [(18, 7, "L")],
+    {"A": "warn"},
+)
+
+
+def test_the_llm_residual_is_real() -> None:
+    spans, findings, modes = RESIDUAL
+    text = "x" * 60
+    detections = _with_findings(spans, findings)
+    winners = Redactor([], InMemoryVault(), Allowlist(), modes=modes)._resolved(text, detections)
+    now = _redacts(winners, modes)
+    without_deny = [d for d in detections if d.tier]
+    before = _redacts(_resolve_overlaps(without_deny), modes)
+    assert now is not None and before is not None
+    assert before - now == set(range(20, 25))
+
+
+def _with_findings(
+    spans: Iterable[tuple[int, int, str, bool, int]], findings: Iterable[tuple[int, int, str]]
+) -> list[Detection]:
+    """``spans`` (``_sorted``) and llm findings (``ADDITIVE_TIER``) in the
+    detection plan's order."""
+    text = "x" * 60
+    llm = [
+        Detection(a, a + n, kind, text[a : a + n], 120, ADDITIVE_TIER) for a, n, kind in findings
+    ]
+    return sorted(_sorted(spans) + llm, key=lambda d: (d.start, -(d.end - d.start), d.priority))
+
+
+@settings(deadline=None, max_examples=500)
+@example(*RESIDUAL)
+@given(st.lists(SPAN, max_size=10), st.lists(LLM_SPAN, max_size=3), LLM_MODES)
+def test_an_llm_finding_a_kept_warn_value_covers_is_the_one_residual(
+    spans: list[tuple[int, int, str, bool, int]],
+    findings: list[tuple[int, int, str]],
+    modes: dict[str, str],
+) -> None:
+    # The llm backend's findings (ADDITIVE_TIER) are never joined: they are
+    # cut around the winners, as everywhere — the values forwarded as sent
+    # among them. The join may keep a different one of two overlapping
+    # warn-mode values than the overlap sweep does, so a different part of
+    # a finding goes upstream with that value. That is the one way the join
+    # redacts less than the sweep, with or without the joining values (a
+    # deny string included): every character lost lies inside an llm
+    # finding AND inside a value the join forwards as sent; and a refusal
+    # lost is one the sweep made for an llm finding alone. Against the sweep
+    # over every detection, and over all of them but the joining ones.
+    text = "x" * 60
+    detections = _with_findings(spans, findings)
+    fewer = [d for d in detections if not _joining(d)]
+    redactor = Redactor([], InMemoryVault(), Allowlist(), modes=modes)
+    try:
+        winners = redactor._resolved(text, detections)
+    except BlockedRequest:
+        return
+    now = _redacts(winners, modes)
+    if now is None:
+        return
+    forwarded = {
+        i
+        for d in winners
+        if d.tier and modes.get(d.detector_type, "redact") == "warn"
+        for i in range(d.start, d.end)
+    }
+    llm = {i for d in detections if d.tier == ADDITIVE_TIER for i in range(d.start, d.end)}
+    for swept in (fewer, detections):
+        before = _redacts(_resolve_overlaps(swept), modes)
+        if before is None:
+            values = [d for d in swept if d.tier != ADDITIVE_TIER]
+            assert _redacts(_resolve_overlaps(values), modes) is not None
+            continue
+        assert before - now <= llm & forwarded
 
 
 @settings(deadline=None, max_examples=500)

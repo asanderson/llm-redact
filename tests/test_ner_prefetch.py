@@ -588,6 +588,23 @@ def test_a_detector_a_raising_one_cut_short_counts_no_miss(recorded: bool) -> No
     assert second.calls == []
 
 
+@pytest.mark.parametrize("recorded", [False, True], ids=["detect", "detect_sourced"])
+def test_no_table_attached_counts_an_inline_call_and_no_miss(recorded: bool) -> None:
+    # A redaction with no precomputed table (a preview, a plan the prefetch
+    # never ran for) runs the model inline and counts no miss; one whose
+    # table holds the string runs nothing inline. Through the recorder path
+    # (a scan sink's capture) too.
+    model = FakeModel()
+    redactor = _redactor([model])
+    if recorded:
+        redactor = redactor.with_recorder(_Recorder())
+    redactor.redact_text("Jane Doe")
+    assert (model.stats.prefetch_misses, model.stats.inline_calls) == (0, 1)
+    table = {"Bob Jones": redactor.plan.detect_heavy("Bob Jones")}
+    redactor.with_precomputed(table, redactor.plan).redact_text("Bob Jones")
+    assert (model.stats.prefetch_misses, model.stats.inline_calls) == (0, 1)
+
+
 class _Recorder:
     """A scan sink's recorder that keeps nothing (``Redactor.with_recorder``)."""
 

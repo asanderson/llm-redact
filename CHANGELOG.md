@@ -75,14 +75,22 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   value a deny string overlapped was not refused, its rest sent. A deny string is now joined with
   every value it overlaps, as the values above are: every value among them that redacts (another
   deny string, a value in redact mode) is redacted with it, overlapping ones as one placeholder
-  over their union typed after the one starting first (`mail «EMAIL_001»`, `«DENY_001»`); a
-  value in block mode among them refuses the request, also one that would lose the overlap to a
-  value redacted in its place without the deny string (an approved refusal override lets it
-  through as sent where nothing redacted covers it); a warn-mode value goes upstream only where
-  nothing redacted covers it. A deny string never redacts or refuses less than before, nor than
-  the same policy without it: a property test pins both, against the previous redactor and the
-  built-in rules in random modes. An access gate's added deny strings (llm-redact-pro roles) are
-  taken in after the configured policy, as before (docs/detection.md, "Deny strings").
+  over their union typed after the one starting first (`mail «EMAIL_001»`, `«DENY_001»`; that
+  value's type is the one counted and named, so a deny string of type `PROJECT` inside an email
+  that starts before it counts as `EMAIL`); a value in block mode among them refuses the request,
+  also one that would lose the overlap to a value redacted in its place without the deny string
+  and one the deny string covers whole (an approved refusal override lets it through as sent where
+  nothing redacted covers it); a warn-mode value goes upstream only where nothing redacted covers
+  it. A deny string never redacts or refuses less than before, nor than the same policy without
+  it: property tests pin both, against the previous redactor and the built-in rules in random
+  modes. The one exception is an `llm` backend finding, never joined: as everywhere it keeps only
+  what lies outside the other values, so where the join keeps a different one of two overlapping
+  warn-mode values than the overlap sweep would, a different part of it goes upstream with that
+  value (the values joined above do the same). In text the proxy cannot rewrite (a verbatim
+  field, an upload's extracted text), a deny string refuses for good before any value is put to
+  the refusal overrides, so a block-mode value met first no longer mints a code that could never
+  let the text through. An access gate's added deny strings (llm-redact-pro roles) are taken in
+  after the configured policy, as before (docs/detection.md, "Deny strings").
 - **A custom rule whose pattern can match the empty string could send a deny string upstream as
   sent.** With `deny = ["acme"]` and a custom rule matching no characters where the deny string
   starts (a lookahead such as `(?=acme)`, `\d*(?=acme)`), `the acme merger` went upstream as
@@ -149,7 +157,9 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   counts as an override used (`llm_redact_overrides_used_total`), not as a warning. Text the
   proxy cannot rewrite (a verbatim field, an upload's extracted text) counts the same way, against
   what the redaction would replace, also where an approval sends it as it is: approving values
-  never changes what is counted. What is redacted or refused, the
+  never changes what is counted: a warn-mode value an approved redact-mode value covers whole goes
+  upstream uncounted as a warning (the approved value counts as an override used). What is
+  redacted or refused (save where a deny string overlaps another value, below), the
   placeholders issued and the refusal overrides consulted are unchanged (a differential test
   against the redactor before the rule pins them). Where the
   proxy cannot rewrite the text (a

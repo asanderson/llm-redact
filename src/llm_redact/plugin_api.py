@@ -922,9 +922,12 @@ class ContentFacts:
       value here, an approved block in ``overridden_types`` — but a
       block-mode value that lost the overlap resolution to a value redacted
       in its place is neither refused nor approved: its rest and the
-      warn-mode value it hides go upstream counted nowhere. Approving
-      values never changes the count, also where the proxy cannot rewrite
-      the text and an approval sends it as it is.
+      warn-mode value it hides go upstream counted nowhere. The count is
+      taken against what the redaction would replace, so approving values
+      never changes it, also where the proxy cannot rewrite the text and an
+      approval sends it as it is: a warn-mode value an approved redact-mode
+      value covers whole then goes upstream uncounted here (the approved
+      value in ``overridden_types``).
     - ``unscanned_parts``: the binary upload file parts this request
       forwards unscanned (``[detection] binary_uploads = "forward"``, or an
       approved ``binary_upload`` override).

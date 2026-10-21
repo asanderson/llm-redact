@@ -4,24 +4,25 @@ replaced (docs/detection.md "Per-rule modes"; ``Redactor._count_warned``).
 The candidates are the configured detections the redaction read that are
 forwarded as sent, or would be — in warn or block mode (a block-mode value
 whether or not an override approves it), an llm finding as found, never a
-deny string — and, in text a scan sends upstream as it is, the values the
-overrides let through. Those with a character outside what the text's fate
-replaces are read by the overlap sweep — the llm findings after the other
-values, for what they send beyond them — and each warn-mode value it takes
-counts once. Counted once per text, before anything acts on the winners: a
-text refused for a block — in the winner loop or while resolving — counts
-what it counts with every block approved.
+deny string. Those with a character outside what ``redact_text`` replaces
+are read by the overlap sweep — the llm findings after the other values, for
+what they send beyond them — and each warn-mode value it takes counts once.
+Counted once per text, right after resolution, whatever becomes of the
+text: a text refused for a block — in the winner loop or while resolving —
+counts what it counts with every block approved, and a scan of text the
+proxy cannot rewrite counts against what ``redact_text`` would replace, also
+where an approval sends that text as it is.
 
 So a deny string counts alike configured or added wherever it replaces the
 same characters, an llm finding counts once however many pieces of it are
 sent (and when the additive sweep drops it, when part of it is sent) and
-never takes a warning from another detector's value, a value no override was
-asked about hides nothing, and a refusing value never changes what is
-counted, wherever it stands. Nothing
-else the redaction does changes: a differential against the redactor before
-the rule (tests/redactor_before_warn_rule.py, a frozen copy) pins output,
-refusals, issued placeholders, ``Redactor.counts``, the overrides consulted
-(in order), the recorder's calls and the string budget.
+never takes a warning from another detector's value, and neither an approval
+nor where a refusing value stands changes what is counted. Nothing else the
+redaction does changes: a differential against the redactor before the rule
+(tests/redactor_before_warn_rule.py, a frozen copy) pins output, refusals,
+issued placeholders, ``Redactor.counts``, the overrides consulted (in
+order), the recorder's calls and the string budget — where no deny string
+overlaps another value (those are joined now, tests/test_deny.py).
 """
 
 from __future__ import annotations
@@ -267,7 +268,9 @@ def test_a_block_an_added_deny_string_meets_counts_what_it_counts_approved(
     # matches in (Redactor._absorb), where the block-mode winner K refuses
     # the text while resolving. The warn-mode value W the added string cuts
     # counts, as with K approved — an overlay-added (final) block too, its
-    # refusal consulting nothing but unoverridable(), once, as before.
+    # refusal consulting nothing but unoverridable(), once, as before. In
+    # text the proxy cannot rewrite (a scan), the added deny string makes
+    # the refusal final before K is put to the overrides (said first).
     found = (_at(0, 3, "K"), _at(10, 16, "W"))
     asked = Asked()
     redactor = _redactor(
@@ -282,7 +285,8 @@ def test_a_block_an_added_deny_string_meets_counts_what_it_counts_approved(
         else:
             redactor.redact_text(TEXT)
     assert redactor.warn_counts == Counter({"W": 1})
-    assert asked.log == ([("unoverridable",)] if final else [("allows", "K", "ABC")])
+    said: list[tuple[str, ...]] = [("unoverridable",)] if scanning else []
+    assert asked.log == said + ([("unoverridable",)] if final else [("allows", "K", "ABC")])
 
 
 def test_a_value_forwarded_as_sent_hides_a_warn_value_it_overlaps() -> None:
@@ -403,7 +407,7 @@ def _spaced(start: int, end: int, kind: str, tier: int = 1, *, joins: bool = Fal
         ),
     ],
 )
-def test_a_value_no_override_was_asked_about_hides_nothing_in_a_scan(
+def test_a_scan_with_nothing_to_approve_counts_as_redact_text(
     text: str, found: tuple[Detection, ...]
 ) -> None:
     # Nothing to approve: the scan sends the text as it is and counts what
@@ -747,12 +751,12 @@ def test_a_refused_text_counts_what_it_counts_with_every_block_approved(
     except BlockedRequest:
         # As redact_text counts the text with every block approved...
         assert scanning.warn_counts == approved.warn_counts
-        # ...and as the scan does, unless it then sends the text as it is
-        # (nothing replaced: a text that goes upstream, not a refused one).
+        # ...and as the scan does with every block approved, whatever it then
+        # does with the text — refuse it for a value found, or send it as it
+        # is (counted against what redact_text would replace all the same).
         twin = _redactor(found, modes, added=strings).with_overrides(Blocks(modes))
-        scan = twin.scan(TEXT, redactable=redactable)
-        if redactable or scan.found:
-            assert scanning.warn_counts == twin.warn_counts
+        twin.scan(TEXT, redactable=redactable)
+        assert scanning.warn_counts == twin.warn_counts
 
 
 SPACED_SPANS = st.lists(
@@ -778,7 +782,7 @@ SPACED_SPANS = st.lists(
     approve=APPROVE,
     redactable=st.booleans(),
 )
-def test_a_scan_counts_the_values_its_text_sends_by_their_mode_or_an_approval(
+def test_a_scan_counts_against_what_redact_text_would_replace_approved_or_not(
     spans: list[tuple[int, int, str, int, bool, int]],
     added: list[tuple[int, int]],
     modes: dict[str, str],
@@ -947,7 +951,11 @@ def test_nothing_but_the_warn_counts_differs_from_before(
     # of a refused text consults nothing. Save where a configured deny
     # string overlaps another value: it is now joined with it
     # (tests/test_deny.py, test_joined_values.py), where the frozen copy let
-    # it win every overlap.
+    # it win every overlap. And in a scan of text the proxy cannot rewrite
+    # holding a deny string, the overrides are now told the refusal is
+    # final before any value is put to them (tests/test_deny.py): there the
+    # values asked must still be the same, in order, but when and how often
+    # it is said may differ.
     found = _apart(_found(spans))
     kw = {
         "added": _strings(added),
@@ -959,4 +967,13 @@ def test_nothing_but_the_warn_counts_differs_from_before(
     }
     now = _run(Redactor, call, found, modes, **dict(kw))
     then = _run(before.Redactor, call, found, modes, **dict(kw))
+    if call == "scan" and not redactable and (kw["added"] or any(not d.tier for d in found)):
+        now, then = _asked_only(now), _asked_only(then)
     assert now == then
+
+
+def _asked_only(run: Any) -> Any:
+    """``_run``'s record with the override log reduced to the values asked
+    (``allows``), in order."""
+    result, counts, log, *rest = run
+    return (result, counts, [entry for entry in log if entry[0] == "allows"], *rest)

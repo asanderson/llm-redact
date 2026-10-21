@@ -296,15 +296,20 @@ or through other overlapping values, like the values
   placeholder over their union typed after the one starting first (of
   those, the longest): with `deny = ["acme"]`, `mail bob@acme.example`
   goes upstream as `mail «EMAIL_001»`, and with `deny = ["acme", "mecorp"]`,
-  `acmecorp` as `«DENY_001»`.
+  `acmecorp` as `«DENY_001»`. The placeholder, the detection counts and
+  the type a refusal names are the first value's: a deny string of type
+  `PROJECT` inside an email that starts before it is counted as `EMAIL`.
 - A value in block mode among them refuses the request (an approved
   refusal override lets it through as sent where nothing redacted covers
   it) — also one that would lose the overlap to a value redacted in its
-  place without the deny string.
+  place without the deny string, and one the deny string covers whole.
 - A value forwarded as sent (warn mode) goes only where nothing redacted
   covers it.
+- An `llm` backend finding is never joined: as everywhere it keeps only what
+  lies outside the other values, so where a warn-mode value the join keeps
+  covers part of it, that part goes upstream with that value.
 
-Before this release a deny match won every overlap, and the rest of what it
+Before 1.13.0 a deny match won every overlap, and the rest of what it
 overlapped went upstream: `acme` inside an email sent
 `bob@«DENY_001».example`, two overlapping deny strings sent the rest of
 one of them, and a block-mode value a deny string overlapped was not
@@ -398,7 +403,9 @@ read after the other detectors' values, as overlap resolution reads it
   or sent as it is — every value that would refuse it approved by a
   refusal override. So approving values never changes what is counted
   there either: a redact-mode value an approval lets through still cuts a
-  warn-mode value it overlaps, which counts when part of it lies outside.
+  warn-mode value it overlaps, which counts when part of it lies outside —
+  and one it covers whole goes upstream uncounted as a warning, the
+  approved value counted as an override used.
 
 Block-mode rejections
 return a provider-shaped 400 whose message names the rule type, which

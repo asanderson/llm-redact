@@ -11,8 +11,10 @@ calls must be the same — only ``warn_counts`` may differ, save where a
 configured deny string overlaps another value: that copy lets the deny
 string win every overlap, the live redactor joins it with the value
 (tests/test_deny.py runs both over such texts: nothing the copy redacts or
-refuses is sent). Everything below this docstring is the file at that
-commit, byte for byte.
+refuses is sent). It predates ``DetectorPlan.detect(missed=)``: a
+precomputed table attached to it (``with_precomputed``) is unsupported (it
+calls the removed ``count_prefetch_miss``). Everything below this docstring
+is the file at that commit, byte for byte.
 """
 
 from bisect import bisect_left, bisect_right

@@ -10,8 +10,10 @@ still refuses; an added match beats only a value the policy forwards as sent
 (warn mode, an approved block). So the characters redacted with the added
 strings are a SUPERSET of those redacted without them, and every occurrence
 of an added string is redacted — pinned by the hypothesis property below.
-(Among the configured detectors a deny string wins every overlap, and the
-value it cut into left in part: a block never fired.)
+(Among the configured detectors a deny string is joined with the values it
+overlaps, ``Redactor._resolved``: a block-mode one among them refuses, also
+one that would lose its overlap to a value redacted in its place. It once
+won every overlap there, and the value it cut into left in part.)
 """
 
 from __future__ import annotations
@@ -536,10 +538,10 @@ def test_a_warn_value_a_joined_run_drops_is_counted_after_the_added_strings(
 def test_a_warn_value_a_configured_deny_string_cuts_is_counted_as_an_added_one_is(
     deny: tuple[str, ...], expected: str, warned: Counter[str]
 ) -> None:
-    # Among the configured detectors a deny string wins every overlap: the
-    # warn-mode value loses it, and what of it lies outside the deny strings
-    # is sent as it was — a warning, once, exactly as when an access gate
-    # adds the same strings: the same bytes upstream, the same count.
+    # Among the configured detectors a deny string is joined with the
+    # warn-mode value it overlaps: what of the value lies outside the deny
+    # strings is sent as it was — a warning, once, exactly as when an access
+    # gate adds the same strings: the same bytes upstream, the same count.
     text = f"mail {EMAIL} now"
     configured = DetectionConfig(
         modes=(("email", "warn"),), deny_strings=tuple(DenyEntry(value) for value in deny)
@@ -968,7 +970,9 @@ def test_a_scan_refuses_the_union_for_good() -> None:
     redactor = _redactor(added=("acme",)).with_overrides(approved)
     scan = redactor.scan(f"mail {EMAIL}")
     assert scan.found == Counter({"EMAIL": 1}) and not scan.overridden
-    assert approved.asked == [] and approved.final == 1
+    # Final (an idempotent flag: said before anything is asked, and again
+    # at the union).
+    assert approved.asked == [] and approved.final >= 1
 
 
 def test_a_scan_still_puts_a_lone_value_to_the_overrides() -> None:
@@ -976,7 +980,7 @@ def test_a_scan_still_puts_a_lone_value_to_the_overrides() -> None:
     redactor = _redactor(added=("zeta",)).with_overrides(approved)
     scan = redactor.scan(f"zeta {EMAIL}")
     assert scan.found == Counter({"DENY": 1}) and scan.overridden
-    assert approved.asked == [("EMAIL", EMAIL)] and approved.final == 1
+    assert approved.asked == [("EMAIL", EMAIL)] and approved.final >= 1
 
 
 def test_a_redactable_scan_finds_the_union_without_refusing_it() -> None:

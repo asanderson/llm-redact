@@ -1,5 +1,7 @@
 """User deny strings: detector, precedence, config surfaces."""
 
+from pathlib import Path
+
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -319,11 +321,7 @@ def test_a_deny_string_never_redacts_or_refuses_less_than_before(
     # every refusal either makes is made, every character either redacts
     # is redacted, and every deny string's characters are.
     text = " ".join(pieces)
-    deny = tuple(
-        dict.fromkeys(
-            text[a : a + n] for a, n in cuts if text[a : a + n].strip() and "«" not in text
-        )
-    )
+    deny = tuple(dict.fromkeys(text[a : a + n] for a, n in cuts if text[a : a + n].strip()))
     with_deny = DetectionConfig(
         deny_strings=tuple(DenyEntry(value) for value in deny), modes=tuple(modes.items())
     )
@@ -354,3 +352,41 @@ def _outcome(redactor: type, config: DetectionConfig, text: str) -> set[int] | N
     except (BlockedRequest, before.BlockedRequest):
         return None
     return replaced(text, output, vault)
+
+
+# ---- where the proxy cannot rewrite the text, a deny string is final ----
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "jane@corp.example",  # the block-mode email joined with the deny string
+        "jane@other.example and corp.example",  # met before it, apart from it
+    ],
+)
+def test_a_deny_string_in_unrewritable_text_mints_no_code(text: str, tmp_path: Path) -> None:
+    # A scan (a verbatim field, an upload's extracted text) the deny string
+    # refuses for good: the block-mode email met first refuses it too, but
+    # with no code — approving the email could never let the text through
+    # (it once minted one, whose every-time approval then forwarded the
+    # email as sent in other requests).
+    from llm_redact.detection.engine import build_modes
+    from llm_redact.overrides import OverrideScope, OverrideStore
+
+    config = DetectionConfig(deny_strings=(DenyEntry("corp.example"),), modes=(("email", "block"),))
+    store = OverrideStore(tmp_path / "overrides.db")
+    scope = OverrideScope(store, "")
+    redactor = Redactor(
+        build_detectors(config), InMemoryVault(), build_allowlist(config), modes=build_modes(config)
+    ).with_overrides(scope)
+    with pytest.raises(BlockedRequest, match="EMAIL"):
+        redactor.scan_text(text)
+    assert scope.refusal_code("block", "openai", "POST", "/v1/fine_tuning/jobs") is None
+    # Where the proxy rewrites the text, the email's refusal keeps its code.
+    scope = OverrideScope(store, "")
+    rewriting = Redactor(
+        build_detectors(config), InMemoryVault(), build_allowlist(config), modes=build_modes(config)
+    ).with_overrides(scope)
+    with pytest.raises(BlockedRequest, match="EMAIL"):
+        rewriting.redact_text(text)
+    assert scope.refusal_code("block", "openai", "POST", "/v1/chat/completions") is not None

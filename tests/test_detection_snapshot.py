@@ -145,18 +145,34 @@ def test_a_new_snapshot_is_the_one_way_to_change_them(name: str) -> None:
     assert builds == [SECOND] and _spent(prepared)
 
 
-def test_a_preview_reads_a_swapped_snapshot() -> None:
+def test_a_preview_reads_a_swapped_snapshot_the_static_redactor_after_an_apply() -> None:
+    # A swap reaches every reader of the snapshot — the preview here — but
+    # not the static session's own redactor, which static-mode requests
+    # redact with: it keeps the objects it was built over until an apply
+    # (any apply, one that changes nothing included) builds it anew.
     state = _state()
     snapshot = state.detection_snapshot
+
+    def static(text: str) -> str:
+        context = state.context_for(None, "POST", "/v1/chat/completions", {})
+        assert context.redactor is state.redactor
+        return context.redactor.redact_text(text)
+
     state.detection_snapshot = dataclasses.replace(
         snapshot, detectors=[*snapshot.detectors, _Holding(released=True)]
     )
     assert state.preview("from Ada")["detections"] == {"PERSON": 1}
+    assert static("from Ada") == "from Ada"
     state.detection_snapshot = dataclasses.replace(
         state.detection_snapshot, modes={"PERSON": "warn"}
     )
     answer = state.preview("from Ada")
     assert answer["warnings"] == {"PERSON": 1} and answer["detections"] == {}
+    state.detection_snapshot = dataclasses.replace(state.detection_snapshot, modes={})
+    assert static("from Ada") == "from Ada"
+    assert state.apply_config(state.config) == []
+    assert state.redactor.plan is state.detection_snapshot.plan
+    assert static("from Ada") == "from «PERSON_001»"
 
 
 def test_an_apply_swaps_the_whole_snapshot_or_keeps_it() -> None:

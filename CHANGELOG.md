@@ -241,7 +241,11 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   `ProxyState.detectors`, `allowlist` and `modes`, plain attributes before, are read-only views
   of that snapshot: code that assigned one (a plugin's tests adding a detector) assigns a new
   snapshot instead, `state.detection_snapshot = dataclasses.replace(state.detection_snapshot,
-  detectors=...)`, which derives its plan and overlay builds anew. Three optional
+  detectors=...)`, which derives its plan and overlay builds anew. That swap reaches every
+  reader of the snapshot (the preview, per-conversation and overlay contexts, a new realtime
+  connection's admission) but not the static session's own redactor (`state.redactor`, which
+  static-mode requests redact with), as an attribute assignment never did: it keeps the
+  objects it was built over until an `apply_config` builds it anew. Three optional
   members of `plugin_api.DashboardHost`, read with `getattr` (an older core lacks them), let a
   dashboard plugin use this: `preview_snapshot` (True), `prepare_config(candidate)` — the config
   check, raising the same errors as `validate_config`, keeping the NER models it loaded for a

@@ -1972,7 +1972,13 @@ class ProxyState:
     # (``dataclasses.replace(state.detection_snapshot, detectors=...)``
     # derives its plan, overlay builds and generation anew from the objects
     # it holds): a reader holding the old reference keeps it whole, and a
-    # build prepared against the old generation is no longer adopted.
+    # build prepared against the old generation is no longer adopted. Such
+    # a swap reaches every reader of the snapshot (the preview, per-
+    # conversation and overlay contexts, a realtime relay's admission) but
+    # NOT the static session's own redactor (``self.redactor``, in the
+    # static context every static-mode request without an overlay redacts
+    # with): it keeps the objects it was built over, and only
+    # ``apply_config`` builds it anew.
 
     @property
     def detectors(self) -> Sequence[Detector]:

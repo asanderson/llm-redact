@@ -79,7 +79,8 @@ class NerStats:
     # (ner_prefetch). On a request's path that is the event loop: every such
     # call held up every other request on the proxy for one string's
     # inference. A redaction preview (ProxyState.preview, which the
-    # llm-redact-pro dashboard runs on a worker thread of its own) has no
+    # llm-redact-pro dashboard runs on a worker thread of its own in its
+    # releases after 0.17.1, on the event loop in 0.17.1 and earlier) has no
     # prefetched results and is counted too. Zero while every request shape
     # is prefetched and nobody runs a preview.
     inline_calls: int = 0

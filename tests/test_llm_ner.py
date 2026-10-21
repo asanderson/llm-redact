@@ -983,6 +983,46 @@ def test_the_dashboard_preview_reports_an_unavailable_detector(
     assert "unavailable" not in state.preview(f"hi {NAME}")
 
 
+async def test_a_preview_moves_the_live_ner_counters_and_breaker_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The preview runs the LIVE detectors (ProxyState.preview, the
+    # DashboardHost contract): nothing of it reaches the request and
+    # detection counters, but each string it hands the llm backend is an
+    # inline call on /metrics, its server's failure an error, and that
+    # failure counts toward the circuit breaker every request shares — a
+    # request right after it meets the open breaker, its server not asked
+    # (a text of its own: a string the preview read is answered from the
+    # backend's cache, which the preview fills like a request).
+    server = FakeModelServer([(NAME, "person")], fail="timeout", fail_on="secret")
+    app, upstream = _app(monkeypatch, server, breaker_failures=1)
+    state = app.state.proxy
+
+    async def read() -> tuple[str, dict[str, Any]]:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=PROXY) as c:
+            metrics = (await c.get("/__llm-redact/metrics")).text
+            return metrics, (await c.get("/__llm-redact/status")).json()
+
+    assert state.preview(f"hi {NAME}")["detections"] == {"PERSON": 1}
+    metrics, status = await read()
+    assert 'llm_redact_ner_strings_total{backend="llm",outcome="scanned_whole"} 1' in metrics
+    assert 'llm_redact_ner_inline_calls_total{backend="llm"} 1' in metrics
+    assert "llm_redact_detections_total{" not in metrics
+    assert "llm_redact_requests_total{" not in metrics
+    assert status["detections_total"] == {}
+    assert state.preview(f"secret {NAME}")["unavailable"] == {"backend": "llm", "reason": "timeout"}
+    metrics, status = await read()
+    assert 'llm_redact_ner_errors_total{backend="llm"} 1' in metrics
+    assert 'llm_redact_ner_breaker_opens_total{backend="llm"} 1' in metrics
+    assert status["detection"]["ner"]["backends"]["llm"]["breaker"]["state"] == "open"
+    assert "llm_redact_requests_total{" not in metrics
+    asked = len(server.asked)
+    response = await _chat(app, f"hello {NAME}")
+    assert response.status_code == 503, response.text
+    assert upstream.bodies == [] and len(server.asked) == asked
+    refused_once(state, "detector_unavailable", "openai")
+
+
 def test_the_cli_preview_exits_1_when_a_detector_is_unavailable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

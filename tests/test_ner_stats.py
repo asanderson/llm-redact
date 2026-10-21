@@ -535,7 +535,12 @@ def test_every_definition_of_the_inline_counter_counts_a_preview() -> None:
     # llm_redact_ner_inline_calls_total says both: the /metrics HELP text,
     # the metrics reference, the NER counter table and the dashboard panel
     # (the first three once said every inline call held up the event loop,
-    # beside a panel saying a preview counts off it).
+    # beside a panel saying a preview counts off it). And which dashboard
+    # runs it where: llm-redact-pro 0.17.1 — which its floor dependency
+    # still installs beside this core — runs the preview on the event loop,
+    # only its later releases on a worker thread (a definition saying "its
+    # own worker thread" alone read a preview holding up every request as
+    # harmless).
     from llm_redact.metrics import Metrics
 
     text = Metrics("0").render(
@@ -569,7 +574,36 @@ def test_every_definition_of_the_inline_counter_counts_a_preview() -> None:
     for where, definition in definitions.items():
         for phrase in ("by the redaction itself", "request's path", "event loop", "preview"):
             assert phrase in definition, (where, phrase)
-        assert "worker thread" in definition.split("preview", 1)[1], where
+        clause = definition.split("preview", 1)[1]
+        for phrase in ("worker thread", "event loop", "after 0.17.1", "0.17.1 and earlier"):
+            assert phrase in clause, (where, phrase)
+
+
+def _flat(text: str | None) -> str:
+    return " ".join((text or "").split())
+
+
+def test_every_preview_contract_says_the_live_ner_counters_count_it() -> None:
+    # A preview runs the LIVE detectors (the status test above counts its
+    # string as scanned and inline): the DashboardHost contract and
+    # ProxyState.preview once said it wrote no metrics, beside a HELP text
+    # and a panel saying it is counted. Each now says what it leaves alone
+    # (the live vault, the audit, the request and detection counters) and
+    # what moves as for a request: the NER coverage counters and the llm
+    # backend's circuit breaker (test_llm_ner.py runs both).
+    from llm_redact import plugin_api
+    from llm_redact.proxy import ProxyState
+
+    host = _flat(plugin_api.DashboardHost.__doc__)
+    contracts = {
+        "DashboardHost": host[host.index("``preview`` runs") :].split(" OPTIONAL members", 1)[0],
+        "ProxyState.preview": _flat(ProxyState.preview.__doc__),
+    }
+    for where, contract in contracts.items():
+        for phrase in ("live vault", "audit", "llm_redact_ner_", "inline call", "breaker"):
+            assert phrase in contract, (where, phrase)
+        assert "metrics or audit write" not in contract, where
+        assert "metrics and audit are never touched" not in contract, where
 
 
 def test_the_ner_families_are_core_families() -> None:

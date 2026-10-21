@@ -2424,7 +2424,13 @@ class ProxyState:
     def preview(self, text: str) -> dict[str, Any]:
         """Run the LIVE detectors/allowlist/modes over ``text`` on a
         throwaway vault with fresh counters: no upstream request, and the
-        live vault, metrics and audit are never touched. Warn-mode values
+        live vault, the audit and the request and detection counters are
+        never touched. The detectors themselves are the live ones, so they
+        count the preview's strings as a request's: the NER coverage
+        counters (``llm_redact_ner_*`` on /metrics, /status
+        ``detection.ner``; each string an inline call, ``DetectorPlan``
+        runs it itself) and the llm backend's circuit breaker (its model
+        server's failures count toward opening it). Warn-mode values
         stay in ``redacted`` — a real request forwards them (honest); a
         block-mode match reports its type only, never the value; a detector
         that could not read the text (the llm backend's server failing,

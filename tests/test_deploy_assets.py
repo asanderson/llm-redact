@@ -155,16 +155,67 @@ def _charted_series(expr: str) -> str:
     return re.sub(r"\[\d+[smh]\]", "[window]", series)
 
 
-# Field overrides that change how a series is drawn or whether it is drawn
-# at all: its color, and Grafana's "Hide in area" (legend, tooltip, graph).
-_SERIES_LOOKS = frozenset({"color", "custom.hideFrom"})
+# Field override properties that only label a series: its unit, its
+# decimals, its legend name. Every other property an override sets can
+# change whether the series it reaches is seen as charted — its color,
+# Grafana's "Hide in area" (custom.hideFrom) with a flag set, how it is
+# drawn (custom.lineWidth and custom.fillOpacity at 0, custom.drawStyle
+# points with custom.pointSize 0, custom.transform), an axis bound.
+_SERIES_LABELS = frozenset({"unit", "decimals", "displayName"})
+
+
+def _hides(flags: Any) -> bool:
+    """Whether a "Hide in area" value hides the series anywhere: a flag set
+    (a Grafana export writes all three, the false ones included), or not the
+    mapping of flags it should be."""
+    return not isinstance(flags, dict) or any(flags.values())
+
+
+def _restyles(prop: dict[str, Any]) -> bool:
+    """Whether a field override property can recolor, hide or stop drawing
+    the series it reaches: anything but a label (_SERIES_LABELS), and a
+    "Hide in area" only with a flag set."""
+    if prop["id"] == "custom.hideFrom":
+        return _hides(prop.get("value"))
+    return prop["id"] not in _SERIES_LABELS
+
+
+def _unseen(defaults: dict[str, Any]) -> str | None:
+    """Why a panel's field defaults would leave its series unseen, else
+    None: a "Hide in area" flag set; a transform (negative-Y draws a series
+    upside down, constant replaces its values); nothing to draw (a line or
+    bars neither stroked nor filled, points of size 0, another draw style);
+    or an axis bound cutting off what an alert fires on (a fixed maximum, a
+    minimum above zero)."""
+    custom = defaults.get("custom", {})
+    if "hideFrom" in custom and _hides(custom["hideFrom"]):
+        return "custom.hideFrom"
+    if custom.get("transform") is not None:
+        return "custom.transform"
+    style = custom.get("drawStyle", "line")
+    if style == "points":
+        if custom.get("pointSize", 5) <= 0:
+            return "custom.pointSize"
+    elif style in ("line", "bars"):
+        if custom.get("lineWidth", 1) <= 0 and custom.get("fillOpacity", 0) <= 0:
+            return "custom.lineWidth"
+    else:
+        return "custom.drawStyle"
+    if defaults.get("max") is not None:
+        return "max"
+    if (defaults.get("min") or 0) > 0:
+        return "min"
+    return None
 
 
 def _drawn_in_the_panel_color(panel: dict[str, Any], target: dict[str, Any]) -> None:
-    """Assert ``target``'s series is drawn, in ``panel``'s default color.
+    """Assert ``target``'s series is drawn, visibly, in ``panel``'s default
+    color.
 
-    An override may recolor or hide only OTHER queries' series, named by
-    their refId (``byFrameRefID``): one matching fields by name, by a
+    The panel's field defaults must draw it (``_unseen``). An override that
+    can change how a series looks (``_restyles``: anything but a unit, the
+    decimals or a legend name) may reach only OTHER queries' series, named
+    by their refId (``byFrameRefID``): one matching fields by name, by a
     regular expression, by type or by value (what Grafana's editor offers
     first, and exports as is) can reach this series whatever its refId, and
     so can one naming this target's own refId. Neither a transformation (it
@@ -173,9 +224,10 @@ def _drawn_in_the_panel_color(panel: dict[str, Any], target: dict[str, Any]) -> 
     where = (panel["title"], target["refId"])
     assert not target.get("hide"), where
     assert not panel.get("transformations"), where
-    assert not panel["fieldConfig"]["defaults"].get("custom", {}).get("hideFrom"), where
+    unseen = _unseen(panel["fieldConfig"]["defaults"])
+    assert unseen is None, (where, unseen)
     for override in panel["fieldConfig"]["overrides"]:
-        if not {prop["id"] for prop in override["properties"]} & _SERIES_LOOKS:
+        if not any(_restyles(prop) for prop in override["properties"]):
             continue
         matcher = override["matcher"]
         assert matcher["id"] == "byFrameRefID", (where, matcher)
@@ -190,11 +242,14 @@ def test_the_ner_coverage_row_charts_every_ner_family() -> None:
     # Every llm_redact_ner_* family the core renders (CORE_METRIC_FAMILIES
     # is pinned to the rendered set by test_metrics_surfaces.py) is charted
     # in the NER coverage row, and nowhere else: a family a new release
-    # adds fails here until it is on the dashboard.
+    # adds fails here until it is on the dashboard. A hidden query charts
+    # nothing (Grafana never runs it), so none on the row is hidden.
     from llm_redact.metrics import CORE_METRIC_FAMILIES
 
     families = {name for name in CORE_METRIC_FAMILIES if name.startswith("llm_redact_ner_")}
     row = _row_panels("NER coverage")
+    hidden = [(p["title"], t["refId"]) for p in row for t in p["targets"] if t.get("hide")]
+    assert not hidden, hidden
     charted = [m for p in row for t in p["targets"] for m in _referenced_metrics(t["expr"])]
     assert set(charted) == families, set(charted) ^ families
     elsewhere = [
@@ -310,6 +365,31 @@ def _override(matcher: str, options: Any, prop: str, value: Any) -> dict[str, An
 
 _GREEN = {"mode": "fixed", "fixedColor": "green"}
 _HIDDEN = {"legend": True, "tooltip": True, "viz": True}
+_SHOWN = {"legend": False, "tooltip": False, "viz": False}
+# The field defaults Grafana 10/11 writes into every timeseries panel it
+# exports, whatever the panel set: a 1-pixel line, no fill, every "Hide in
+# area" flag false (_SHOWN), the rest the editor's defaults.
+_GRAFANA_EXPORT_CUSTOM: dict[str, Any] = {
+    "axisBorderShow": False,
+    "axisCenteredZero": False,
+    "axisColorMode": "text",
+    "axisLabel": "",
+    "axisPlacement": "auto",
+    "barAlignment": 0,
+    "drawStyle": "line",
+    "fillOpacity": 0,
+    "gradientMode": "none",
+    "hideFrom": _SHOWN,
+    "insertNulls": False,
+    "lineInterpolation": "linear",
+    "lineWidth": 1,
+    "pointSize": 5,
+    "scaleDistribution": {"type": "linear"},
+    "showPoints": "auto",
+    "spanNulls": False,
+    "stacking": {"group": "A", "mode": "none"},
+    "thresholdsStyle": {"mode": "off"},
+}
 
 
 @pytest.mark.parametrize(
@@ -382,6 +462,87 @@ _HIDDEN = {"legend": True, "tooltip": True, "viz": True}
             True,
             id="unit-by-name",
         ),
+        # A series drawn with nothing to see: no line and no fill, points
+        # of size 0, flipped below the axis, cut off by a fixed maximum —
+        # by an override reaching it (by pattern, by name, by its own refId)
+        # or by the panel's defaults.
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                {
+                    "matcher": {"id": "byRegexp", "options": ".*"},
+                    "properties": [
+                        {"id": "custom.lineWidth", "value": 0},
+                        {"id": "custom.fillOpacity", "value": 0},
+                    ],
+                }
+            ),
+            False,
+            id="undrawn-by-pattern",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byFrameRefID", "A", "custom.lineWidth", 0)
+            ),
+            False,
+            id="line-width-by-its-refid",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byName", "llm server errors", "custom.transform", "negative-Y")
+            ),
+            False,
+            id="flipped-by-name",
+        ),
+        pytest.param(
+            lambda panel: (
+                panel["fieldConfig"]["defaults"]
+                .setdefault("custom", {})
+                .update(lineWidth=0, fillOpacity=0)
+            ),
+            False,
+            id="undrawn-by-default",
+        ),
+        pytest.param(
+            lambda panel: (
+                panel["fieldConfig"]["defaults"]
+                .setdefault("custom", {})
+                .update(drawStyle="points", pointSize=0)
+            ),
+            False,
+            id="points-of-size-zero-by-default",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["defaults"].update(max=0),
+            False,
+            id="clipped-by-default",
+        ),
+        # What a Grafana export writes and hides nothing: every "Hide in
+        # area" flag false, in the defaults or an override, and the
+        # timeseries defaults it adds to every panel; another query's line
+        # thinned by its refId.
+        pytest.param(
+            lambda panel: (
+                panel["fieldConfig"]["defaults"]
+                .setdefault("custom", {})
+                .update(_GRAFANA_EXPORT_CUSTOM)
+            ),
+            True,
+            id="exported-defaults",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byRegexp", ".*", "custom.hideFrom", _SHOWN)
+            ),
+            True,
+            id="exported-hide-flags-off",
+        ),
+        pytest.param(
+            lambda panel: panel["fieldConfig"]["overrides"].append(
+                _override("byFrameRefID", "B", "custom.lineWidth", 0)
+            ),
+            True,
+            id="another-query-undrawn",
+        ),
     ],
 )
 def test_no_override_can_recolor_or_hide_the_series_an_ner_alert_reads(
@@ -421,6 +582,7 @@ def test_the_ner_prefetch_counters_are_charted() -> None:
     for target in panel["targets"]:
         (family,) = _referenced_metrics(target["expr"])
         assert target["expr"] == f"sum by (backend) (rate({family}[5m]))", target
+        assert not target.get("hide"), target  # Grafana never runs a hidden query
     strings = next(p for p in row if p["title"] == "NER strings by backend and outcome")
     assert panel["gridPos"]["y"] == strings["gridPos"]["y"]
     description = panel["description"]
@@ -429,6 +591,72 @@ def test_the_ner_prefetch_counters_are_charted() -> None:
     assert "docs/how-it-works.md" in description
     assert "LlmRedact" not in description  # no alert reads them: not a warning panel
     assert panel["fieldConfig"]["defaults"].get("color") is None
+
+
+def _reexported(panels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``panels`` as a Grafana export writes them back: every timeseries
+    panel's field defaults filled in (_GRAFANA_EXPORT_CUSTOM), what it set
+    kept."""
+    for panel in panels:
+        if panel["type"] == "timeseries":
+            custom = panel["fieldConfig"]["defaults"].setdefault("custom", {})
+            for key, value in _GRAFANA_EXPORT_CUSTOM.items():
+                custom.setdefault(key, value)
+    return panels
+
+
+def test_a_grafana_re_export_keeps_the_series_checks_green(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Editing the dashboard in Grafana and exporting it writes the editor's
+    # field defaults into every timeseries panel — "Hide in area" with
+    # every flag false among them, which hides nothing. The checks that an
+    # alert's series is drawn read those defaults: they once took the
+    # all-false flags for hiding, and an export failed five of them.
+    panels = _reexported(_dashboard_panels())
+    monkeypatch.setitem(globals(), "_dashboard_panels", lambda: panels)
+    test_the_ner_coverage_row_charts_every_ner_family()
+    test_the_ner_rules_series_are_charted_in_the_warning_color()
+    test_the_ner_model_server_has_a_panel_of_its_own()
+    test_the_ner_prefetch_counters_are_charted()
+    test_scan_capture_panels_read_what_the_alert_reads()
+
+
+def _families(prefix: str) -> list[str]:
+    from llm_redact.metrics import CORE_METRIC_FAMILIES
+
+    return sorted(name for name in CORE_METRIC_FAMILIES if name.startswith(prefix))
+
+
+_PREFETCH_FAMILIES = ("llm_redact_ner_inline_calls_total", "llm_redact_ner_prefetch_misses_total")
+
+
+@pytest.mark.parametrize("family", _families("llm_redact_ner_") + _families("llm_redact_scan_"))
+def test_a_hidden_query_charts_nothing(monkeypatch: pytest.MonkeyPatch, family: str) -> None:
+    # Grafana never runs a query hidden in its editor (the eye toggle,
+    # exported as "hide": true): its panel shows nothing of the family. So
+    # every check that a family is charted fails once each query reading it
+    # is hidden — those checks once counted a hidden query as charted.
+    panels = _dashboard_panels()
+    hidden = [
+        target
+        for panel in panels
+        for target in panel.get("targets", [])
+        if family in _referenced_metrics(target["expr"])
+    ]
+    assert hidden, family
+    for target in hidden:
+        target["hide"] = True
+    monkeypatch.setitem(globals(), "_dashboard_panels", lambda: panels)
+    if family.startswith("llm_redact_scan_"):
+        checks: list[Callable[[], None]] = [test_scan_capture_panels_read_what_the_alert_reads]
+    else:
+        checks = [test_the_ner_coverage_row_charts_every_ner_family]
+    if family in _PREFETCH_FAMILIES:
+        checks.append(test_the_ner_prefetch_counters_are_charted)
+    for check in checks:
+        with pytest.raises(AssertionError):
+            check()
 
 
 def test_dropped_scan_captures_have_an_alert() -> None:
@@ -466,6 +694,7 @@ def test_scan_capture_panels_read_what_the_alert_reads() -> None:
     for family, found in by_family.items():
         assert len(found) == 1, family
         panel = found[0]
+        assert not any(t.get("hide") for t in panel["targets"]), family  # never run
         assert panel["gridPos"]["y"] == row["gridPos"]["y"] + row["gridPos"]["h"], family
         assert family in panel["description"]
         assert "only while a plugin registers a scan sink" in panel["description"]

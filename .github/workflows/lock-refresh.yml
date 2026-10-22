@@ -1,0 +1,121 @@
+name: Nightly lock refresh
+
+# The whole-lock fallback to Dependabot (.github/dependabot.yml): every night,
+# upgrade every package in uv.lock — transitive dependencies included — within
+# what pyproject.toml allows (the floors and caps there are never touched), and
+# open or update ONE pull request on the fixed branch `deps/lock-refresh`. A
+# night with nothing new leaves the branch and the PR as they are; a PR left
+# open is refreshed in place the next night.
+#
+# torch is held at its locked version: its CPU wheels' SHA-256 live in
+# scripts/cpu_torch.py (CPU_WHEELS, pinned to uv.lock's torch by
+# tests/test_cpu_torch_script.py), so a torch bump is a manual change.
+#
+# CI on the PR: a pull request opened with the workflow's own GITHUB_TOKEN
+# triggers no workflows. Store a fine-grained personal access token (this
+# repository; Contents + Pull requests read/write) as the repository secret
+# DEPS_PR_TOKEN and the PR runs CI like any other; without it the PR still
+# opens, and CI runs once someone pushes to the branch or closes and reopens
+# the PR. The repository setting "Allow GitHub Actions to create and approve
+# pull requests" must be on for the GITHUB_TOKEN fallback.
+
+on:
+  schedule:
+    - cron: "37 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    name: refresh uv.lock
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      # Space-separated package names kept at their locked versions.
+      HELD: torch
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - name: Upgrade every locked package but the held ones
+        run: |
+          cp uv.lock "$RUNNER_TEMP/uv.lock.before"
+          mapfile -t args < <(python3 - <<'PY'
+          import os
+          import tomllib
+
+          held = set(os.environ["HELD"].split())
+          with open("uv.lock", "rb") as f:
+              lock = tomllib.load(f)
+          for package in lock["package"]:
+              # The project itself (an editable source) and the held packages
+              # keep their locked versions.
+              if "editable" in package.get("source", {}) or package["name"] in held:
+                  continue
+              print("--upgrade-package")
+              print(package["name"])
+          PY
+          )
+          uv lock "${args[@]}"
+
+      - name: Summarize the version changes
+        run: |
+          python3 - "$RUNNER_TEMP/uv.lock.before" uv.lock > "$RUNNER_TEMP/pr-body.md" <<'PY'
+          import sys
+          import tomllib
+
+
+          def versions(path):
+              with open(path, "rb") as f:
+                  lock = tomllib.load(f)
+              return {
+                  p["name"]: p.get("version", "")
+                  for p in lock["package"]
+                  if "editable" not in p.get("source", {})
+              }
+
+
+          before, after = versions(sys.argv[1]), versions(sys.argv[2])
+          rows = []
+          for name in sorted(before.keys() | after.keys()):
+              old, new = before.get(name), after.get(name)
+              if old != new:
+                  rows.append(f"| `{name}` | {old or '(new)'} | {new or '(removed)'} |")
+          print("Nightly whole-lock refresh: every package in `uv.lock`, transitive")
+          print("dependencies included, upgraded within the bounds `pyproject.toml`")
+          print("sets (those bounds are unchanged). Held at its locked version: `torch`")
+          print("(its CPU wheels' SHA-256 live in `scripts/cpu_torch.py`).")
+          print()
+          if rows:
+              print("| Package | Locked | Now |")
+              print("|---|---|---|")
+              print("\n".join(rows))
+          else:
+              print("No version changed (lock metadata only).")
+          print()
+          print("Review the changelogs of anything above before merging; CI's")
+          print("dependency audit (pip-audit) checks the new pins.")
+          PY
+          cat "$RUNNER_TEMP/pr-body.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or update the pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ secrets.DEPS_PR_TOKEN || github.token }}
+          branch: deps/lock-refresh
+          delete-branch: true
+          add-paths: uv.lock
+          commit-message: "deps: nightly uv.lock refresh"
+          title: "deps: nightly uv.lock refresh"
+          body-path: ${{ runner.temp }}/pr-body.md
+          labels: dependencies

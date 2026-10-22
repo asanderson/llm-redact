@@ -104,6 +104,13 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   install` already resolves the newest `certifi`.
 
 ### Changed
+- **Dependency updates arrive as nightly pull requests.** Dependabot (`.github/dependabot.yml`)
+  now checks `uv.lock`, the Dockerfile's base images and the GitHub Actions every night (it
+  watched only the actions, weekly), lock-file only: the floors in `pyproject.toml` stay as
+  written. A new nightly workflow (`.github/workflows/lock-refresh.yml`) refreshes the whole
+  lock, transitive dependencies included, as one pull request on `deps/lock-refresh`. torch is
+  held in both: a torch bump needs its CPU wheels recorded in `scripts/cpu_torch.py`. For CI to
+  run on the workflow's pull request, store a token as the `DEPS_PR_TOKEN` repository secret.
 - **The `hf` backend's default model is now `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`**
   (Apache-2.0; `microsoft/deberta-v3-small` fine-tuned on NVIDIA Nemotron-PII), replacing
   `dslim/bert-base-NER` (see Upgrading). Asked for `PERSON`, the default entities, it finds more

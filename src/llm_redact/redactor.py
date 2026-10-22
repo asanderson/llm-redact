@@ -528,13 +528,11 @@ class Redactor:
         order) — the heavy ones taken from the precomputed table as
         ``_detect`` takes them — handed to ``recorder`` with ``text``, then
         resolved exactly as ``_winners`` resolves them."""
-        row = None
-        missed = False
         table = self._precomputed
-        if table is not None:
-            row = table.get(text)
-            missed = row is None
-        found = self._plan.detect_sourced(text, self._allowlist, row, missed=missed)
+        row = None if table is None else table.get(text)
+        found = self._plan.detect_sourced(
+            text, self._allowlist, row, missed=table is not None and row is None
+        )
         added = (
             self._added_deny.detect_sourced(text, self._allowlist)
             if self._added_deny is not None
@@ -554,7 +552,7 @@ class Redactor:
         found: list[Detection],
         added: list[Detection] | None,
         *,
-        unrewritable: bool = False,
+        unrewritable: bool,
     ) -> list[Detection]:
         """The detections redaction acts on in ``text`` (``_resolution``),
         the warn-mode values it forwards as sent counted once, right after

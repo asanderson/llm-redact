@@ -357,6 +357,7 @@ def _outcome(redactor: type, config: DetectionConfig, text: str) -> set[int] | N
 # ---- where the proxy cannot rewrite the text, a deny string is final ----
 
 
+@pytest.mark.parametrize("recorded", [False, True], ids=["plain", "recorded"])
 @pytest.mark.parametrize(
     "text",
     [
@@ -364,7 +365,9 @@ def _outcome(redactor: type, config: DetectionConfig, text: str) -> set[int] | N
         "jane@other.example and corp.example",  # met before it, apart from it
     ],
 )
-def test_a_deny_string_in_unrewritable_text_mints_no_code(text: str, tmp_path: Path) -> None:
+def test_a_deny_string_in_unrewritable_text_mints_no_code(
+    text: str, recorded: bool, tmp_path: Path
+) -> None:
     # A scan (a verbatim field, an upload's extracted text) the deny string
     # refuses for good: the block-mode email met first refuses it too, but
     # with no code — approving the email could never let the text through
@@ -379,6 +382,8 @@ def test_a_deny_string_in_unrewritable_text_mints_no_code(text: str, tmp_path: P
     redactor = Redactor(
         build_detectors(config), InMemoryVault(), build_allowlist(config), modes=build_modes(config)
     ).with_overrides(scope)
+    if recorded:  # a scan sink's capture: the recorder path resolves alike
+        redactor = redactor.with_recorder(_NoRecord())
     with pytest.raises(BlockedRequest, match="EMAIL"):
         redactor.scan_text(text)
     assert scope.refusal_code("block", "openai", "POST", "/v1/fine_tuning/jobs") is None
@@ -390,3 +395,10 @@ def test_a_deny_string_in_unrewritable_text_mints_no_code(text: str, tmp_path: P
     with pytest.raises(BlockedRequest, match="EMAIL"):
         rewriting.redact_text(text)
     assert scope.refusal_code("block", "openai", "POST", "/v1/chat/completions") is not None
+
+
+class _NoRecord:
+    """A scan sink's recorder that keeps nothing (``Redactor.with_recorder``)."""
+
+    def record(self, text: str, found: object) -> None:
+        pass

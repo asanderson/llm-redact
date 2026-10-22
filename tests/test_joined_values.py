@@ -853,7 +853,7 @@ def test_a_dropped_warn_mode_value_is_counted_only_when_part_of_it_goes_upstream
     approving = Redactor([], InMemoryVault(), Allowlist(), modes=modes).with_overrides(Every())
     passing = approving._resolved(text, detections)
     try:
-        winners = redactor._settled(text, detections, None)
+        winners = redactor._settled(text, detections, None, unrewritable=False)
     except BlockedRequest:
         winners = passing
     else:
@@ -995,7 +995,7 @@ def test_an_additive_detection_never_joins(
         assert set(range(d.start, d.end)) <= covered
     # The warnings follow the rule: an llm finding read as found, a
     # warn-mode value one redacts the rest of not counted.
-    assert redactor._settled(text, both, None) == winners
+    assert redactor._settled(text, both, None, unrewritable=False) == winners
     assert redactor.warn_counts == expected_warnings(both, modes, _replaced(winners, modes))
 
 

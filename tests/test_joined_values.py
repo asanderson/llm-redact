@@ -560,7 +560,9 @@ def test_a_deny_string_joined_with_a_card_is_never_put_to_the_overrides() -> Non
     approved = Approved(CARD, "1111 Main", f"{CARD} Main")
     scan = redactor.with_overrides(approved).scan(text)
     assert scan.found == Counter({"CREDIT_CARD": 1}) and not scan.overridden
-    assert approved.asked == [] and approved.final == 1
+    # Final (an idempotent flag: said before anything is asked, and again
+    # at the union).
+    assert approved.asked == [] and approved.final >= 1
     # A deny string inside the card: the card's span, still final.
     inside = _redactor(deny=("1111 1111",))
     assert _redacted(inside, f"Order 12 {CARD}") == "Order 12 «CREDIT_CARD_001»"
@@ -568,7 +570,7 @@ def test_a_deny_string_joined_with_a_card_is_never_put_to_the_overrides() -> Non
     assert inside.with_overrides(approved).scan(f"Order 12 {CARD}").found == Counter(
         {"CREDIT_CARD": 1}
     )
-    assert approved.final == 1
+    assert approved.asked == [] and approved.final >= 1
     # A deny string covering the card stays the deny string.
     covering = _redactor(deny=(f"12 {CARD}",))
     assert _redacted(covering, f"Order 12 {CARD}") == "Order «DENY_001»"

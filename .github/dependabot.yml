@@ -1,12 +1,58 @@
-# Keep the SHA-pinned GitHub Actions current: dependabot updates the pinned
-# SHA and its trailing version comment together. Python deps are handled by
-# uv.lock plus the weekly gating pip-audit job, so only actions are watched.
+# Nightly dependency-update pull requests. Three ecosystems:
+#
+# - uv: the committed uv.lock. `lockfile-only` keeps Dependabot out of
+#   pyproject.toml: the floors there are deliberate and documented
+#   (docs/dependencies.md — e.g. uvicorn>=0.50.1), and a published library
+#   must not raise its users' floors just because a newer release exists.
+#   torch is held: its CPU wheels' SHA-256 live in scripts/cpu_torch.py
+#   (CPU_WHEELS, pinned to uv.lock's torch by tests/test_cpu_torch_script.py),
+#   so a torch bump is a manual change that records the new wheels with it.
+# - docker: the Dockerfile's base images.
+# - github-actions: the SHA-pinned actions; Dependabot updates the pinned SHA
+#   and its trailing version comment together.
+#
+# The weekly gating pip-audit job (ci.yml) still audits whatever uv.lock pins;
+# .github/workflows/lock-refresh.yml is the whole-lock fallback (transitive
+# dependencies included) that opens a single PR when this misses something.
+#
+# The cooldown keeps a release out of a PR until it has been public for a few
+# days (a supply-chain buffer for a security tool); it never delays security
+# updates.
 version: 2
 updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: cron
+      cronjob: "23 3 * * *"
+      timezone: Etc/UTC
+    versioning-strategy: lockfile-only
+    ignore:
+      - dependency-name: torch
+    groups:
+      python-minor-patch:
+        update-types: [minor, patch]
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: cron
+      cronjob: "23 3 * * *"
+      timezone: Etc/UTC
+    cooldown:
+      default-days: 3
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: cron
+      cronjob: "23 3 * * *"
+      timezone: Etc/UTC
     groups:
       actions:
         patterns: ["*"]
+    cooldown:
+      default-days: 3

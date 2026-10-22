@@ -1,29 +1,32 @@
-"""The warnings the counting rule predicts for a redacted text, worked out
-without the redactor's own helpers.
+"""The warnings the counting rule predicts for a text, worked out without the
+redactor's own helpers.
 
-A warn-mode value is forwarded as sent and counted as a warning. One the
-redaction acts on (a winner, left whole as sent) is counted by
-``redact_text`` and ``scan``. Any other is a warning when the redaction CUT
-it: some of its characters were replaced by a placeholder and some are still
-sent — whatever it lost to: a deny string (configured, or added by an access
-gate), a value redacted in its place (a longer one, an earlier one), a
-joined run, an added deny string taking a winner's place, an llm finding
-redacting part of it. One the placeholders cover whole sends nothing; one
-that lost only to a value forwarded as sent has no character replaced:
-neither is a warning. Of the cut values overlapping one another, only the
-first the start-ordered overlap sweep reads counts (two detectors finding
-one value count once). A deny string takes no mode; an llm finding
-(``ADDITIVE_TIER``) is cut around the others, never dropped, so it counts
-only through the pieces the resolution keeps of it. Which characters were
-replaced is read from the output itself (``replaced``). Where the proxy
-cannot rewrite the text (``Redactor.scan``: a verbatim field, an upload's
-extracted text) nothing is replaced: a value is cut there as the redaction
-would cut it — the text is refused (or, convert mode, redacted after all) —
-unless the text goes upstream as sent, every value that would refuse it
-approved: then no value is cut (``scanned``). A text refused for a
-block-mode value counts the cut values all the same, and the warn-mode
-winners before it (``refused_at``): the redaction stops there. Shared by
-tests/test_joined_values.py and tests/test_overlay_deny.py.
+The rule (docs/detection.md "Per-rule modes"): a text's warnings depend only
+on the values found in it and on the characters its fate replaces by
+placeholders. Its CANDIDATES are the configured detections the redaction
+read (allowlists applied) that are forwarded as sent, or would be: those in
+warn or block mode — a block-mode value whether or not an override approves
+it — never a deny string (configured; an added one or a union is no
+detection the configured detectors make), an llm finding (``ADDITIVE_TIER``)
+as found, never the pieces the resolution cuts of it. A candidate the
+replaced characters cover whole sends nothing and is dropped. The others are
+read as overlap resolution reads values, by a greedy sweep in the
+resolution's order (by start, the longest first, then by priority) that
+takes a value only where it overlaps none taken before it: every detector's
+values but the llm backend's first, then the llm findings, each read only
+where a character of it lies outside what is replaced and every value taken
+before (an llm finding never hides another detector's value). Each
+warn-mode value taken is one warning under its type.
+
+What is replaced is read from an output (``replaced``): ``redact_text``'s —
+of a text it refuses, the output of the same text with every refusing value
+approved, as a refused text counts what it would with them approved. A scan
+of text the proxy cannot rewrite (``Redactor.scan``) counts against it too,
+also where it sends the text as it is (every value that would refuse it
+approved): approving values never changes what is counted. ``sent_as_is``
+decides, from the winners, whether a scan sends its text as it is. Shared by
+tests/test_overlay_deny.py, tests/test_joined_values.py and
+tests/test_warn_counting.py.
 """
 
 from __future__ import annotations
@@ -34,6 +37,18 @@ from collections.abc import Collection, Mapping, Sequence
 from llm_redact.detection.base import ADDITIVE_TIER, Detection
 from llm_redact.placeholders import PLACEHOLDER_RE
 from llm_redact.vault import InMemoryVault
+
+
+class Every:
+    """An override check approving every value: a refused text's twin is
+    redacted under it, and what that twin replaces is what the refused text
+    counts against."""
+
+    def allows(self, detector_type: str, value: str) -> bool:
+        return True
+
+    def unoverridable(self) -> None:
+        return None
 
 
 def replaced(original: str, output: str, vault: InMemoryVault) -> set[int]:
@@ -55,108 +70,63 @@ def replaced(original: str, output: str, vault: InMemoryVault) -> set[int]:
     return positions
 
 
-def scanned(
+def sent_as_is(
     winners: Sequence[Detection],
     modes: Mapping[str, str],
     approved: Collection[str],
     *,
     redactable: bool,
-) -> set[int] | None:
-    """The positions the warn-mode values a scan of text the proxy cannot
-    rewrite (``Redactor.scan``) cuts are counted against, among ``winners``
-    (the values the resolution acts on, an access gate's added deny strings
-    taken in): the counterpart of what ``replaced`` reads from a redacted
-    text. The positions the redaction replaces (a deny string, a span
-    joining values, a value in redact mode) where the text is redacted
-    after all (``redactable``, convert mode) or refused — by the scan (a
-    value in block mode not approved) or by its caller (any other value
-    found) —, wherever in the text the refusing value is; none where the
-    text goes upstream as sent: not ``redactable``, and every value that
-    would refuse it approved (its value in ``approved``) — one in block or
-    redact mode, a span joining values (``Detection.members``) when each of
-    them is; one holding a deny string never, nor a deny string. A
-    warn-mode value never refuses."""
-    positions: set[int] = set()
-    sent = not redactable
+) -> bool:
+    """Whether a scan of text the proxy cannot rewrite (``Redactor.scan``)
+    sends it upstream as it is, with ``winners`` the values the resolution
+    acts on (an access gate's added deny strings taken in): not
+    ``redactable``, and every winner that would refuse it approved (its
+    value in ``approved``) — one in block or redact mode, a span joining
+    values (``Detection.members``) when each of them is; a deny string
+    never, nor a span holding one. A warn-mode value never refuses."""
+    if redactable:
+        return False
     for d in winners:
         mode = "redact" if d.tier == 0 else modes.get(d.detector_type, "redact")
-        if mode == "redact":
-            positions.update(range(d.start, d.end))
         if mode == "warn":
             continue
         values = d.members if d.tier == 0 else (d,)
         if not values or not all(v.tier != 0 and v.value in approved for v in values):
-            sent = False
-    return set() if sent else positions
+            return False
+    return True
 
 
-def refused_at(
-    winners: Sequence[Detection], modes: Mapping[str, str], approved: Collection[str]
-) -> int | None:
-    """Where a scan, and the redaction, of a text refuse it for a block-mode
-    value: the start of the first of ``winners`` (start-sorted, disjoint)
-    in block mode whose value is not in ``approved`` — the warn-mode
-    winners after it are never read — else None."""
-    for d in winners:
-        if d.tier and modes.get(d.detector_type) == "block" and d.value not in approved:
-            return d.start
-    return None
-
-
-def cut_warnings(
-    found: Sequence[Detection],
-    configured: Sequence[Detection],
-    modes: Mapping[str, str],
-    redacted: set[int],
-) -> Counter[str]:
-    """The warnings predicted for the warn-mode values the redaction cut:
-    among ``found`` (the configured detectors' detections, start-sorted,
-    the longest first, then by priority) — a deny string and an llm finding
-    aside — and the llm findings' pieces among the ``configured`` winners
-    (the resolution's without an access gate's added deny strings), a
-    warn-mode value with a character in ``redacted`` (the offsets finally
-    replaced, or refused for) and one outside it; of such values overlapping
-    one another, only the first the sweep takes counts."""
-    values = [d for d in found if d.tier not in (0, ADDITIVE_TIER)]
-    values += [d for d in configured if d.tier == ADDITIVE_TIER]
-    values.sort(key=lambda d: (d.start, -(d.end - d.start), d.priority))
-    counted: Counter[str] = Counter()
-    end = -1
-    for d in values:
-        if modes.get(d.detector_type) != "warn":
-            continue
-        span = set(range(d.start, d.end))
-        if not span & redacted:
-            continue  # a winner, or it lost only to values forwarded as sent
-        if span <= redacted:
-            continue  # sends nothing
-        if d.start >= end:
-            counted[d.detector_type] += 1
-            end = d.end
-    return counted
+def _order(d: Detection) -> tuple[int, int, int]:
+    return (d.start, -(d.end - d.start), d.priority)
 
 
 def expected_warnings(
     found: Sequence[Detection],
-    configured: Sequence[Detection],
     modes: Mapping[str, str],
     redacted: set[int],
-    *,
-    refused_at: int | None = None,
 ) -> Counter[str]:
-    """Every warning predicted for the text: one per warn-mode winner of
-    the ``configured`` resolution no character of which was replaced (left
-    whole as sent; an added deny string overlapping one cuts it instead) —
-    of a text refused for a block-mode value, one starting before it
-    (``refused_at``) —, plus those the redaction cut (``cut_warnings``).
-    ``redacted``: the positions replaced (``replaced``), or a scan counts
-    the cut values against (``scanned``)."""
-    whole = Counter(
-        d.detector_type
-        for d in configured
-        if d.tier
-        and modes.get(d.detector_type) == "warn"
-        and not set(range(d.start, d.end)) & redacted
-        and (refused_at is None or d.start < refused_at)
-    )
-    return whole + cut_warnings(found, configured, modes, redacted)
+    """The warnings the rule predicts: ``found`` the configured detections
+    the redaction read (the configured detectors', allowlists applied, as
+    the plan hands them over), ``redacted`` the positions replaced."""
+    candidates = [
+        d for d in found if d.tier != 0 and modes.get(d.detector_type) in ("warn", "block")
+    ]
+    candidates.sort(key=_order)
+    counted: Counter[str] = Counter()
+    held = set(redacted)
+    for llm in (False, True):
+        taken: set[int] = set()
+        for d in candidates:
+            if (d.tier == ADDITIVE_TIER) != llm:
+                continue
+            span = set(range(d.start, d.end))
+            if span <= held:
+                continue  # sends nothing of its own, and hides nothing
+            if span & taken:
+                continue  # overlaps a value taken before it
+            taken |= span
+            if modes.get(d.detector_type) == "warn":
+                counted[d.detector_type] += 1
+        # The llm findings are read against the other values taken too.
+        held |= taken
+    return counted

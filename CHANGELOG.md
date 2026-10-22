@@ -68,6 +68,29 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   placeholder of its own.) Nothing 1.12.0 or 1.12.1 redacted or refused is forwarded now, with
   custom rules, NER spans and `[detection.modes]` too: tests pin that against both releases'
   pipelines.
+- **A deny string sent the rest of a value it overlaps upstream.** A deny match won every
+  overlap, and what it did not cover went as sent: with `deny = ["acme"]`,
+  `mail bob@acme.example` went upstream as `mail bob@«DENY_001».example`; two overlapping deny
+  strings (`acme` and `mecorp` in `acmecorp`) sent the rest of one of them; and a block-mode
+  value a deny string overlapped was not refused, its rest sent. A deny string is now joined with
+  every value it overlaps, as the values above are: every value among them that redacts (another
+  deny string, a value in redact mode) is redacted with it, overlapping ones as one placeholder
+  over their union typed after the one starting first (`mail «EMAIL_001»`, `«DENY_001»`; that
+  value's type is the one counted and named, so a deny string of type `PROJECT` inside an email
+  that starts before it counts as `EMAIL`); a value in block mode among them refuses the request,
+  also one that would lose the overlap to a value redacted in its place without the deny string
+  and one the deny string covers whole (an approved refusal override lets it through as sent where
+  nothing redacted covers it); a warn-mode value goes upstream only where nothing redacted covers
+  it. A deny string never redacts or refuses less than before, nor than the same policy without
+  it: property tests pin both, against the previous redactor and the built-in rules in random
+  modes. The one exception is an `llm` backend finding, never joined: as everywhere it keeps only
+  what lies outside the other values, so where the join keeps a different one of two overlapping
+  warn-mode values than the overlap sweep would, a different part of it goes upstream with that
+  value (the values joined above do the same). In text the proxy cannot rewrite (a verbatim
+  field, an upload's extracted text), a deny string refuses for good before any value is put to
+  the refusal overrides, so a block-mode value met first no longer mints a code that could never
+  let the text through. An access gate's added deny strings (llm-redact-pro roles) are taken in
+  after the configured policy, as before (docs/detection.md, "Deny strings").
 - **A custom rule whose pattern can match the empty string could send a deny string upstream as
   sent.** With `deny = ["acme"]` and a custom rule matching no characters where the deny string
   starts (a lookahead such as `(?=acme)`, `\d*(?=acme)`), `the acme merger` went upstream as
@@ -102,27 +125,43 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   request. Values overlapping a card read inside a run of digit groups are treated alike. A
   warn-mode value among them is forwarded only where no redacted value covers it, and counted as
   a warning, once, even where a redacted value overlaps it, as long as part of it lies outside the
-  redacted values (that part goes upstream; one wholly inside them is not counted). A warn-mode
-  value part of which anything else redacts is now counted the same way — in
-  `llm_redact_warnings_total`, the request's row and `authorize_content`'s `warned`, once, when
-  part of it is still sent — where it was not counted at all: one an access gate's added deny
-  string redacts part of (a detection overlay: llm-redact-pro roles), and one that loses an
-  ordinary overlap to a configured deny string or to a value redacted in its place (with
-  `deny = ["acme"]` and `email = "warn"`, `bob.private@«DENY_001»-corp.example` goes upstream
-  and counts as one warning, as with an added `acme`). Whether part of the value is still sent
-  is decided once everything is redacted: one whose rest an added deny string or an `llm`
-  backend finding redacts is not counted, nor one that lost only to another value forwarded as
-  sent (that one counts as what it is: a warn-mode value as a warning, an approved block — or,
-  where the proxy cannot rewrite the text (a verbatim field, an upload's extracted text) and
-  sends it as it is, any value an approved refusal override lets through — as an override used,
-  `llm_redact_overrides_used_total`, not as a warning; such a text refused all the same counts
-  as a redacted one would, wherever the value refusing it is); of overlapping ones, one value
-  two detectors find counts once. An `llm` backend finding loses no overlap — it is cut
-  around the other values — so a warn-mode one counts once per piece left as sent, as before. A
-  configured deny string takes part in overlap resolution and an added one is applied after it,
-  so where warn-mode values overlap one another the same bytes upstream can still count
-  differently: a value the configured string's overlaps would have beaten counts as well
-  (docs/detection.md, "Per-rule modes"). What is redacted or refused is unchanged. Where the
+  redacted values (that part goes upstream; one wholly inside them is not counted). Warn-mode
+  values are now counted — in `llm_redact_warnings_total`, the request's row and
+  `authorize_content`'s `warned` — by one rule that depends only on the values found and on the
+  characters replaced in the end: every value found that is forwarded as sent, or would be (warn
+  mode, and block mode whether approved or not), is a value sent when a character of it is not
+  replaced; of those, the overlap sweep takes each one overlapping none taken before it, and each
+  warn-mode value taken is one warning (docs/detection.md, "Per-rule modes"). So a warn-mode value
+  part of which anything else redacts counts once when part of it is still sent, where it was not
+  counted at all: one an access gate's added deny string redacts part of (a detection overlay:
+  llm-redact-pro roles), and one that loses an ordinary overlap to a configured deny string or to
+  a value redacted in its place (with `deny = ["acme"]` and `email = "warn"`,
+  `bob.private@«DENY_001»-corp.example` goes upstream and counts as one warning, as with an added
+  `acme`); one the replaced characters cover whole is not counted. A configured deny string and
+  an added one count alike wherever they replace the same characters (two overlapping warn-mode
+  values and a deny string inside the first only: both count the first alone, where a configured
+  string counted the second and an added one nothing; the first covered whole: the second
+  counts). Of values forwarded as sent that overlap one another, only those the sweep takes
+  count: one value two detectors find counts once, and a warn-mode value overlapping a block-mode
+  or another warn-mode value taken before it does not count, also where something else redacts
+  part of it and also where it is sent whole — a warn-mode value 1.12.1 counted as a winner is
+  not counted when a value sent only in part overlaps it and is read first, and where that value
+  is in block mode but lost the overlap resolution to a value redacted in its place (so its rest
+  goes upstream unrefused), the warn-mode value goes upstream counted nowhere. A warn-mode `llm`
+  backend finding counts once however many pieces of it the other values leave, and also when the
+  additive sweep drops it for another `llm` finding redacted in its place, as long as part of it
+  is sent; `llm` findings are read after the other detectors' values, for what they send beyond
+  them, so a crafted span never takes a warning from a rule's value. A text refused for a
+  block-mode value counts what it would with every refusing value approved, wherever the refusing
+  value stands (the warn-mode values after the first block were not counted); an approved value
+  counts as an override used (`llm_redact_overrides_used_total`), not as a warning. Text the
+  proxy cannot rewrite (a verbatim field, an upload's extracted text) counts the same way, against
+  what the redaction would replace, also where an approval sends it as it is: approving values
+  never changes what is counted: a warn-mode value an approved redact-mode value covers whole goes
+  upstream uncounted as a warning (the approved value counts as an override used). What is
+  redacted or refused (save where a deny string overlaps another value, below), the
+  placeholders issued and the refusal overrides consulted are unchanged (a differential test
+  against the redactor before the rule pins them). Where the
   proxy cannot rewrite the text (a
   verbatim field, an upload's extracted text), a span joining two or more such values is put to
   refusal overrides value by value: the refusal's code names every value, one approval of it
@@ -322,23 +361,32 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
 - **The shipped Grafana dashboard charts where the NER models ran.** A new panel in the NER
   coverage row, beside the strings each backend read and skipped, charts
   `llm_redact_ner_inline_calls_total` (strings a backend was run on by the redaction itself
-  instead of ahead of it on the NER worker thread: on a request's path that is the event loop,
-  every other request waiting for that string's inference; a redaction preview in the
-  llm-redact-pro dashboard runs this way too — on a worker thread of its own in llm-redact-pro
-  releases after 0.17.1, on the event loop in 0.17.1 and earlier) and
-  `llm_redact_ner_prefetch_misses_total` (strings a request's redaction did not find among the
-  results its prefetch computed — a reload replaced the detectors while it waited — each also
-  counted inline), until now on `/status` and `/metrics` only. Both stay at zero while every
-  request is prefetched and nobody runs a preview. The row's panels are now three to a line.
-  The counter's `# HELP` text, the metrics reference (docs/observability.md) and the NER
-  counter table (docs/detection.md) now define it the same way: they said every inline call
-  ran on the event loop, and llm-redact-pro's preview runs on a worker thread of its own in its
-  releases after 0.17.1. The preview's own contract (`plugin_api.DashboardHost`,
-  `ProxyState.preview`) and docs/dashboard.md said it wrote no metrics: it runs the live
-  detectors, so the NER coverage counters count its strings and the `llm` backend's circuit
-  breaker its model server's failures, as for a request's; the live vault, the audit and the
-  request and detection counters stay untouched, as before. (`llm-redact preview` builds
-  detectors of its own, in its own process: nothing it counts reaches a running proxy.)
+  instead of ahead of it on the NER worker thread, every call attempted, whether it returned or
+  raised: on a request's path that is the event loop, every other request waiting for that
+  string's inference; a redaction preview in the llm-redact-pro dashboard runs this way too — on
+  a worker thread of its own in llm-redact-pro releases after 0.17.1, on the event loop in
+  0.17.1 and earlier) and `llm_redact_ner_prefetch_misses_total` (strings a request's redaction
+  did not find among the results its prefetch computed — a reload replaced the detectors while
+  it waited — counted only where the backend ran on that string, so each is also counted
+  inline), until now on `/status` and `/metrics`
+  only. Both stay at zero while every request is prefetched and nobody runs a preview. The row's
+  panels are now three to a line. The counter's `# HELP` text, the metrics reference
+  (docs/observability.md) and the NER counter table (docs/detection.md) now define it the same
+  way: they said every inline call ran on the event loop, and llm-redact-pro's preview runs on a
+  worker thread of its own in its releases after 0.17.1. The counter itself now counts a call
+  that raised (the `llm` backend's `on_error = "block"` failure refusing its request, any other
+  fault) once, like one that returned: it counted only the calls that returned, though a failed
+  one held its caller up just the same. The NER prefetch worker's calls still never count as
+  inline. A prefetch miss is now counted only where the backend ran on the string, so every
+  miss is an inline call too: it was counted on every backend before any of them ran, so a
+  backend listed after a detector that raised on the string (the `llm` backend refusing its
+  request) counted a miss without running. The preview's own contract
+  (`plugin_api.DashboardHost`, `ProxyState.preview`) and docs/dashboard.md said it wrote no
+  metrics: it runs the live detectors, so the NER coverage counters count its strings and the
+  `llm` backend's circuit breaker its model server's failures, as for a request's; the live
+  vault, the audit and the request and detection counters stay untouched, as before.
+  (`llm-redact preview` builds detectors of its own, in its own process: nothing it counts
+  reaches a running proxy.)
 
 ### Fixed
 - The main architecture diagram now draws optional Open WebUI as a separate

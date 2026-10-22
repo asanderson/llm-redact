@@ -89,9 +89,20 @@ goes upstream **unredacted**, exactly like a `warn`-mode value (an overridden
 body or binary part goes out **unscanned**). As with warn mode, that includes
 anything the approved value overlaps: a value inside its span that another
 rule would have redacted on its own is forwarded with it (a warn-mode one
-that lost the overlap only to it has nothing redacted, so it is no
-warning). Every use is counted and marked on the request's row, the same
-way warn mode is.
+overlapping an approved block-mode value is no warning when the overlap sweep
+takes the approved value first: of values forwarded as sent that overlap one
+another, only those the sweep takes count,
+[detection.md](detection.md#per-rule-modes-redact-warn-block)).
+A block-mode value counts as a value forwarded as sent whether or not it is
+approved, so where the proxy rewrites the text a request refused for one
+counts its warn-mode values exactly as it would with the refusal approved:
+approving a block-mode value never changes the warnings counted there. Nor
+does any approval in text the proxy cannot rewrite (a verbatim field, an
+upload's extracted text): its warnings are counted against what the
+redaction would replace, also where an approval lets the whole text go
+upstream as it is, so a warn-mode value an approved redact-mode value
+overlaps is still a warning when part of it lies outside it. Every use is
+counted and marked on the request's row, the same way warn mode is.
 
 ## What can be overridden
 
@@ -132,8 +143,10 @@ These refusals carry no code:
 
 - deny strings (`[detection] deny`): the operator's always-redact list. In a
   verbatim field or a binary upload they refuse the request, and no approval
-  lets them through — nor does one let through an access gate's extra deny
-  strings (its detection overlay), or the value one of them overlaps;
+  lets them through — nor the value one of them is redacted with (a
+  redact-mode value it overlaps, [detection.md](detection.md#deny-strings-values-that-must-always-be-redacted)),
+  nor an access gate's extra deny strings (its detection overlay), or the
+  value one of them overlaps;
 - a block an access gate's detection overlay ADDED for its requester
   (llm-redact-pro roles: a rule the configured policy redacts, or warns
   about, blocked for them): no code is minted and no approval, an earlier

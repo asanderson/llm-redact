@@ -31,7 +31,7 @@ flowchart TB
     toggle -- "yes (TypeFilteredDetector:<br/>disabled or language-scoped out)" --> suppressed([suppressed with its rule])
     toggle -- no --> allow{"allowlisted<br/>value?"}
     allow -- "yes (global or per type)" --> allowed([left as sent])
-    allow -- no --> resolve["overlap resolution with the regex rules<br/>and deny strings: deny strings win every<br/>overlap, else the longest span wins<br/>(NER priority 120 loses exact ties)"]
+    allow -- no --> resolve["overlap resolution with the regex rules<br/>and deny strings: the longest span wins<br/>(NER priority 120 loses exact ties);<br/>a deny string joins what it overlaps"]
     resolve --> mode{"the winner's<br/>mode?"}
     mode -- redact --> vault[("vault: «PERSON_001»")]
     mode -. "warn: counted, the<br/>value IS FORWARDED" .-> fwd([forwarded as sent])

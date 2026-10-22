@@ -692,7 +692,12 @@ def test_pool_channels_stay_isolated_under_interleaving(
         assert "".join(streamed[channel]) + pool.flush(channel) == expected
 
 
-# --- deny (tier 0) wins every overlap ---------------------------------------
+# --- the overlap sweep: tier 0 wins every overlap ----------------------------
+#
+# _resolve_overlaps, the sweep redaction acts on when no value joins what it
+# overlaps, and the one Redactor._absorb resolves an access gate's tier-0
+# unions with. A configured deny string is a joining value: the redaction
+# joins it with what it overlaps instead (tests/test_deny.py).
 
 _overlap_detections = st.lists(
     st.builds(

@@ -783,14 +783,16 @@ async def test_a_joined_span_in_a_verbatim_field_is_approved_value_by_value(
         assert again.status_code == 400 and len(upstream.requests) == 1
 
 
-async def test_a_warn_value_cut_only_by_an_approved_verbatim_value_is_no_warning(
+async def test_a_warn_value_an_approved_verbatim_value_cuts_counts_alike(
     tmp_path: Path,
 ) -> None:
     # A warn-mode custom rule reading on from inside the email loses the
     # overlap to it: refused, the field is refused for the email, which cuts
     # that value (counted as the redaction counts it). Approved, the email
-    # goes upstream as sent, and the warn-mode value with it, whole: nothing
-    # of it is cut, no warning.
+    # goes upstream as sent, and the warn-mode value with it, whole — and
+    # it counts as the redaction would count it, the email replaced: one
+    # warning again. Approving the email once read it as sent, and the
+    # warn-mode value as no warning.
     from llm_redact.detection.engine import CustomRule
 
     tail = CustomRule(name="tail", detector_type="TAIL", pattern=r"corp\.example now")
@@ -807,7 +809,7 @@ async def test_a_warn_value_cut_only_by_an_approved_verbatim_value_is_no_warning
         passed = await client.post("/v1/fine_tuning/jobs", json=body, headers=KEY)
     assert passed.status_code == 200
     assert json.loads(_sent(upstream))["suffix"] == f"{EMAIL} now"
-    assert state.warn_counts == Counter({"TAIL": 1})
+    assert state.warn_counts == Counter({"TAIL": 2})
 
 
 # --- uploads --------------------------------------------------------------------------

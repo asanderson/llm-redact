@@ -165,11 +165,11 @@ class OverlayBuilds:
         if not overlay.deny:
             return None if modes is self.modes else OverlayBuild(modes, final_blocks=final)
         # One case-insensitive DenyDetector over the overlay's strings, run
-        # beside the configured detectors — never among them: in their
-        # overlap resolution a deny string wins every overlap, and the
-        # value it cut into would leave in part (a configured block never
-        # fired). The redactor takes the added matches in on top of the
-        # configured winners (``Redactor._absorb``).
+        # beside the configured detectors — never among them: there a deny
+        # string is joined with the values it overlaps (Redactor._resolved),
+        # where an added one must leave what the configured policy decided
+        # as it is and only add to it. The redactor takes the added matches
+        # in on top of the configured winners (``Redactor._absorb``).
         entries = [DenyEntry(value) for value in dict.fromkeys(overlay.deny)]
         return OverlayBuild(modes, DetectorPlan([DenyDetector(entries)]), final)
 

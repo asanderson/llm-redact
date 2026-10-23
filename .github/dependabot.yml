@@ -7,11 +7,17 @@
 #   torch is held: its CPU wheels' SHA-256 live in scripts/cpu_torch.py
 #   (CPU_WHEELS, pinned to uv.lock's torch by tests/test_cpu_torch_script.py),
 #   so a torch bump is a manual change that records the new wheels with it.
-#   transformers is held below gliner's cap (gliner 0.2.29: transformers<5.17;
-#   0.2.28: <5.14): a transformers past it makes the resolver fall back to
-#   gliner 0.2.24, the last release without a cap, and a group update's lock
-#   carries that downgrade without listing it. Raise the bound when a gliner
-#   release raises its cap.
+#   transformers needs no entry: gliner caps it (0.2.29: <5.17), and
+#   pyproject.toml's [tool.uv] constraint-dependencies (gliner>=0.2.29) keeps
+#   the lock from falling back to gliner 0.2.24, the last release without a
+#   cap. An update past the cap, of transformers or of a package needing a
+#   newer one (huggingface-hub 2.x), then does not resolve; an ignore entry
+#   here stopped only the direct one, and a hub update carried the downgrade.
+#   mutmut is held at 3.6: 3.8 adds mutation operators and renumbers the
+#   mutants scripts/mutation_equivalents.py justifies by id (31 unlisted
+#   survivors, 11 stale entries, and several real test gaps it finds in
+#   multipart.py), so moving to it is its own change: the allow-list
+#   migrated and the gaps killed with tests.
 # - docker: the Dockerfile's base images.
 # - github-actions: the SHA-pinned actions; Dependabot updates the pinned SHA
 #   and its trailing version comment together.
@@ -34,8 +40,8 @@ updates:
     versioning-strategy: lockfile-only
     ignore:
       - dependency-name: torch
-      - dependency-name: transformers
-        versions: [">=5.17"]
+      - dependency-name: mutmut
+        versions: [">=3.7"]
     groups:
       python-minor-patch:
         update-types: [minor, patch]

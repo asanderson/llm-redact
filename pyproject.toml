@@ -168,6 +168,20 @@ dev = [
     "packaging>=22",
 ]
 
+[tool.uv]
+# Lock-only constraints (uv.lock, Dependabot and the nightly lock refresh;
+# never the published requirements). gliner caps transformers (0.2.29:
+# <5.17), and gliner 0.2.24 is the last release without a cap: an update
+# that moves transformers past the cap, directly or through a package that
+# needs a newer one (huggingface-hub 2.x needs transformers >= 5.17), would
+# otherwise make the resolver fall back to that old gliner without a word.
+# With this floor such an update does not resolve, and transformers follows
+# gliner's cap as gliner raises it. `uv pip install` reads these too, and
+# --require-hashes refuses a constraint naming no exact version: the
+# hash-checked installs of the export (ci.yml, scripts/ner_ci_env.sh, the
+# -ner Dockerfile) pass --no-config (tests/test_deploy_assets.py).
+constraint-dependencies = ["gliner>=0.2.29"]
+
 [tool.hatch.version]
 path = "src/llm_redact/__init__.py"
 

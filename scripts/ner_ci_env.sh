@@ -16,7 +16,9 @@
 # wheel it records; it refuses an export whose torch version it records no
 # wheel of, and a test pins its table to uv.lock's torch). Both installs run
 # with --require-hashes and --no-deps (the export is the whole locked
-# closure); `cpu_torch.py check` then refuses any CUDA or triton
+# closure) and with --no-config (pyproject.toml's [tool.uv] constraints
+# are the lock's, and name no exact version, which --require-hashes
+# refuses); `cpu_torch.py check` then refuses any CUDA or triton
 # distribution and a torch that is not a +cpu build, and `uv pip check`
 # confirms the result is consistent.
 set -euo pipefail
@@ -30,8 +32,8 @@ trap 'rm -rf "$work"' EXIT
 uv export --frozen --no-header --no-annotate --no-emit-project "${extras[@]}" \
   | python3 "$here/cpu_torch.py" requirements "$work/requirements.txt" >"$work/torch.txt"
 uv venv --python 3.13 "$venv"
-uv pip install --python "$venv" --require-hashes --no-deps -r "$work/torch.txt" --index-url https://download.pytorch.org/whl/cpu
-uv pip install --python "$venv" --require-hashes --no-deps -r "$work/requirements.txt"
+uv pip install --python "$venv" --no-config --require-hashes --no-deps -r "$work/torch.txt" --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python "$venv" --no-config --require-hashes --no-deps -r "$work/requirements.txt"
 uv pip install --python "$venv" --no-deps -e .
 "$venv/bin/python" "$here/cpu_torch.py" check
 uv pip check --python "$venv"

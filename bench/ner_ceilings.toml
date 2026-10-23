@@ -183,9 +183,9 @@ USERNAME = 7
 USERNAME = 5
 
 [gliner-knowledgator-edge-onnx]
-recorded = "2026-10-07"
-note = "knowledgator/gliner-pii-edge-v1.0 at 9b7f39b0a2da971a5beea78d35f1539d4009c891, onnx/model_quint8.onnx (int8); measured 28 NER detections in 269437 bytes, 10.39 per 100 KB on an AVX-512 CPU and 31, 11.51 per 100 KB on an AVX2-only one (GitHub runners, 2026-10-07); the rate alone is gated, with 13% over the higher figure"
-per_100kb_max = 13.0
+recorded = "2026-10-23"
+note = "knowledgator/gliner-pii-edge-v1.0 at 9b7f39b0a2da971a5beea78d35f1539d4009c891, onnx/model_quint8.onnx (int8); measured 28 NER detections in 269437 bytes, 10.39 per 100 KB on an AVX-512 CPU and 31, 11.51 per 100 KB on an AVX2-only one (GitHub runners, 2026-10-07); 31, 11.51 and 35, 12.99 per 100 KB with gliner 0.2.29 and onnxruntime 1.31.0 (GitHub runners, 2026-10-23); the rate alone is gated, with 13% over the higher figure"
+per_100kb_max = 14.7
 per_file = false
 
 [gliner-knowledgator-base]
@@ -227,8 +227,8 @@ USERNAME = 2
 PERSON = 4
 
 [gliner-knowledgator-base-onnx]
-recorded = "2026-10-07"
-note = "knowledgator/gliner-pii-base-v1.0 at 61726e0ad791dcab3e29339bbec3ad42ded65641, onnx/model_quint8.onnx; measured 250 NER detections in 269437 bytes, 92.79 per 100 KB on one CPU and 253, 93.90 per 100 KB on another (GitHub runners, 2026-10-07); both pass these ceilings"
+recorded = "2026-10-23"
+note = "knowledgator/gliner-pii-base-v1.0 at 61726e0ad791dcab3e29339bbec3ad42ded65641, onnx/model_quint8.onnx; measured 250 NER detections in 269437 bytes, 92.79 per 100 KB on one CPU and 253, 93.90 per 100 KB on another (GitHub runners, 2026-10-07, gliner 0.2.28, onnxruntime 1.27.0); 242, 89.82 and 252, 93.53 per 100 KB with gliner 0.2.29 and onnxruntime 1.31.0 (GitHub runners, 2026-10-23), whose int8 path moved hits between lines while every float32 configuration's stayed identical: four cells re-recorded by the same rule from the higher count of those two runs (sqlite_excerpt.c and synthetic_eu_document.txt ACCOUNT_NUMBER, synthetic_app.log and synthetic_config.yaml USERNAME), none lowered; all four runs pass these ceilings"
 per_100kb_max = 98.0
 
 [gliner-knowledgator-base-onnx."README.md"]
@@ -242,7 +242,7 @@ USERNAME = 3
 PERSON = 8
 
 [gliner-knowledgator-base-onnx."sqlite_excerpt.c"]
-ACCOUNT_NUMBER = 2
+ACCOUNT_NUMBER = 5
 DATE_OF_BIRTH = 2
 PERSON = 2
 
@@ -250,7 +250,7 @@ PERSON = 2
 USERNAME = 2
 
 [gliner-knowledgator-base-onnx."synthetic_app.log"]
-USERNAME = 2
+USERNAME = 3
 
 [gliner-knowledgator-base-onnx."synthetic_ci_log.txt"]
 ACCOUNT_NUMBER = 3
@@ -258,9 +258,10 @@ USERNAME = 2
 
 [gliner-knowledgator-base-onnx."synthetic_config.yaml"]
 ACCOUNT_NUMBER = 2
+USERNAME = 2
 
 [gliner-knowledgator-base-onnx."synthetic_eu_document.txt"]
-ACCOUNT_NUMBER = 3
+ACCOUNT_NUMBER = 5
 
 [gliner-knowledgator-base-onnx."synthetic_natids_r10.log"]
 USERNAME = 2

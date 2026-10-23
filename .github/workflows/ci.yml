@@ -266,15 +266,17 @@ jobs:
       # The locked hf, gliner and presidio extras with a CPU-only torch
       # (scripts/cpu_torch.py: torch at its locked version from the PyTorch
       # CPU index, checked against the CPU wheels' recorded SHA-256,
-      # everything else hash-checked as uv.lock pins it).
+      # everything else hash-checked as uv.lock pins it). --no-config: the
+      # hash-checked installs must not read pyproject.toml's lock-only
+      # [tool.uv] constraints, which name no exact version.
       - name: install the NER extras (CPU torch)
         run: |
           set -euo pipefail
           uv venv
           uv export --frozen --no-dev --no-emit-project --extra hf --extra gliner --extra presidio \
             | python3 scripts/cpu_torch.py requirements "$RUNNER_TEMP/requirements.txt" >"$RUNNER_TEMP/torch.txt"
-          uv pip install --no-deps --require-hashes --index-url https://download.pytorch.org/whl/cpu -r "$RUNNER_TEMP/torch.txt"
-          uv pip install --no-deps --require-hashes -r "$RUNNER_TEMP/requirements.txt"
+          uv pip install --no-config --no-deps --require-hashes --index-url https://download.pytorch.org/whl/cpu -r "$RUNNER_TEMP/torch.txt"
+          uv pip install --no-config --no-deps --require-hashes -r "$RUNNER_TEMP/requirements.txt"
           uv pip install --no-deps -e .
           uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
           .venv/bin/python scripts/cpu_torch.py check

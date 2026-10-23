@@ -363,8 +363,8 @@ class ExplainedSpan:
     start: int
     end: int
     detector_type: str
-    mode: str                # "redact" | "warn" | "block"
-    deny: bool               # a deny string (tier 0): always redacted
+    mode: str  # "redact" | "warn" | "block"
+    deny: bool  # a deny string (tier 0): always redacted
     placeholder: str | None  # the token issued; None for warn and block
 
 
@@ -904,8 +904,11 @@ class FakeUpstream(httpx.AsyncBaseTransport):
 
         async def stream():
             for i in range(0, len(reply), 7):
-                event = {"type": "content_block_delta", "index": 0,
-                         "delta": {"type": "text_delta", "text": reply[i : i + 7]}}
+                event = {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": reply[i : i + 7]},
+                }
                 data = json.dumps(event, ensure_ascii=False)
                 yield f"event: content_block_delta\ndata: {data}\n\n".encode()
             yield b'event: content_block_stop\ndata: {"type": "content_block_stop", "index": 0}\n\n'
@@ -913,7 +916,9 @@ class FakeUpstream(httpx.AsyncBaseTransport):
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=stream())
 
 
-config = parse_config({"providers": {"anthropic": {"upstream_base_url": "https://fake.invalid"}}}, "probe")
+config = parse_config(
+    {"providers": {"anthropic": {"upstream_base_url": "https://fake.invalid"}}}, "probe"
+)
 app = create_app(config, upstream_transport=FakeUpstream())
 # Drive `app` with an ASGI client that records each "http.response.body"
 # message. httpx.ASGITransport also works, but it joins the chunks into one.

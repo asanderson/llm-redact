@@ -7,6 +7,11 @@
 #   torch is held: its CPU wheels' SHA-256 live in scripts/cpu_torch.py
 #   (CPU_WHEELS, pinned to uv.lock's torch by tests/test_cpu_torch_script.py),
 #   so a torch bump is a manual change that records the new wheels with it.
+#   transformers is held below gliner's cap (gliner 0.2.29: transformers<5.17;
+#   0.2.28: <5.14): a transformers past it makes the resolver fall back to
+#   gliner 0.2.24, the last release without a cap, and a group update's lock
+#   carries that downgrade without listing it. Raise the bound when a gliner
+#   release raises its cap.
 # - docker: the Dockerfile's base images.
 # - github-actions: the SHA-pinned actions; Dependabot updates the pinned SHA
 #   and its trailing version comment together.
@@ -29,6 +34,8 @@ updates:
     versioning-strategy: lockfile-only
     ignore:
       - dependency-name: torch
+      - dependency-name: transformers
+        versions: [">=5.17"]
     groups:
       python-minor-patch:
         update-types: [minor, patch]

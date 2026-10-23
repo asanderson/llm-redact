@@ -1655,7 +1655,8 @@ def test_hash_checked_uv_installs_ignore_the_lock_only_constraints() -> None:
         *sorted((root / "tests" / "airgap").glob("*.sh")),
     ]
     found = {
-        str(path.relative_to(root)): _hash_checked_uv_installs(path.read_text()) for path in paths
+        path.relative_to(root).as_posix(): _hash_checked_uv_installs(path.read_text())
+        for path in paths
     }
     counts = {path: len(installs) for path, installs in found.items() if installs}
     assert counts == {

@@ -40,10 +40,11 @@ jobs:
       pull-requests: write
     env:
       # Space-separated package names kept at their locked versions: torch
-      # (its CPU wheels' digests, scripts/cpu_torch.py) and transformers
-      # (below gliner's cap; past it the resolver falls back to an old,
-      # uncapped gliner: .github/dependabot.yml).
-      HELD: torch transformers
+      # (its CPU wheels' digests, scripts/cpu_torch.py) and mutmut (a newer
+      # one renumbers the mutants the allow-list justifies). transformers
+      # needs no hold: pyproject.toml's [tool.uv] constraint keeps it within
+      # gliner's cap (.github/dependabot.yml says why).
+      HELD: torch mutmut
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

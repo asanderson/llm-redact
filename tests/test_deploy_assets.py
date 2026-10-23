@@ -1633,6 +1633,41 @@ def test_torch_is_installed_hash_checked_everywhere(path: str, count: int) -> No
         assert "--require-hashes" in command, command
 
 
+def _hash_checked_uv_installs(text: str) -> list[str]:
+    """Every ``uv pip install`` of ``text`` (continuations joined, ``&&``
+    chains split) that runs with ``--require-hashes``."""
+    joined = re.sub(r"\\\n\s*", " ", text)
+    commands = [part for line in joined.splitlines() for part in line.split("&&")]
+    return [c for c in commands if "uv pip install" in c and "--require-hashes" in c]
+
+
+def test_hash_checked_uv_installs_ignore_the_lock_only_constraints() -> None:
+    # pyproject.toml's [tool.uv] constraint-dependencies hold the lock's
+    # floors (gliner>=0.2.29). `uv pip install` reads them from the project
+    # it runs in, and --require-hashes refuses a constraint naming no exact
+    # version: every hash-checked install of the export passes --no-config.
+    assert "constraint-dependencies" in (DEPLOY.parent / "pyproject.toml").read_text()
+    root = DEPLOY.parent
+    paths = [
+        root / "Dockerfile",
+        *sorted((root / ".github" / "workflows").glob("*.yml")),
+        *sorted((root / "scripts").glob("*.sh")),
+        *sorted((root / "tests" / "airgap").glob("*.sh")),
+    ]
+    found = {
+        str(path.relative_to(root)): _hash_checked_uv_installs(path.read_text()) for path in paths
+    }
+    counts = {path: len(installs) for path, installs in found.items() if installs}
+    assert counts == {
+        "Dockerfile": 2,
+        ".github/workflows/ci.yml": 2,
+        "scripts/ner_ci_env.sh": 2,
+    }
+    for installs in found.values():
+        for command in installs:
+            assert "--no-config" in command.split(), command
+
+
 def test_the_ner_sbom_records_torch_with_its_digests() -> None:
     runs = "\n".join(
         step.get("run", "") for step in _workflow("release.yml")["jobs"]["build"]["steps"]

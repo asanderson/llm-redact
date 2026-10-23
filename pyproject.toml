@@ -176,7 +176,10 @@ dev = [
 # needs a newer one (huggingface-hub 2.x needs transformers >= 5.17), would
 # otherwise make the resolver fall back to that old gliner without a word.
 # With this floor such an update does not resolve, and transformers follows
-# gliner's cap as gliner raises it.
+# gliner's cap as gliner raises it. `uv pip install` reads these too, and
+# --require-hashes refuses a constraint naming no exact version: the
+# hash-checked installs of the export (ci.yml, scripts/ner_ci_env.sh, the
+# -ner Dockerfile) pass --no-config (tests/test_deploy_assets.py).
 constraint-dependencies = ["gliner>=0.2.29"]
 
 [tool.hatch.version]

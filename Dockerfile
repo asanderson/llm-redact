@@ -23,6 +23,8 @@ ARG EXTRAS="--extra perf --extra realtime --extra extract"
 # every other locked package hash-checked from uv.lock, without
 # torch's GPU dependencies, then fails the build if one got in anyway. Empty
 # NER_EXTRAS (the default) is the stock image, built from uv.lock as before.
+# --no-config: the hash-checked installs must not read pyproject.toml's
+# lock-only [tool.uv] constraints, which name no exact version.
 ARG NER_EXTRAS=""
 ARG TORCH_INDEX_URL="https://download.pytorch.org/whl/cpu"
 COPY pyproject.toml uv.lock README.md ./
@@ -34,9 +36,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv venv /app/.venv && \
         uv export --frozen --no-dev --no-emit-project ${EXTRAS} ${NER_EXTRAS} \
             | python /tmp/cpu_torch.py requirements /tmp/requirements.txt > /tmp/torch.txt && \
-        uv pip install --python /app/.venv/bin/python --no-deps --require-hashes \
+        uv pip install --python /app/.venv/bin/python --no-config --no-deps --require-hashes \
             --index-url "${TORCH_INDEX_URL}" -r /tmp/torch.txt && \
-        uv pip install --python /app/.venv/bin/python --no-deps --require-hashes \
+        uv pip install --python /app/.venv/bin/python --no-config --no-deps --require-hashes \
             -r /tmp/requirements.txt; \
     fi
 COPY src ./src

@@ -193,13 +193,20 @@ produced different counts on the same commit (an AVX-512 CPU: 28 detections on t
 corpus, 10.39 per 100 KB, and a developer machine matched it; an AVX2-only CPU: 31, 11.51 per
 100 KB, with detections in files whose ceiling was zero), where every float32 configuration
 produced identical counts. Its section sets `per_file = false`, which gates `per_100kb_max` alone
-(it needs that key) at 13% over the higher rate, and its synthetic entry allows
+(it needs that key) at 13% over the higher rate (14.7 since gliner 0.2.29 and onnxruntime
+1.31.0, whose int8 path gave 35 detections, 12.99 per 100 KB, on one runner), and its synthetic entry allows
 `structured_regressions_max = 1`: on the AVX2-only runner an NER span displaced one EMAIL
 match and 13 of that corpus's 3,994 EMAIL characters went unredacted, so that entry tolerates
 a partial leak of one structured value on such CPUs. The int8 base model
 (`gliner-knowledgator-base-onnx`) differed by three detections of 250 and passed its exact
 ceilings on both runners, so it keeps them; a configuration that fails on a third CPU type
-is handled the same way, from its measured spread.
+is handled the same way, from its measured spread. Its int8 path also moves with the
+libraries: with gliner 0.2.29 and onnxruntime 1.31.0 two runners gave 242 and 252 detections,
+moved between lines (one new `USERNAME` where its ceiling was zero, four more
+`ACCOUNT_NUMBER` in `sqlite_excerpt.c` on one runner only), while every float32
+configuration's detections stayed identical. The cells either run measured above or at their
+ceiling were re-recorded by the rule above from the higher count, none lowered, so it keeps
+exact per-file ceilings that both runners pass.
 
 ## Latency: `--latency`
 

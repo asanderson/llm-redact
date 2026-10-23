@@ -1673,6 +1673,8 @@ class _StandsFor:
             self.resources.pop()
 
     def _show(self, operator: bytes, operands: Any) -> None:
+        from pypdf.generic import ArrayObject
+
         replacement = next((mark for mark in self.marked if mark is not None), None)
         if replacement is None:
             return
@@ -1682,7 +1684,9 @@ class _StandsFor:
         self.used = True
         at = _SHOWS[operator]
         if at < len(operands):
-            operands[at] = [shown] if operator == b"TJ" else shown
+            # A TJ operand pypdf shows only as its own array type (6.20 and
+            # later skip a plain list, and the replacement went unread).
+            operands[at] = ArrayObject([shown]) if operator == b"TJ" else shown
 
 
 # Text-showing operators and which operand holds the text they show.

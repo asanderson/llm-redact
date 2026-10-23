@@ -40,6 +40,15 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   CC BY 4.0".
 
 ### Security
+- **With pypdf 6.20 or later, document extraction read a value apart and could clear the file.**
+  The local reader shows marked content's `/ActualText` in place of the glyphs drawn inside it,
+  so `SSN 123-45-` followed by glyphs standing for `6789` reads as `SSN 123-45-6789`. pypdf 6.20
+  shows a `TJ` operand only when it is pypdf's own array type, and the reader handed it a plain
+  list: text shown with `TJ` (common for kerned text) lost its replacement, the value was read in
+  two parts, and a reading that was otherwise complete let the upload inspector forward the file
+  byte-identical as clean. The reader now hands pypdf its array type; pypdf 6.5 through 6.21 read
+  the replacement again. Installs on pypdf 6.19 or older (released images among them) were not
+  affected.
 - **A card number written next to another digit group went upstream unredacted.**
   `Order 12 4111 1111 1111 1111`, `4111 1111 1111 1111 123` (a CVV after it),
   `exp: 4111 1111 1111 1111 12/27` and `4111 1111 1111 1111 12 27` (an expiry after it) were

@@ -179,7 +179,10 @@ dev = [
 # gliner's cap as gliner raises it. `uv pip install` reads these too, and
 # --require-hashes refuses a constraint naming no exact version: the
 # hash-checked installs of the export (ci.yml, scripts/ner_ci_env.sh, the
-# -ner Dockerfile) pass --no-config (tests/test_deploy_assets.py).
+# -ner Dockerfile) pass --no-config (tests/test_deploy_assets.py). A lock
+# git merged from two changes can pin a version these exclude and still pass
+# `uv lock --check`, which compares only the constraints the lock records:
+# tests/test_lock_constraints.py checks the pins themselves.
 constraint-dependencies = ["gliner>=0.2.29"]
 
 [tool.hatch.version]

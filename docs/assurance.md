@@ -70,6 +70,22 @@ that skipped chunks of its session list, a view recording the retired number
 of the wrong session (it would have reloaded on every check), and a batch
 that committed around a write error the redaction swallowed.
 
+**The mutmut 3.8 upgrade.** A new mutmut release renumbers the ids too, and
+can add operators (3.8 adds `x if (c) or True else y`). Moving from 3.6 to
+3.8, over **4,208 mutants**, left 32 survivors unlisted and 11 entries stale:
+13 were justified mutations under new ids, 7 were new equivalents, now
+justified, and 12 were real gaps the new tests kill. Among the gaps: a strict
+rehydration that would have read the over-padded `«EMAIL_0001»`, never
+issued, as `«EMAIL_001»`, restoring another value; a fuzzy match too long to
+canonicalize reaching the vault as a `None` lookup; and the lenient
+multipart reader, on a file name holding `=`, edge `X`s or bytes that are not
+UTF-8. The gate compares ids, not diffs, so an upgrade is reviewed against
+every listed survivor's diff (`mutmut show`), not only the flagged ones. Two
+`redact_text` entries had moved to neighbouring mutations, and two
+oscillating ids, which the staleness check never flags, now named mutants the
+suite kills; their justifications moved to the ids that carry them now. The
+clean run after it: **229 survivors, all reviewed equivalents**.
+
 **Where the paid code's mutation coverage runs.** The per-conversation
 session router is part of the separately-installed `llm-redact-pro` package
 (the Free core ships only the static router), so its mutation coverage (the

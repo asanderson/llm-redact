@@ -65,6 +65,15 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "input yields the identical MOD-97 number. The .upper() is defensive, not "
         "load-bearing."
     ),
+    "llm_redact.detection.validators.x__to_mod97_number__mutmut_5": (
+        "c.isalpha() -> c.isalpha() or True: every character goes through "
+        "str(int(c, 36)). On a decimal digit of any script int(c, 36) is that digit's "
+        "value, so the joined number equals int() of the digits themselves; on any "
+        "other isalnum character (a superscript, a fraction, a letter outside base 36) "
+        "int(c, 36) raises ValueError where the original's int() of the joined string "
+        "raises it, and both return None. Checked over every code point that is "
+        "alnum but not alpha, alone and between ASCII digits and letters."
+    ),
     "llm_redact.redactor.x__resolve_overlaps__mutmut_2": (
         "fast-path predicate all(tier != ADDITIVE_TIER) -> all(tier == ADDITIVE_TIER): "
         "with no additive detection the split path computes _resolve_tiers(all) and "
@@ -86,7 +95,7 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "same key as _resolve_overlaps' (mutant 15 there) — among equal starts both "
         "order longest first, so the sort is unchanged for every input."
     ),
-    "llm_redact.redactor.x__piece__mutmut_13": (
+    "llm_redact.redactor.x__piece__mutmut_15": (
         "start < end -> start <= end in _piece: at start == end the slice "
         "d.value[k:k] is '' exactly as the else branch, so raw is '' either way and "
         "the piece is dropped (kept.strip() is empty). No input differs."
@@ -118,41 +127,79 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "text[None:i] == text[0:i]. It is reassigned to an int (d.end) after the "
         "first detection, so None only ever stands in for 0 at the first slice."
     ),
-    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_10": (
+    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_12": (
         "tier-0 mode literal 'redact' -> 'XXredactXX': mode is only compared to "
         "'block' and 'warn'; any other value takes the redact branch, so the "
         "exact spelling is irrelevant."
     ),
-    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_11": (
+    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_13": (
         "tier-0 mode literal 'redact' -> 'REDACT': same — only 'block'/'warn' are "
         "matched; every other value redacts."
     ),
-    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_15": (
+    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_17": (
         "_modes.get(type, 'redact') -> .get(type, None): the default is only used "
         "for a type absent from _modes, and None (like 'redact') is neither "
         "'block' nor 'warn', so it takes the redact branch identically."
     ),
-    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_17": (
+    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_19": (
         "_modes.get(type, 'redact') -> .get(type): dropping the default makes it "
-        "None, which redacts exactly as 'redact' does (see mutmut_15)."
+        "None, which redacts exactly as 'redact' does (see mutmut_17)."
     ),
-    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_18": (
+    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_20": (
         "default 'redact' -> 'XXredactXX': a non-'block'/'warn' default redacts identically."
     ),
-    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_19": (
+    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_21": (
         "default 'redact' -> 'REDACT': a non-'block'/'warn' default redacts identically."
+    ),
+    "llm_redact.multipart.xǁMultipartPartǁ_disposition__mutmut_4": (
+        "params('content-disposition') -> params('CONTENT-DISPOSITION'): params() "
+        "looks the header up by name.lower(), so both spellings read the same field."
+    ),
+    "llm_redact.multipart.xǁMultipartPartǁredact_filenames__mutmut_8": (
+        "params('content-disposition') -> params('CONTENT-DISPOSITION'): params() "
+        "looks the header up by name.lower(), so both spellings read the same field."
+    ),
+    "llm_redact.multipart.xǁMultipartPartǁ_disposition_param__mutmut_21": (
+        "codec-case: decode('utf-8', 'replace') to 'UTF-8'; Python normalizes codec "
+        "names, identical text."
+    ),
+    "llm_redact.multipart.xǁMultipartPartǁ_field__mutmut_40": (
+        "while end > start -> end >= start: the two differ only for a value of blanks "
+        "alone, where the mutant walks end back past start to just after the colon. "
+        "Both callers read the span as a slice: header() returns block[start:end], b'' "
+        "either way, and params() hands it to _parse_params, whose loop runs only "
+        "while pos < end, so an empty and a reversed span both give {}."
+    ),
+    "llm_redact.multipart.xǁMultipartPartǁredact_filenames__mutmut_39": (
+        "_quote(new) if plain.quoted else new -> always _quote(new): _quote only "
+        "escapes a backslash and a double quote (a quoted value's own quotes are the "
+        "block's bytes, kept as they are). An unquoted value holds neither "
+        "(_VALUE_STOP ends it at either), and redaction replaces spans of it with "
+        "placeholders, which hold neither too, so for an unquoted value "
+        "_quote(new) == new."
     ),
     "llm_redact.rehydrate.x_escape_prefix_start__mutmut_24": (
         "(i - j) % 2 -> (i + j) % 2: i-j and i+j always share parity, so the "
         "literal-backslash-pair test is unchanged for every input."
     ),
-    "llm_redact.rehydrate.x_substitute_tokens__mutmut_19": (
+    "llm_redact.rehydrate.x_substitute_tokens__mutmut_23": (
         "counts key canonical[1:-1] -> [1:-2]: the slice feeds "
         "rpartition('_')[0], and dropping the final digit of the counter never "
         "changes the text before the LAST underscore — the type key is identical "
         "for every canonical token (numbers are >= 1 digit). NOTE: oscillates "
         "between killed/survived across mutmut runs (coverage-based test "
         "selection); the justification holds either way."
+    ),
+    "llm_redact.rehydrate.x_substitute_tokens__mutmut_33": (
+        "pattern FUZZY_PLACEHOLDER_RE even when not fuzzy: with fuzzy off the match "
+        "is looked up as it is (no canonicalize) and vault lookups are exact. A fuzzy "
+        "match is either a strict token's own span (the fuzzy grammar covers every "
+        "token the vault can issue: type <= MAX_TYPE_NAME_LEN, n <= MAX_TOKEN_NUMBER) "
+        "or text that is not canonical, which no vault holds, so it passes through as "
+        "it came; it never overlaps a strict token without being it, since a token "
+        "body holds no guillemet. A strict token the fuzzy grammar misses (a longer "
+        "type or number) was never issued and passes through either way. Same output "
+        "and counts for every text."
     ),
     "llm_redact.rehydrate.xǁRehydratorǁrehydrate_text__mutmut_4": (
         "json_escape=False -> None: the flag is only truth-tested (`if "
@@ -711,14 +758,14 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "error-msg-text: EventStreamError message text change (None / XX-wrap / "
         "case); same type raised at the same condition, message never asserted."
     ),
-    "llm_redact.eventstream.x__parse_headers__mutmut_81": (
+    "llm_redact.eventstream.x__parse_headers__mutmut_83": (
         "codec-case: utf-8 to UTF-8; Python normalizes codec names, identical bytes."
     ),
-    "llm_redact.eventstream.x__parse_headers__mutmut_87": (
+    "llm_redact.eventstream.x__parse_headers__mutmut_90": (
         "error-msg-text: EventStreamError message text change (None / XX-wrap / "
         "case); same type raised at the same condition, message never asserted."
     ),
-    "llm_redact.eventstream.x__parse_headers__mutmut_88": (
+    "llm_redact.eventstream.x__parse_headers__mutmut_91": (
         "error-msg-text: EventStreamError message text change (None / XX-wrap / "
         "case); same type raised at the same condition, message never asserted."
     ),
@@ -729,10 +776,10 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
     "llm_redact.eventstream.x__serialize_headers__mutmut_10": (
         "error-msg-text: 'header name over 255 bytes' message change; never asserted."
     ),
-    "llm_redact.eventstream.x__serialize_headers__mutmut_28": (
+    "llm_redact.eventstream.x__serialize_headers__mutmut_30": (
         "codec-case: utf-8 to UTF-8; Python normalizes codec names, identical bytes."
     ),
-    "llm_redact.eventstream.x__serialize_headers__mutmut_39": (
+    "llm_redact.eventstream.x__serialize_headers__mutmut_41": (
         "error-msg-text: 'unknown header value type' message to None; serialize-side "
         "raise, message never asserted."
     ),
@@ -765,7 +812,7 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "across mutmut runs (coverage-based test selection); the justification "
         "holds either way."
     ),
-    "llm_redact.sse.x_serialize__mutmut_17": ("codec-case: .encode('utf-8') to 'UTF-8'."),
+    "llm_redact.sse.x_serialize__mutmut_19": ("codec-case: .encode('utf-8') to 'UTF-8'."),
     "llm_redact.sse.xǁSSEParserǁclose__mutmut_10": (
         "unreachable-branch: the byte-buffer guard is never true at close() -- the "
         "preceding feed of a newline always drains the buffer to empty -- so these "
@@ -1114,7 +1161,7 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "(`if not self._stalled` in `close`; `drain` assigns it a bool), and None is falsy exactly"
         " like False."
     ),
-    "llm_redact.vault_writer.xǁMapWriterǁsubmit__mutmut_24": (
+    "llm_redact.vault_writer.xǁMapWriterǁsubmit__mutmut_26": (
         "`_overflowing = None` when the queue drains below its bound: the flag starts False and is"
         " only ever read for truth (`if self._overflowing` / `if not self._overflowing` in "
         "`submit`), and None is falsy exactly like False."
@@ -1143,9 +1190,9 @@ OSCILLATING_MUTANTS: frozenset[str] = frozenset(
         # never read): survives when run alone, but CI once left it off the
         # survivor list (a timing-based timeout or a selection artifact).
         "llm_redact.vault_writer.xǁMapWriterǁ_place__mutmut_5",
-        "llm_redact.eventstream.x__parse_headers__mutmut_81",
+        "llm_redact.eventstream.x__parse_headers__mutmut_83",
         "llm_redact.placeholders.x_viable_prefix_start__mutmut_10",
-        "llm_redact.rehydrate.x_substitute_tokens__mutmut_19",
+        "llm_redact.rehydrate.x_substitute_tokens__mutmut_23",
         "llm_redact.sse.xǁSSEParserǁfeed__mutmut_26",
         # SQL keyword case changes (equivalent) whose test run tipped over the
         # per-mutant time limit on a slow runner: survived -> timeout.

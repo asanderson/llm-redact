@@ -118,11 +118,9 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   watched only the actions, weekly), lock-file only: the floors in `pyproject.toml` stay as
   written. A new nightly workflow (`.github/workflows/lock-refresh.yml`) refreshes the whole
   lock, transitive dependencies included, as one pull request on `deps/lock-refresh`. torch is
-  held in both: a torch bump needs its CPU wheels recorded in `scripts/cpu_torch.py`. So is
-  mutmut, at 3.6: 3.8 renumbers the mutants `scripts/mutation_equivalents.py` justifies and
-  adds operators that find real test gaps, so moving to it is its own change. The lock keeps
-  gliner at 0.2.29 or later (`[tool.uv] constraint-dependencies` in `pyproject.toml`, never the
-  published requirements): gliner caps transformers, and an update past the cap (of
+  held in both: a torch bump needs its CPU wheels recorded in `scripts/cpu_torch.py`. The lock
+  keeps gliner at 0.2.29 or later (`[tool.uv] constraint-dependencies` in `pyproject.toml`,
+  never the published requirements): gliner caps transformers, and an update past the cap (of
   transformers, or of huggingface-hub 2.x, which needs a newer one) otherwise fell back to
   gliner 0.2.24, the last release without a cap, without saying so. For CI to run on the
   workflow's pull request, store a token as the `DEPS_PR_TOKEN` repository secret.

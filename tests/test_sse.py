@@ -64,6 +64,13 @@ def test_serialize_round_trip() -> None:
     assert _parse_all([replayed]) == events
 
 
+def test_an_empty_comment_serializes_as_a_bare_colon() -> None:
+    # A bare ":" keep-alive parses to an empty comment and goes out as it came.
+    events = _parse_all([b":\n\n: ping\n\n"])
+    assert [e.comments for e in events] == [[""], ["ping"]]
+    assert b"".join(serialize(e) for e in events) == b":\n\n: ping\n\n"
+
+
 def test_unterminated_trailing_event_flushed_on_close() -> None:
     events = _parse_all([b"data: tail-no-newline"])
     assert len(events) == 1

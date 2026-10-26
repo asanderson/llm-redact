@@ -569,8 +569,8 @@ jobs:
     # scripts/mutation_gate.py: a surviving mutant fails unless recorded in
     # scripts/mutation_equivalents.py with a reviewed justification, and a
     # stale allow-list entry fails too — nothing survives silently in either
-    # direction (see docs/assurance.md). Baseline: 968/1100 killed, 130
-    # reviewed equivalents.
+    # direction (see docs/assurance.md). Under mutmut 3.8: 4,208 mutants,
+    # 229 reviewed equivalents surviving (oscillating ones move it by one).
     name: mutation testing (assurance gate)
     runs-on: ubuntu-latest
     steps:
@@ -583,7 +583,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
       - run: uv sync --frozen
-      # mutmut exits non-zero when ANY mutant survives — including the 130
+      # mutmut exits non-zero when ANY mutant survives — including the
       # reviewed equivalents — so the run itself must not gate; the gate
       # script right after it is the pass/fail arbiter.
       - name: run mutation testing

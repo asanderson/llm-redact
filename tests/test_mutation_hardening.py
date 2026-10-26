@@ -495,6 +495,38 @@ def test_build_vault_manager_plaintext_wiring(tmp_path: Path) -> None:
     manager.close()
 
 
+def test_a_sqlite_vault_without_a_path_opens_the_default_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No [vault] path: both builders open default_vault_path(), and a
+    # configured "~" path is expanded. Both directories are this test's own.
+    from llm_redact.vault import build_vault_manager, default_vault_path
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    # "~" is HOME on POSIX and USERPROFILE on Windows.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    default = default_vault_path()
+    assert default == tmp_path / "data" / "llm-redact" / "vault.db"
+    vault = build_vault(parse_config({"vault": {"backend": "sqlite"}}, "t").vault)
+    vault.placeholder_for("EMAIL", "d@x.example")
+    vault.close()
+    assert default.is_file()
+    manager = build_vault_manager(parse_config({"vault": {"backend": "sqlite"}}, "t").vault)
+    assert manager.get("default").original_for("«EMAIL_001»") == "d@x.example"
+    manager.close()
+
+    home = tmp_path / "home" / "tilde.db"
+    assert Path("~/tilde.db").expanduser() == home
+    for build in (build_vault, build_vault_manager):
+        opened = build(
+            parse_config({"vault": {"backend": "sqlite", "path": "~/tilde.db"}}, "t").vault
+        )
+        opened.close()
+        assert home.is_file()
+        home.unlink()
+
+
 def test_build_vault_manager_fernet_requires_pro(tmp_path: Path) -> None:
     # Both encrypted paths fail closed through the Free build_cipher (kills the
     # cipher=build_cipher(config) -> None / dropped-kwarg mutants, which would

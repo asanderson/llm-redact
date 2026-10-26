@@ -1458,13 +1458,39 @@ def test_the_dockerfile_copies_the_license_into_both_stages() -> None:
     ]
     [dependencies] = where("uv sync --frozen --no-dev --no-install-project")
     [project] = where("uv sync --frozen --no-dev --no-editable")
-    [runtime] = where("FROM python:3.13-slim-bookworm AS runtime")
+    [runtime] = [i for i in where(" AS runtime") if lines[i].startswith("FROM python:")]
     # The doc copy belongs to the runtime stage itself (release.yml builds
     # that target), not to a later stage built FROM it.
     runtime_end = next(
         (i for i in range(runtime + 1, len(lines)) if lines[i].startswith("FROM ")), len(lines)
     )
     assert dependencies < copies[0] < project < runtime < copies[1] < runtime_end
+
+
+def test_the_runtime_stage_runs_the_builder_stages_python() -> None:
+    # The runtime copies the builder's /app/.venv, whose interpreter links
+    # name the builder's Python: a runtime image of another minor has none,
+    # and the container never answers /healthz (a Dependabot bump of the
+    # runtime alone to 3.15 did exactly that).
+    text = (ROOT / "Dockerfile").read_text()
+    builder = re.findall(r"^FROM ghcr\.io/astral-sh/uv:python(3\.\d+)-\S+ AS builder$", text, re.M)
+    runtime = re.findall(r"^FROM python:(3\.\d+)-\S+ AS runtime$", text, re.M)
+    assert len(builder) == 1 and len(runtime) == 1
+    assert runtime == builder
+    # Dependabot proposes the python image's patch releases only.
+    docker = [
+        update
+        for update in yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())["updates"]
+        if update["package-ecosystem"] == "docker"
+    ]
+    assert [update["ignore"] for update in docker] == [
+        [
+            {
+                "dependency-name": "python",
+                "update-types": ["version-update:semver-major", "version-update:semver-minor"],
+            }
+        ]
+    ]
 
 
 SMOKE_LICENSE_CHECK = (

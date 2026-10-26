@@ -18,7 +18,11 @@
 #   survivors, 11 stale entries, and several real test gaps it finds in
 #   multipart.py), so moving to it is its own change: the allow-list
 #   migrated and the gaps killed with tests.
-# - docker: the Dockerfile's base images.
+# - docker: the Dockerfile's base images, patch releases only for python: the
+#   runtime stage runs the venv the builder stage (ghcr.io/astral-sh/uv,
+#   python3.13) created, so a new Python minor changes both FROM lines at
+#   once, by hand (tests/test_deploy_assets.py); a runtime moved alone to
+#   3.15 never started.
 # - github-actions: the SHA-pinned actions; Dependabot updates the pinned SHA
 #   and its trailing version comment together.
 #
@@ -55,6 +59,9 @@ updates:
       interval: cron
       cronjob: "23 3 * * *"
       timezone: Etc/UTC
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     cooldown:
       default-days: 3
 

@@ -255,6 +255,37 @@ def test_ambiguous_disposition_falls_back_to_the_lenient_reading() -> None:
     assert part.filename == "C:\\data\\x.jsonl"
 
 
+def test_the_lenient_reading_finds_the_disposition_on_any_line() -> None:
+    # A repeated parameter has no single reading; the lenient reader still
+    # routes the part, from the disposition wherever it stands in the block.
+    part = _part(
+        b"Content-Type: application/jsonl\r\n"
+        b'Content-Disposition: form-data; name="f"; name="g"; filename="x.jsonl"'
+    )
+    assert part.name == "f"
+    assert part.filename == "x.jsonl"
+
+
+def test_the_lenient_reading_keeps_a_value_whole() -> None:
+    # Only the parameter's first "=" separates it, and only the quotes come
+    # off its edges.
+    part = _part(b'Content-Disposition: form-data; name=f; name=g; filename="XA=b.jsonlX"')
+    assert part.filename == "XA=b.jsonlX"
+
+
+def test_the_lenient_reading_replaces_undecodable_bytes() -> None:
+    # A non-UTF-8 file name has no strict reading; the lenient one reads it
+    # with U+FFFD in place of each byte it cannot decode, never an exception.
+    part = _part(b'Content-Disposition: form-data; name="f"; filename="a\xffb.jsonl"')
+    assert part.name == "f"
+    assert part.filename == "a\ufffdb.jsonl"
+
+
+def test_a_single_trailing_blank_is_trimmed() -> None:
+    assert _part(b"Content-Type: text/plain ").header("content-type") == b"text/plain"
+    assert _part(b"Content-Type: text/plain\t").header("content-type") == b"text/plain"
+
+
 # --- redact_filenames -------------------------------------------------------------------
 
 

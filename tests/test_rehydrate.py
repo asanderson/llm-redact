@@ -78,12 +78,35 @@ def test_three_way_split_sweep(loaded_vault: InMemoryVault, text: str, fuzzy: bo
 
 
 def test_fuzzy_restores_mangles_and_exact_does_not(loaded_vault: InMemoryVault) -> None:
-    text = "mail «email-1» and key « AWS_KEY_001 »"
+    # «EMAIL_0001» has the exact grammar's shape but was never issued: only
+    # fuzzy matching reads it as «EMAIL_001».
+    text = "mail «email-1», «EMAIL_0001» and key « AWS_KEY_001 »"
     assert (
         _expected(loaded_vault, text, fuzzy=True)
-        == "mail jane@corp.example and key AKIAIOSFODNN7EXAMPLE"
+        == "mail jane@corp.example, jane@corp.example and key AKIAIOSFODNN7EXAMPLE"
     )
     assert _expected(loaded_vault, text, fuzzy=False) == text  # byte-identical
+
+
+class _StrictLookups(InMemoryVault):
+    """A vault that holds Vault.original_for to its contract: a str."""
+
+    def original_for(self, placeholder: str) -> str | None:
+        if not isinstance(placeholder, str):
+            raise TypeError(type(placeholder).__name__)
+        return super().original_for(placeholder)
+
+
+def test_a_fuzzy_match_too_long_to_canonicalize_is_never_looked_up() -> None:
+    # A 31-letter type with nine digits fits the fuzzy grammar, but its
+    # canonical form would outgrow MAX_PLACEHOLDER_LEN: no vault lookup, and
+    # the text stays as it came.
+    vault = _StrictLookups()
+    vault.placeholder_for("EMAIL", "jane@corp.example")
+    text = "«ABCDEFGHIJKLMNOPQRSTUVWXYZABCDE_123456789» and «email_1»"
+    assert Rehydrator(vault, fuzzy=True).rehydrate_text(text) == (
+        "«ABCDEFGHIJKLMNOPQRSTUVWXYZABCDE_123456789» and jane@corp.example"
+    )
 
 
 def test_fuzzy_vault_gate_never_restores_unissued(loaded_vault: InMemoryVault) -> None:

@@ -54,7 +54,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         /app/.venv/bin/python /tmp/cpu_torch.py check; \
     fi
 
-FROM python:3.13-slim-bookworm AS runtime
+FROM python:3.15-slim-bookworm AS runtime
 LABEL org.opencontainers.image.title="llm-redact" \
       org.opencontainers.image.description="Transparent redact/rehydrate proxy for LLM API traffic" \
       org.opencontainers.image.source="https://github.com/asanderson/llm-redact" \

@@ -503,7 +503,9 @@ def test_a_sqlite_vault_without_a_path_opens_the_default_one(
     from llm_redact.vault import build_vault_manager, default_vault_path
 
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    # "~" is HOME on POSIX and USERPROFILE on Windows.
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     default = default_vault_path()
     assert default == tmp_path / "data" / "llm-redact" / "vault.db"
     vault = build_vault(parse_config({"vault": {"backend": "sqlite"}}, "t").vault)
@@ -515,6 +517,7 @@ def test_a_sqlite_vault_without_a_path_opens_the_default_one(
     manager.close()
 
     home = tmp_path / "home" / "tilde.db"
+    assert Path("~/tilde.db").expanduser() == home
     for build in (build_vault, build_vault_manager):
         opened = build(
             parse_config({"vault": {"backend": "sqlite", "path": "~/tilde.db"}}, "t").vault

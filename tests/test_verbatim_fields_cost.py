@@ -12,6 +12,7 @@ back in another — the same fields held, in the same order, as before.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -37,6 +38,11 @@ COUNT = 16_000
 RATIO_BOUND = 6.0
 # Below this, timer noise dominates: never a failure.
 FLOOR_SECONDS = 0.5
+# One sample of each side can land on a GC pause or a busy runner (a
+# Windows runner once measured the hold-out at 7.3x its walk): up to this
+# many samples, compared by their minimums (timeit's convention), stopping
+# at the first that fits. The quadratic hold-out fails every one.
+ATTEMPTS = 3
 
 SHAPES: dict[str, tuple[str, dict[str, Any]]] = {
     "search-filters": (
@@ -64,6 +70,12 @@ def _redactor() -> Redactor:
     return Redactor(build_detectors(config), InMemoryVault(), build_allowlist(config))
 
 
+def _timed(run: Callable[[], Any]) -> tuple[float, Any]:
+    started = time.perf_counter()
+    result = run()
+    return time.perf_counter() - started, result
+
+
 @pytest.mark.parametrize("shape", sorted(SHAPES))
 def test_many_verbatim_fields_are_held_in_linear_time(
     shape: str, monkeypatch: pytest.MonkeyPatch
@@ -77,17 +89,28 @@ def test_many_verbatim_fields_are_held_in_linear_time(
         copies += 1
         return rebuilt(node, trie, replace)
 
-    started = time.perf_counter()
-    prepare_route_request(_Adapter(()), "POST", path, body, _redactor(), inject_note=False)
-    walk = time.perf_counter() - started
-    monkeypatch.setattr(base, "_rebuilt", counting)
-    started = time.perf_counter()
-    prepared = prepare_route_request(
-        OpenAIAdapter(), "POST", path, body, _redactor(), inject_note=False
-    )
-    elapsed = time.perf_counter() - started
-    assert elapsed < max(RATIO_BOUND * walk, FLOOR_SECONDS), (
-        f"{shape}: {elapsed:.2f}s / {walk:.2f}s"
+    walks: list[float] = []
+    elapsed: list[float] = []
+    for _ in range(ATTEMPTS):
+        monkeypatch.setattr(base, "_rebuilt", rebuilt)
+        walk, _ = _timed(
+            lambda: prepare_route_request(
+                _Adapter(()), "POST", path, body, _redactor(), inject_note=False
+            )
+        )
+        walks.append(walk)
+        copies = 0
+        monkeypatch.setattr(base, "_rebuilt", counting)
+        held, prepared = _timed(
+            lambda: prepare_route_request(
+                OpenAIAdapter(), "POST", path, body, _redactor(), inject_note=False
+            )
+        )
+        elapsed.append(held)
+        if min(elapsed) < max(RATIO_BOUND * min(walks), FLOOR_SECONDS):
+            break
+    assert min(elapsed) < max(RATIO_BOUND * min(walks), FLOOR_SECONDS), (
+        f"{shape}: {min(elapsed):.2f}s / {min(walks):.2f}s over {len(walks)} samples"
     )
     # The deterministic half: each container on a held path is copied once
     # per pass (out, then back) — never once per field.

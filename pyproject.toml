@@ -149,7 +149,9 @@ dev = [
     "websockets>=15.0",
     "hypothesis>=6.100",
     # Mutation testing (assurance): dev-only, never touches the request path.
-    "mutmut>=3.6",
+    # 3.8.1: 3.8.0 reads pytest's private `item._nodeid`, gone in pytest 9.2,
+    # and then checks no mutant at all.
+    "mutmut>=3.8.1",
     # The extract extra, always present in dev so the extraction worker's
     # PDF reader is exercised (the no-extra refusal is pinned separately).
     # Same floor as the extra.

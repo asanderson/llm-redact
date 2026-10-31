@@ -8,10 +8,13 @@ be slowed down, so the suite needs no model and no extra.
 
 import asyncio
 import base64
+import contextlib
 import dataclasses
+import gc
 import json
 import threading
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -31,9 +34,25 @@ PROXY = "http://127.0.0.1:8787"
 # the event loop is asked to answer: it must within half a string's time. A
 # real block costs a whole string (an inline call) or the whole batch, so a
 # bound this wide still catches one while a slow runner's scheduling hiccup
-# stays inside it (a Windows runner once took 263 ms with 200 ms strings).
+# stays inside it; the collector's pauses are kept out of the timing
+# (`_no_collection`: a Windows runner twice took ~250 ms with 200 ms strings).
 STRING_SECONDS = 1.0
 STRINGS = 3
+
+
+@contextlib.contextmanager
+def _no_collection() -> Iterator[None]:
+    """No garbage collection while the event loop's answer is timed: a full
+    collection late in the suite takes 80-250 ms (it paused /healthz past
+    the bound on a Windows runner twice), which is the collector's time,
+    not the loop's."""
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
 
 
 class SlowNlp(FakeSpacy):
@@ -156,9 +175,10 @@ async def test_the_event_loop_answers_while_a_request_runs_ner(
             )
         )
         await asyncio.to_thread(nlp.started.wait, 5)
-        began = time.perf_counter()
-        health = await client.get("/__llm-redact/healthz")
-        waited = time.perf_counter() - began
+        with _no_collection():
+            began = time.perf_counter()
+            health = await client.get("/__llm-redact/healthz")
+            waited = time.perf_counter() - began
         assert health.status_code == 200
         assert not ner.done()  # the batch's strings still running
         # Answered without waiting for any string's inference.
@@ -200,9 +220,11 @@ async def test_an_upload_queues_behind_a_running_batch_off_the_loop(
             )
         )
         await asyncio.sleep(0.05)  # the upload is waiting for its turn
-        began = time.perf_counter()
-        health = await client.get("/__llm-redact/healthz")
-        assert time.perf_counter() - began < STRING_SECONDS / 2
+        with _no_collection():
+            began = time.perf_counter()
+            health = await client.get("/__llm-redact/healthz")
+            waited = time.perf_counter() - began
+        assert waited < STRING_SECONDS / 2
         assert health.status_code == 200
         assert not upload.done()
         assert (await ner).status_code == 200

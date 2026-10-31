@@ -8,10 +8,13 @@ be slowed down, so the suite needs no model and no extra.
 
 import asyncio
 import base64
+import contextlib
 import dataclasses
+import gc
 import json
 import threading
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -26,6 +29,30 @@ from ner_fakes import FakeSpacy, install_spacy
 from prefetch_fixtures import EXEMPT_SERVER, NAME, OPENAI_HEADERS, OTHER, SHAPES, Shape, config
 
 PROXY = "http://127.0.0.1:8787"
+
+# The slowed model's time per string, and the strings a request holds while
+# the event loop is asked to answer: it must within half a string's time. A
+# real block costs a whole string (an inline call) or the whole batch, so a
+# bound this wide still catches one while a slow runner's scheduling hiccup
+# stays inside it; the collector's pauses are kept out of the timing
+# (`_no_collection`: a Windows runner twice took ~250 ms with 200 ms strings).
+STRING_SECONDS = 1.0
+STRINGS = 3
+
+
+@contextlib.contextmanager
+def _no_collection() -> Iterator[None]:
+    """No garbage collection while the event loop's answer is timed: a full
+    collection late in the suite takes 80-250 ms (it paused /healthz past
+    the bound on a Windows runner twice), which is the collector's time,
+    not the loop's."""
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
 
 
 class SlowNlp(FakeSpacy):
@@ -134,12 +161,11 @@ async def test_the_upstream_gets_the_same_bytes_with_and_without_prefetch(
 async def test_the_event_loop_answers_while_a_request_runs_ner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    delay = 0.2
-    nlp = SlowNlp(delay)
+    nlp = SlowNlp(STRING_SECONDS)
     install_spacy(monkeypatch, nlp)
     upstream = Upstream()
     app = create_app(_config(), upstream_transport=httpx.MockTransport(upstream))
-    messages = [{"role": "user", "content": f"slow {i}: {NAME}"} for i in range(10)]
+    messages = [{"role": "user", "content": f"slow {i}: {NAME}"} for i in range(STRINGS)]
     async with _client(app) as client:
         ner = asyncio.create_task(
             client.post(
@@ -149,18 +175,19 @@ async def test_the_event_loop_answers_while_a_request_runs_ner(
             )
         )
         await asyncio.to_thread(nlp.started.wait, 5)
-        began = time.perf_counter()
-        health = await client.get("/__llm-redact/healthz")
-        waited = time.perf_counter() - began
+        with _no_collection():
+            began = time.perf_counter()
+            health = await client.get("/__llm-redact/healthz")
+            waited = time.perf_counter() - began
         assert health.status_code == 200
-        assert not ner.done()  # ten strings of 200 ms still running
+        assert not ner.done()  # the batch's strings still running
         # Answered without waiting for any string's inference.
-        assert waited < delay / 2
+        assert waited < STRING_SECONDS / 2
         response = await ner
     assert response.status_code == 200
     sent = json.loads(upstream.bodies[0])["messages"]
     # (after the system note: a redaction happened)
-    assert [m["content"] for m in sent[1:]] == [f"slow {i}: «PERSON_001»" for i in range(10)]
+    assert [m["content"] for m in sent[1:]] == [f"slow {i}: «PERSON_001»" for i in range(STRINGS)]
     assert threading.get_ident() not in nlp.threads
     assert _stats(app).inline_calls == 0
 
@@ -171,11 +198,10 @@ async def test_an_upload_queues_behind_a_running_batch_off_the_loop(
     # A multipart upload's NER is prefetched too: while a JSON request's
     # batch runs on the worker, the upload's batch waits its turn OFF the
     # event loop, which keeps answering.
-    delay = 0.2
-    nlp = SlowNlp(delay)
+    nlp = SlowNlp(STRING_SECONDS)
     install_spacy(monkeypatch, nlp)
     app = create_app(_config(), upstream_transport=httpx.MockTransport(Upstream()))
-    messages = [{"role": "user", "content": f"slow {i}"} for i in range(10)]
+    messages = [{"role": "user", "content": f"slow {i}"} for i in range(STRINGS)]
     async with _client(app) as client:
         ner = asyncio.create_task(
             client.post(
@@ -194,9 +220,11 @@ async def test_an_upload_queues_behind_a_running_batch_off_the_loop(
             )
         )
         await asyncio.sleep(0.05)  # the upload is waiting for its turn
-        began = time.perf_counter()
-        health = await client.get("/__llm-redact/healthz")
-        assert time.perf_counter() - began < delay / 2
+        with _no_collection():
+            began = time.perf_counter()
+            health = await client.get("/__llm-redact/healthz")
+            waited = time.perf_counter() - began
+        assert waited < STRING_SECONDS / 2
         assert health.status_code == 200
         assert not upload.done()
         assert (await ner).status_code == 200

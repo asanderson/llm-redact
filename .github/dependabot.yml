@@ -7,12 +7,14 @@
 #   torch is held: its CPU wheels' SHA-256 live in scripts/cpu_torch.py
 #   (CPU_WHEELS, pinned to uv.lock's torch by tests/test_cpu_torch_script.py),
 #   so a torch bump is a manual change that records the new wheels with it.
-#   transformers needs no entry: gliner caps it (0.2.29: <5.17), and
-#   pyproject.toml's [tool.uv] constraint-dependencies (gliner>=0.2.29) keeps
-#   the lock from falling back to gliner 0.2.24, the last release without a
-#   cap. An update past the cap, of transformers or of a package needing a
-#   newer one (huggingface-hub 2.x), then does not resolve; an ignore entry
-#   here stopped only the direct one, and a hub update carried the downgrade.
+#   transformers needs no entry: gliner caps it, and pyproject.toml's
+#   [tool.uv] constraint-dependencies (gliner>=0.2.29) keeps the lock from
+#   falling back to gliner 0.2.24, the last release without a cap. An update
+#   past the cap, of transformers or of a package needing a newer one, then
+#   does not resolve until gliner raises it: huggingface-hub 2.x needs
+#   transformers >= 5.18, past gliner 0.2.29's cap (<5.17) and within
+#   0.2.30's (<5.23). An ignore entry here stopped only the direct update,
+#   and a hub update carried the downgrade.
 #   A mutmut update can renumber the mutants scripts/mutation_equivalents.py
 #   justifies by id, or add operators: the mutation gate then fails on the
 #   pull request until the allow-list follows (docs/assurance.md).

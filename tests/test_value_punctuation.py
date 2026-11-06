@@ -256,6 +256,48 @@ def _seconds(scan: Callable[[str], object], unit: str, size: int = SIZE) -> floa
     return best
 
 
+def _linear(small: float, large: float) -> bool:
+    # Ten times the input in under thirty times the time: linear work takes about ten.
+    return large < 30 * max(small, 1e-4)
+
+
+def _scan_costs(scan: Callable[[str], object], unit: str, size: int = SIZE) -> tuple[float, float]:
+    # Seconds at a tenth of `size` and at `size`. The smaller reading is a
+    # fraction of a millisecond, and on a shared runner other load on the same
+    # core (a cache-cold or throttled stretch) still counts as this thread's
+    # CPU time, so a ratio over the bound is measured once more before it
+    # fails: linear work passes the second time, quadratic work never does.
+    small, large = _seconds(scan, unit, size // 10), _seconds(scan, unit, size)
+    if not _linear(small, large):
+        small, large = _seconds(scan, unit, size // 10), _seconds(scan, unit, size)
+    return small, large
+
+
+@pytest.mark.parametrize("burst", [False, True], ids=["quiet", "burst"])
+@pytest.mark.parametrize("power", [1, 2], ids=["linear", "quadratic"])
+def test_a_ratio_over_the_bound_is_measured_again(
+    monkeypatch: pytest.MonkeyPatch, power: int, burst: bool
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    cpu = 0.0
+    monkeypatch.setattr(time, "thread_time", lambda: cpu)
+    scans: list[int] = []
+
+    def scan(text: str) -> None:
+        nonlocal cpu
+        cpu += len(text) ** power * 1e-4
+        # Every trial of the first large-input measurement runs on a busy core.
+        if burst and len(text) > 20 and len([n for n in scans if n > 20]) < 3:
+            cpu += 1.0
+        scans.append(len(text))
+
+    small, large = _scan_costs(scan, "x", 100)
+    assert _linear(small, large) is (power == 1), (small, large)
+    # Linear work is measured again only after the burst; quadratic work
+    # always is, and fails on the second reading as on the first.
+    assert len(scans) == (12 if burst or power == 2 else 6)
+
+
 @pytest.mark.parametrize("platform", ["linux", "darwin"])
 @pytest.mark.parametrize("power", [1, 2], ids=["linear", "quadratic"])
 def test_cost_measurement_excludes_descheduling(
@@ -296,8 +338,8 @@ def test_no_adversarial_input_costs_more_than_1_12_0s_worst() -> None:
     # under thirty times the time: about ten), and the whole Redactor takes
     # on each less than twice what 1.12.0's took on its slowest known one:
     # measured, the slowest of them ties with it, so the bound leaves room
-    # for a shared runner's noise. Over that bound both are timed again, so
-    # a burst of other load does not fail it.
+    # for a shared runner's noise. Over either bound both readings are taken
+    # again (_scan_costs for a rule), so a burst of other load does not fail it.
     from test_no_loss_since_1_12_0 import FROZEN_1_12_0, OLD_PLAN
 
     changed = [det for det in DETECTORS if det.name in FROZEN_1_12_0]
@@ -311,8 +353,8 @@ def test_no_adversarial_input_costs_more_than_1_12_0s_worst() -> None:
     for unit in ADVERSARIAL:
         for det in changed:
             scan = lambda text, det=det: list(det.detect(text))  # noqa: E731
-            small, large = _seconds(scan, unit, SIZE // 10), _seconds(scan, unit)
-            assert large < 30 * max(small, 1e-4), (det.name, unit, small, large)
+            small, large = _scan_costs(scan, unit)
+            assert _linear(small, large), (det.name, unit, small, large)
         large = _seconds(release, unit)
         if large >= 2 * worst:
             worst, large = reference(), _seconds(release, unit)

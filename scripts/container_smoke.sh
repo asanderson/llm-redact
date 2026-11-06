@@ -55,8 +55,10 @@ echo "--- the license text"
   || { echo "FAIL: the AGPL-3.0 license text is missing from the image"; exit 1; }
 
 echo "--- status endpoint"
-curl -sf http://127.0.0.1:18787/__llm-redact/status | head -c 200
-echo
+# Read the whole answer first: under pipefail, `curl | head -c` fails with
+# curl's exit 23 whenever head exits before curl has written all of it.
+STATUS=$(curl -sf http://127.0.0.1:18787/__llm-redact/status)
+printf '%s\n' "${STATUS:0:200}"
 
 echo "--- streaming round trip"
 RESPONSE=$(curl -sN http://127.0.0.1:18787/v1/messages \

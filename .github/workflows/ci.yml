@@ -214,6 +214,11 @@ jobs:
           # dependency would constrain those terms. Flag them for a human
           # decision rather than silently pulling them in.
           deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
+          # Owner-approved exceptions, each reached only through an opt-in
+          # extra the published images do not install:
+          # - udtools (GPL-2.0-or-later): required by stanza (the `stanza`
+          #   extra); approved 2026-11-08.
+          allow-dependencies-licenses: pkg:pypi/udtools
 
   ner:
     name: ner extras (spaCy model + presidio)

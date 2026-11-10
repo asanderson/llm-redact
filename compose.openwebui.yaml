@@ -15,7 +15,7 @@ services:
         condition: service_started
 
   proxy:
-    image: ${LLM_REDACT_IMAGE:-ghcr.io/asanderson/llm-redact:1.12.1}
+    image: ${LLM_REDACT_IMAGE:-ghcr.io/asanderson/llm-redact:1.13.0}
     profiles: [webui]
     command: [serve, --config, /etc/llm-redact/config.toml]
     ports:

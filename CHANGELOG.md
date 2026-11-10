@@ -11,6 +11,20 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-11-10
+
+Closes leaks where values went upstream unredacted: a card number written next to another digit
+group (an order number before it, a CVV or an expiry after it), the rest of a value a deny string
+overlaps, a deny string that a custom rule matching the empty string let through, and the part of
+a custom rule's value or an NER span outside a value read since 1.12.1. With pypdf 6.20 or later,
+document extraction no longer reads a value in two parts, which could forward the file as clean.
+New: an opt-in `llm` NER backend (a generative model on a server you run), a read-only scan-sink
+seam for plugins with metrics for its capture queue, an opt-in passthrough for `encrypted_content`
+values, NER counters and an alert for the `llm` backend's model server, a Grafana panel for where
+the NER models ran, and a SIGHUP reload that builds a changed `[detection]` off the event loop.
+The `hf` backend's default model is now `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` (see
+Upgrading). The matching llm-redact-pro release is 0.18.0.
+
 **Upgrading:** the `hf` backend has a new default model. A configuration that names no model
 for it (no `[detection.ner.models] hf`, and no `[detection.ner] model` with `hf` the only backend)
 loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-base-NER`:

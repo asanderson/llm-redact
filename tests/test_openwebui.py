@@ -13,6 +13,7 @@ import httpx
 import pytest
 import yaml
 
+from llm_redact import __version__
 from llm_redact.config import Config, ProviderConfig, VaultConfig
 from llm_redact.proxy import create_app
 
@@ -167,6 +168,15 @@ async def test_webui_vault_restores_after_restart(fake: ModuleType, tmp_path: Pa
                 },
             )
         assert EMAIL in _text(response, False)
+
+
+def test_optional_stack_defaults_to_the_image_of_this_release() -> None:
+    # The release-prep commit moves this default with __version__
+    # (docs/RELEASING.md), as the sidecar manifest's and the chart's: left
+    # behind, the stack would run an older release than the one it ships with.
+    stack = yaml.safe_load((ROOT / "compose.openwebui.yaml").read_text())
+    image = stack["services"]["proxy"]["image"]
+    assert image == f"${{LLM_REDACT_IMAGE:-ghcr.io/asanderson/llm-redact:{__version__}}}"
 
 
 def test_optional_stack_confines_backend_and_provider_configuration() -> None:

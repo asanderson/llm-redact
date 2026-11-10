@@ -35,9 +35,10 @@ version published there cannot be replaced.
 - The release-prep commit changes every place that carries the version, not
   only `__version__`: `deploy/helm/llm-redact/Chart.yaml` (`version` and
   `appVersion`), `plugins/llm-redact/.claude-plugin/plugin.json` (`version`)
-  and the image tag in `deploy/k8s-sidecar.yaml`. Each is pinned to
-  `__version__` by a test (`tests/test_deploy_assets.py`,
-  `tests/test_plugins.py`), so a missed one fails CI.
+  and the image tags in `deploy/k8s-sidecar.yaml` and `compose.openwebui.yaml`
+  (the `LLM_REDACT_IMAGE` default). Each is pinned to `__version__` by a test
+  (`tests/test_deploy_assets.py`, `tests/test_plugins.py`,
+  `tests/test_openwebui.py`), so a missed one fails CI.
 
 ## Cutting the release
 

@@ -58,7 +58,7 @@ from starlette.requests import HTTPConnection, Request
 from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
 
-from llm_redact import __version__, winreload
+from llm_redact import __version__, platform_info, winreload
 from llm_redact.audit import (
     AuditLog,
     AuditRecord,
@@ -1029,6 +1029,9 @@ class ProxyState:
         self.config = config
         self.config_path = config_path
         self.started_at = time.time()
+        # windows, wsl, linux or macos: which proxy answered, where a native
+        # and a WSL one both run (the /status platform field).
+        self.platform = platform_info.platform_name()
         # License resolution is informational only (the FOSS core has no
         # tier gates): the tier is surfaced and handed to the pro plugin's
         # factories. What fails closed is a config that requests a
@@ -3585,6 +3588,7 @@ async def _handle_local(
         return JSONResponse(
             {
                 "version": __version__,
+                "platform": state.platform,
                 "uptime_seconds": round(time.time() - state.started_at, 1),
                 "started_at": datetime.fromtimestamp(state.started_at, tz=UTC).isoformat(
                     timespec="seconds"

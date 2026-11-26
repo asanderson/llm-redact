@@ -91,11 +91,23 @@ class _Report:
 
 
 def _check_platform(report: _Report) -> None:
-    """Windows-specific posture (silent elsewhere — no noise on the
+    """Windows- and WSL-specific posture (silent elsewhere — no noise on the
     platforms where nothing differs). The supported Windows scope is the
     Free tier plus the agent plugins; SIGHUP does not exist there, so the
     reload path is a restart (or, with llm-redact-pro, the dashboard config
-    editor's hot-apply)."""
+    editor's hot-apply). In WSL: the distribution and its networking mode."""
+    from llm_redact import platform_info
+
+    if platform_info.is_wsl():
+        distribution = platform_info.wsl_distribution() or "unknown"
+        mode = platform_info.networking_mode() or "unknown"
+        report.line(
+            "PASS",
+            "platform",
+            f"WSL (distribution {distribution}, networking mode {mode}): keep the stores in"
+            " the Linux file system, not on a Windows drive under /mnt",
+        )
+        return
     if sys.platform != "win32":
         return
     report.line(
@@ -135,6 +147,7 @@ def _check_paths(report: _Report, config: Config | None = None) -> None:
         " (unless [vault], [audit] or [overrides] names a path) and model folders",
     )
     if config is not None:
+        _check_windows_drive_stores(report, config)
         from llm_redact.log import default_log_file, log_destination
 
         configured = log_destination(config.log.file, console=True)
@@ -164,6 +177,36 @@ def _check_paths(report: _Report, config: Config | None = None) -> None:
                 f" {root}: to move them, stop the proxy, move every file in that folder to"
                 f" {root / 'data'} (each .db file with its -wal and -shm files: a vault moved"
                 " without them loses its newest mappings), then start the proxy again",
+            )
+
+
+def _check_windows_drive_stores(report: _Report, config: Config) -> None:
+    """In WSL, a WARN for each store other than the vault (doctor's vault
+    check FAILs that one) and for the model folders on a Windows drive:
+    SQLite's locks do not hold there, and a model load reads slowly."""
+    from llm_redact.audit import default_audit_path
+    from llm_redact.overrides import default_overrides_path
+    from llm_redact.platform_info import windows_drive_problem
+
+    def configured(path: str | None, default: Path) -> Path:
+        return Path(path).expanduser() if path else default
+
+    places: list[tuple[str, Path]] = []
+    if config.audit.enabled:
+        places.append(("the audit log", configured(config.audit.path, default_audit_path())))
+    if config.overrides.enabled:
+        places.append(
+            ("the override store", configured(config.overrides.path, default_overrides_path()))
+        )
+    places.append(("the model folders", paths.models_dir()))
+    for what, path in places:
+        problem = windows_drive_problem(path)
+        if problem is not None:
+            report.line(
+                "WARN",
+                "paths",
+                f"{what}: {problem}, where SQLite's locks do not hold and reads are slow;"
+                " keep it in the Linux file system",
             )
 
 
@@ -357,7 +400,7 @@ def _check_port_free(report: _Report, config: Config) -> None:
 
 def _check_vault(report: _Report, config: Config) -> None:
     from llm_redact.config import RDBMS_BACKENDS
-    from llm_redact.vault import default_vault_path
+    from llm_redact.vault import default_vault_path, windows_drive_vault_problem
 
     if config.vault.backend == "memory":
         report.line("PASS", "vault", "in-memory backend (nothing on disk)")
@@ -365,7 +408,10 @@ def _check_vault(report: _Report, config: Config) -> None:
         _check_vault_rdbms(report, config)
     else:
         path = Path(config.vault.path).expanduser() if config.vault.path else default_vault_path()
-        if path.exists():
+        drive = windows_drive_vault_problem(path)
+        if drive is not None:
+            report.line("FAIL", "vault", f"{drive} — serve refuses to start")
+        elif path.exists():
             _check_private(report, "vault", path, want_dir_private=True)
         else:
             report.line("WARN", "vault", f"{path} not created yet (first request creates it)")

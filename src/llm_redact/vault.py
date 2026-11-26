@@ -1647,6 +1647,33 @@ def _rdbms_backend_requires_pro(backend: str) -> NoReturn:
     )
 
 
+def windows_drive_vault_problem(path: Path) -> str | None:
+    """In WSL, why a SQLite vault cannot be at ``path``: on a Windows drive
+    (9p in WSL 2, drvfs in WSL 1) SQLite's file locks and shared memory do
+    not hold, and the proxy writes through two connections (its background
+    map writer has its own), so a lost write could have a number issued
+    twice and a token restore to another value. None where it can be."""
+    from llm_redact.platform_info import windows_drive_problem
+
+    problem = windows_drive_problem(path)
+    if problem is None:
+        return None
+    linux_default = Path.home() / ".local" / "share" / "llm-redact" / "vault.db"
+    return (
+        f"[vault] {problem}: SQLite cannot lock files there reliably, so the vault"
+        " could lose writes and issue a token number twice; keep it in the Linux"
+        f" file system (the default is {linux_default})"
+    )
+
+
+def _refuse_windows_drive(path: Path) -> None:
+    problem = windows_drive_vault_problem(path)
+    if problem is not None:
+        from llm_redact.config import ConfigError
+
+        raise ConfigError(problem)
+
+
 def build_vault(config: "VaultConfig") -> Vault:
     """Single-session vault for the configured (static) session."""
     if config.backend == "memory":
@@ -1656,6 +1683,7 @@ def build_vault(config: "VaultConfig") -> Vault:
     if config.backend in RDBMS_BACKENDS:
         _rdbms_backend_requires_pro(config.backend)
     path = Path(config.path).expanduser() if config.path else default_vault_path()
+    _refuse_windows_drive(path)
     return open_sqlite_vault(path, config.session, build_cipher(config))
 
 
@@ -1670,4 +1698,5 @@ def build_vault_manager(config: "VaultConfig") -> VaultManager:
     if config.backend in RDBMS_BACKENDS:
         _rdbms_backend_requires_pro(config.backend)
     path = Path(config.path).expanduser() if config.path else default_vault_path()
+    _refuse_windows_drive(path)
     return SqliteVaultManager(path, cipher=build_cipher(config))

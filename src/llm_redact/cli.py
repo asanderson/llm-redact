@@ -860,7 +860,9 @@ def run_status(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, indent=2))
         return 0
-    print(f"llm-redact {payload['version']} — up {payload['uptime_seconds']}s")
+    # An older proxy says no platform.
+    where = f" on {payload['platform']}" if payload.get("platform") else ""
+    print(f"llm-redact {payload['version']}{where} — up {payload['uptime_seconds']}s")
     license_info = payload.get("license") or {}
     if license_info:
         # The FOSS core enforces nothing — keyless, the caps a key would

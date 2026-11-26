@@ -75,7 +75,20 @@ and tags `vX.Y.Z`.
   proxy in this session listens on the port; on Linux and macOS it prints the `kill -HUP` form
   and exits 2.
 
+- **`/status` says which platform answered** (`platform`: `windows`, `wsl`, `linux` or `macos`),
+  where a native and a WSL proxy both run on one machine; `llm-redact status` prints it on its
+  first line. In WSL, `doctor` names the distribution and the networking mode (`wslinfo
+  --networking-mode`, where WSL ships it).
+
 ### Changed
+- **In WSL, a SQLite vault on a Windows drive is refused at startup**: under `/mnt/c` (a 9p
+  mount in WSL 2, drvfs in WSL 1) SQLite's file locks and shared memory do not hold, and the
+  proxy writes through two connections (its background map writer has its own), so the vault
+  could lose writes and issue a token number twice. `serve` (and `serve --check`) stops with an
+  error naming the path and the Linux-side default, and `doctor` FAILs it; the audit log, the
+  override store and the model folders there get a WARN. A vault in the Linux file system, and
+  every path outside WSL, is unaffected. To keep an existing vault, stop the proxy and move it
+  (with its `-wal` and `-shm` files) into the Linux file system.
 - **On Windows, llm-redact's per-user files now go under `%LOCALAPPDATA%\llm-redact`**, which
   stays on the machine (the config holds deny strings, so it should not roam with the profile):
   the config file is `%LOCALAPPDATA%\llm-redact\config.toml`, and the vault, audit and override

@@ -152,3 +152,33 @@ def test_preview_refuses_input_that_is_not_utf8_in_a_utf8_stream(
     assert piped.returncode == 2
     assert piped.stdout == b""
     assert "not UTF-8" in piped.stderr.decode() and "offset 5" in piped.stderr.decode()
+
+
+@pytest.mark.parametrize(
+    ("data", "encoding", "text", "said"),
+    [
+        (b"\xef\xbb\xbfask M\xc3\xbcller", "cp1252", "ask Müller", ""),
+        ("ask Müller".encode("cp1252"), "cp1252", "ask Müller", "read it as cp1252"),
+        (b"ask M\xfcller", "utf-8", None, "offset 5"),
+        (b"\xef\xbb\xbfask M\xfcller", "utf-8", None, "offset 8"),
+        (b"ask M\xfcller", "ascii", None, "offset 5"),
+    ],
+    ids=["utf-8 with BOM", "code page", "utf-8 stream", "offset counts the BOM", "neither"],
+)
+def test_preview_input_is_utf8_else_the_streams_own_encoding(
+    data: bytes,
+    encoding: str,
+    text: str | None,
+    said: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The same reading in-process (the tests above run the CLI).
+    import io
+
+    from llm_redact import cli
+
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data), encoding=encoding))
+    assert cli._piped_text() == text
+    err = capsys.readouterr().err
+    assert (said in err) if said else err == ""

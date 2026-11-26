@@ -548,6 +548,9 @@ async def test_a_recheck_cancelled_from_outside_closes_and_the_backstop_lives_on
     # still see a revocation only the recheck can.
     errors: Counter[str] = Counter()
     live = LiveConnections(errors, interval=0.01, eager=True)
+    # The check is ended by the cancel, never by its own deadline (a 10 ms
+    # interval is below Windows' timer granularity).
+    live.timeout = 30
     shared: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
     asked = asyncio.Event()
 

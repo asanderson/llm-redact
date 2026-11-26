@@ -269,6 +269,7 @@ async def test_an_expired_documentai_access_token_fails_closed_until_rotated(
 
 
 def _key_file(tmp_path: Path, **overrides: Any) -> tuple[Path, Any]:
+    pytest.importorskip("cryptography")
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -296,6 +297,7 @@ def _b64(part: str) -> bytes:
 
 
 async def test_documentai_with_a_service_account_key_file(tmp_path: Path) -> None:
+    pytest.importorskip("cryptography")
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -368,6 +370,7 @@ def test_a_bad_key_file_refuses_to_start(
 def test_an_unreadable_key_file_and_a_missing_extra(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip("cryptography")
     with pytest.raises(ConfigError, match="cannot be read as JSON"):
         load_google_key(str(tmp_path / "absent.json"))
     config = parse_extraction(
@@ -391,6 +394,7 @@ def test_an_unreadable_key_file_and_a_missing_extra(
 
 
 def test_the_ec_key_of_a_key_file_is_refused(tmp_path: Path) -> None:
+    pytest.importorskip("cryptography")
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
 

@@ -56,8 +56,10 @@ def key_from_command() -> str | None:
 
     Runs the operator-configured command (via the shell, since it is their
     own command and often carries pipes/args) and returns its stdout,
-    stripped. Its output is read as UTF-8, whatever the locale. Any failure
-    — command unset, non-zero exit, missing binary, timeout, output that is
+    stripped. Its output is read as UTF-8, whatever the locale, decoded here
+    from the bytes (Windows decodes a captured pipe in a reader thread,
+    where an invalid byte only leaves the output unset). Any failure —
+    command unset, non-zero exit, missing binary, timeout, output that is
     not UTF-8 — returns None so the caller falls through to the keyring and
     ultimately fails closed. We log the failure by exception TYPE only:
     CalledProcessError carries captured stdout/stderr that could contain the
@@ -71,10 +73,10 @@ def key_from_command() -> str | None:
             cmd,
             shell=True,
             capture_output=True,
-            encoding="utf-8",
             timeout=_CMD_TIMEOUT_S,
             check=True,
         )
+        output = result.stdout.decode("utf-8")
     except (subprocess.SubprocessError, OSError, UnicodeDecodeError) as exc:
         # UnicodeDecodeError: output that is not UTF-8 is no key (Fernet keys
         # are ASCII); its message is never formatted — it holds the output.
@@ -82,7 +84,7 @@ def key_from_command() -> str | None:
             "%s failed (%s); treating the vault key as absent", CMD_ENV_KEY, type(exc).__name__
         )
         return None
-    key = result.stdout.strip()
+    key = output.strip()
     return key or None
 
 

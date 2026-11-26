@@ -11,8 +11,12 @@ validated hosts"; never "certified".
 """
 
 import ssl
+import sys
 from pathlib import Path
 
+# Linux's kernel flag, read on Linux only: on Windows this path names a
+# file at the root of the working directory's drive, which another local
+# account can create.
 _KERNEL_FLAG = Path("/proc/sys/crypto/fips_enabled")
 
 
@@ -36,11 +40,15 @@ def collect_fips_report() -> list[tuple[str, str]]:
     except ImportError:
         report.append(("cryptography's OpenSSL", "crypto extra not installed"))
 
-    try:
-        flag = _KERNEL_FLAG.read_text().strip()
-        report.append(("kernel fips_enabled", flag))
-    except OSError:
-        report.append(("kernel fips_enabled", "unknown (no /proc/sys/crypto/fips_enabled)"))
+    if sys.platform != "linux":
+        not_linux = f"not checked (a Linux flag; this is {sys.platform})"
+        report.append(("kernel fips_enabled", not_linux))
+    else:
+        try:
+            flag = _KERNEL_FLAG.read_text(encoding="ascii", errors="replace").strip()
+            report.append(("kernel fips_enabled", flag))
+        except OSError:
+            report.append(("kernel fips_enabled", "unknown (no /proc/sys/crypto/fips_enabled)"))
 
     # Static, not probed: the algorithm selections behind [vault] encryption
     # (sqlite at-rest and the encrypted in-memory backend share VaultCipher).

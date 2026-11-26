@@ -176,6 +176,7 @@ def test_the_real_terminal_opener_fails_without_one(monkeypatch: pytest.MonkeyPa
     def refuse(*args: Any, **kwargs: Any) -> Any:
         raise OSError("no tty")
 
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(override_cli.io, "FileIO", refuse)
     with pytest.raises(OSError):
         override_cli._open_tty()
@@ -193,11 +194,57 @@ def test_the_terminal_opener_closes_the_terminal_when_it_cannot_wrap_it(
     def unwrappable(*args: Any, **kwargs: Any) -> Any:
         raise ValueError("no text layer")
 
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(override_cli.io, "FileIO", lambda *args: Raw())
     monkeypatch.setattr(override_cli.io, "TextIOWrapper", unwrappable)
     with pytest.raises(ValueError):
         override_cli._open_tty()
     assert closed == [True]
+
+
+def test_windows_never_opens_a_tty_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Windows has no /dev/tty: there "/dev/tty" names \\dev\\tty at the
+    root of the working directory's drive, a file another local account can
+    create with ``allow`` in it. The real opener refuses before opening
+    anything, so the approval refuses and the code stays pending."""
+    opened: list[object] = []
+
+    def record(*args: Any, **kwargs: Any) -> Any:
+        opened.append(args)
+        return io.BytesIO(b"allow\n")
+
+    db = tmp_path / "o.db"
+    code = _pending(db)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(override_cli.io, "FileIO", record)
+    monkeypatch.setattr("sys.stdin", io.StringIO("allow\n"))
+    assert _run(code, "--once", "--db", str(db)) == 1
+    assert "not available on Windows" in capsys.readouterr().err
+    assert opened == []
+    assert [e.state for e in OverrideStore(db).entries()] == ["pending"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="plants the file at a real drive root")
+def test_a_tty_file_planted_at_a_drive_root_approves_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from drive_root import drive_rooted_at
+
+    db = tmp_path / "o.db"
+    code = _pending(db)
+    root = tmp_path / "drive"
+    planted = root / "dev" / "tty"
+    planted.parent.mkdir(parents=True)
+    planted.write_bytes(b"allow\n")
+    with drive_rooted_at(root):
+        # The hazard is real here: the driveless path lands on the file.
+        assert Path("/dev/tty").read_bytes() == b"allow\n"
+        assert _run(code, "--once", "--db", str(db)) == 1
+    assert "not available on Windows" in capsys.readouterr().err
+    assert planted.read_bytes() == b"allow\n"
+    assert [e.state for e in OverrideStore(db).entries()] == ["pending"]
 
 
 # --- doctor and the status posture ----------------------------------------------------

@@ -711,6 +711,31 @@ def test_cpu_model(tmp_path: Path) -> None:
     assert ner_latency.cpu_model(tmp_path / "missing")
 
 
+def test_cpu_model_reads_proc_on_linux_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/proc/cpuinfo is Linux's. On Windows "/proc/cpuinfo" names a file at
+    the root of the working directory's drive, which another local account
+    can create: the report never takes its CPU name from there."""
+
+    class Untouchable:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"/proc/cpuinfo was used off Linux (.{name})")
+
+        def __fspath__(self) -> str:
+            raise AssertionError("/proc/cpuinfo was opened off Linux")
+
+    cpuinfo = tmp_path / "cpuinfo"
+    cpuinfo.write_text("model name\t: Planted CPU\n")
+    monkeypatch.setattr(ner_latency, "CPUINFO", cpuinfo)
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert ner_latency.cpu_model() == "Planted CPU"
+    monkeypatch.setattr(ner_latency, "CPUINFO", Untouchable())
+    for platform in ("win32", "darwin"):
+        monkeypatch.setattr(sys, "platform", platform)
+        assert ner_latency.cpu_model() not in ("", "Planted CPU")
+
+
 def test_text_of_length() -> None:
     for length in (1, 50, 2000, 50_000):
         assert len(ner_latency.text_of_length(length)) == length

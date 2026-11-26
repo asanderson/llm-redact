@@ -23,6 +23,18 @@ and tags `vX.Y.Z`.
   at the per-user file; Linux and macOS (WSL included) still read `/etc/llm-redact/config.toml`.
   Loading, the write targets and the refusal hint's `--config` decision read one list
   (`config_search_candidates`). Affected: every release run on Windows, since 1.0.0.
+- **On Windows, `llm-redact override CODE` read its confirmation from a file.** The approval
+  reads `allow` from the controlling terminal, `/dev/tty`, which on Windows names
+  `\dev\tty` at the root of the working directory's drive: a file another local account (or
+  software running as the operator) could create with `allow` in it approved the refusal without
+  a person typing anything. On Windows the command now refuses to approve without opening
+  anything; approving on the command line is not available there yet. Affected: 1.10.0 and later
+  on Windows, with `[overrides] enabled = true` (off by default).
+- `llm-redact fips-check` read the Linux kernel's FIPS flag, `/proc/sys/crypto/fips_enabled`, on
+  every platform: on Windows a file planted at a drive's root could make the report claim FIPS
+  mode. The flag is read on Linux only; elsewhere the report says `not checked`. A test now fails
+  on any new rooted path without a drive that reaches a file or process call in the source unless
+  it is listed with the check that keeps Windows away from it.
 
 ## [1.13.0] - 2026-11-10
 

@@ -72,7 +72,9 @@ character is escaped and either is cut to 120 characters, its length named),
 repeats the kind and types on the line it asks you to confirm, and waits for
 `allow` typed on the controlling terminal (`/dev/tty`). It never
 reads the answer from stdin and refuses without a terminal, so an agent that
-merely pipes `allow` into the command does not approve anything. With
+merely pipes `allow` into the command does not approve anything. Windows has
+no `/dev/tty`, so on Windows the command refuses to approve: approving on the
+command line is not available there yet. With
 llm-redact-pro and a dashboard sign-in (`[auth.dashboard]`), the dashboard
 shows the same pending refusals with **Allow once** and **Always allow**
 buttons, and your rules with **Revoke**.

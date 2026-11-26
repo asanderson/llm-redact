@@ -51,8 +51,19 @@ def _default_base_url() -> str | None:
         return None
 
 
-def _target_dir(tool: str, env: Mapping[str, str]) -> Path:
-    home = Path(env.get("HOME") or Path.home())
+def _tools_home(env: Mapping[str, str], platform: str) -> Path:
+    """The folder the agent tools keep theirs under. On Windows the user
+    profile (USERPROFILE, which Path.home() reads): Git Bash and MSYS set
+    HOME to a POSIX path (/c/Users/me), which Windows reads as a folder at
+    the root of the current drive. Elsewhere HOME, else Path.home()."""
+    if platform == "win32":
+        profile = env.get("USERPROFILE")
+        return Path(profile) if profile else Path.home()
+    return Path(env.get("HOME") or Path.home())
+
+
+def _target_dir(tool: str, env: Mapping[str, str], *, platform: str | None = None) -> Path:
+    home = _tools_home(env, sys.platform if platform is None else platform)
     if tool == "claude":
         base = Path(env["CLAUDE_CONFIG_DIR"]) if env.get("CLAUDE_CONFIG_DIR") else home / ".claude"
         return base / "commands"

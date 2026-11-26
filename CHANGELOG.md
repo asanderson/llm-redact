@@ -200,6 +200,13 @@ and tags `vX.Y.Z`.
   in.
 
 ### Fixed
+- On Windows, `llm-redact plugin install` wrote each agent tool's commands under `HOME`, which Git
+  Bash and MSYS set to a POSIX path (`/c/Users/me`) that Windows reads as a folder at the root of
+  the current drive, where the tools never look. They now go under the user profile
+  (`%USERPROFILE%\.claude\commands` and so on); a tool's own variable (`CLAUDE_CONFIG_DIR`,
+  `CODEX_HOME`, `XDG_CONFIG_HOME`) still wins. The `config-edit` command reloads with
+  `llm-redact reload` on Windows, which has no SIGHUP, and the plugin install e2e runs on a
+  Windows CI leg too.
 - On Windows, `pip install "llm-redact-proxy[perf]"` (or `uv tool install` with it) failed: uvloop
   ships no Windows wheel and refuses to build there. The extra now leaves Windows out, where
   uvicorn runs asyncio's own loop, so `[perf]` installs and changes nothing. A test walks

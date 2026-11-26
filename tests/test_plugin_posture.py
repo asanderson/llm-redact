@@ -31,6 +31,7 @@ def _run(tmp_path: Path, *, cli: bool, env: dict[str, str], args: tuple[str, ...
     full_env = {
         "PATH": f"{bindir}:/usr/bin:/bin",
         "HOME": str(tmp_path),
+        "USERPROFILE": str(tmp_path),
         **env,
     }
     result = subprocess.run(

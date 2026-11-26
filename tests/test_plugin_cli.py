@@ -15,12 +15,33 @@ from llm_redact.plugin_cli import _target_dir, install, status, uninstall
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
-    return {"HOME": str(tmp_path)}
+    # HOME on Linux and macOS, USERPROFILE on Windows.
+    return {"HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}
+
+
+def test_on_windows_the_tools_folders_are_under_the_user_profile(tmp_path: Path) -> None:
+    # Git Bash and MSYS set HOME to a POSIX path (/c/Users/me), which Windows
+    # reads as a folder at the root of the current drive; the tools read
+    # their folders under the user profile.
+    env = {"HOME": "/c/Users/me", "USERPROFILE": str(tmp_path)}
+    for tool, folder in (
+        ("claude", tmp_path / ".claude" / "commands"),
+        ("codex", tmp_path / ".codex" / "prompts"),
+        ("opencode", tmp_path / ".config" / "opencode" / "commands"),
+        ("cursor", tmp_path / ".cursor" / "commands"),
+    ):
+        assert _target_dir(tool, env, platform="win32") == folder
+    # A tool's own variable still wins, and so does XDG_CONFIG_HOME.
+    env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "cc")
+    assert _target_dir("claude", env, platform="win32") == tmp_path / "cc" / "commands"
+    # Elsewhere HOME decides, as before.
+    assert _target_dir("cursor", env, platform="linux") == Path("/c/Users/me/.cursor/commands")
 
 
 def test_target_dirs_honor_tool_env_overrides(tmp_path: Path) -> None:
     env = {
         "HOME": str(tmp_path),
+        "USERPROFILE": str(tmp_path),
         "CLAUDE_CONFIG_DIR": str(tmp_path / "cc"),
         "CODEX_HOME": str(tmp_path / "cx"),
         "XDG_CONFIG_HOME": str(tmp_path / "xdg"),

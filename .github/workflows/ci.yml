@@ -203,6 +203,23 @@ jobs:
             echo "claude CLI not present on the runner; skipping structural validate"
           fi
 
+  plugins-windows:
+    # The install + CLI contract on Windows: every tool's commands land under
+    # the user profile, and every `llm-redact` subcommand a body names parses.
+    name: agent plugins (Windows install e2e)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - run: uv run python scripts/plugin_e2e.py
+
   helm:
     # The Helm chart (deploy/helm/llm-redact) rendered for real: `helm lint`
     # plus the helm-gated tests in test_deploy_assets.py, which render both

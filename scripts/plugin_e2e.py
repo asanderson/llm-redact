@@ -1,4 +1,4 @@
-"""End-to-end check for the agent plugins: install into a throwaway HOME,
+"""End-to-end check for the agent plugins: install into a throwaway home,
 then prove the files land where each tool looks and that every command a
 body tells the agent to run is a real `llm-redact` subcommand that at
 least parses its own `--help`.
@@ -22,7 +22,9 @@ from llm_redact.plugin_cli import TOOLS, _target_dir, install
 
 def main() -> int:
     home = Path(tempfile.mkdtemp(prefix="llm-redact-plugin-e2e-"))
-    env = {"HOME": str(home)}
+    # The tools' folders: under HOME on Linux and macOS, under the user
+    # profile on Windows.
+    env = {"HOME": str(home), "USERPROFILE": str(home)}
     expected = sorted(f"llm-redact-{c.name}.md" for c in COMMANDS)
 
     for tool in TOOLS:

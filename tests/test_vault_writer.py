@@ -1162,17 +1162,19 @@ def test_the_docs_say_what_another_replica_reads_in_each_mode() -> None:
     first (refused or sealed there). Every place that tells an operator
     about replicas must say so."""
     root = Path(__file__).resolve().parent.parent
-    resilience = (root / "docs" / "resilience.md").read_text()
+    resilience = (root / "docs" / "resilience.md").read_text(encoding="utf-8")
     assert "Several replicas share one vault" in resilience
     assert "Read-your-writes then holds within ONE process only" in resilience
     assert '**`"before_answer"`** — the default for the shared-database backends' in resilience
-    deployment = (root / "docs" / "deployment.md").read_text()
+    deployment = (root / "docs" / "deployment.md").read_text(encoding="utf-8")
     assert "ANY replica — no session affinity needed" in deployment
     assert "use session affinity at the load balancer then" in deployment
-    notes = (root / "deploy" / "helm" / "llm-redact" / "templates" / "NOTES.txt").read_text()
+    notes = (root / "deploy" / "helm" / "llm-redact" / "templates" / "NOTES.txt").read_text(
+        encoding="utf-8"
+    )
     assert 'map_writes = "before_answer" holds an answer' in notes
     assert "reaching another pod before" in notes
-    how = " ".join((root / "docs" / "how-it-works.md").read_text().split())
+    how = " ".join((root / "docs" / "how-it-works.md").read_text(encoding="utf-8").split())
     assert "the frame carrying the handle is held until it landed" in how
-    example = (root / "config.example.toml").read_text()
+    example = (root / "config.example.toml").read_text(encoding="utf-8")
     assert '# map_writes = "before_answer"' in example

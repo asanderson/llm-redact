@@ -67,11 +67,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.out is not None:
         args.out.mkdir(parents=True, exist_ok=True)
-        (args.out / "report.md").write_text(markdown)
+        (args.out / "report.md").write_text(markdown, encoding="utf-8", newline="\n")
         report = to_json_dict(result, seed=args.seed)
         if latency_stats is not None:
             report["latency"] = to_json_list(latency_stats)
-        (args.out / "report.json").write_text(json.dumps(report, indent=2))
+        (args.out / "report.json").write_text(
+            json.dumps(report, indent=2), encoding="utf-8", newline="\n"
+        )
         print(f"report written to {args.out}/report.md and report.json")
     else:
         print(markdown)

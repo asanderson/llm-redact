@@ -3087,6 +3087,8 @@ def apply_limits(memory_bytes: int, cpu_seconds: int) -> None:
     (the parent's wall-clock kill still holds), and a platform without
     resource limits (Windows) applies none: the parent bounds the input
     there instead (``extraction.MEMORY_LIMIT_ENFORCED``)."""
+    if sys.platform == "win32":
+        return
     try:
         import resource
     except ImportError:

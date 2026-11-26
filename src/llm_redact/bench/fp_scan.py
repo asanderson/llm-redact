@@ -42,7 +42,7 @@ class FpFileResult:
 
 
 def load_manifest(root: Path) -> dict[str, dict[str, int]]:
-    raw = tomllib.loads((root / MANIFEST_NAME).read_text())
+    raw = tomllib.loads((root / MANIFEST_NAME).read_text(encoding="utf-8"))
     files = raw.get("files", {})
     return {name: {str(t): int(n) for t, n in expected.items()} for name, expected in files.items()}
 

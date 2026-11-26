@@ -27,7 +27,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 
 
 def _workflow(name: str) -> dict[str, Any]:
-    loaded: dict[str, Any] = yaml.safe_load((WORKFLOWS / name).read_text())
+    loaded: dict[str, Any] = yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
     return loaded
 
 
@@ -82,7 +82,7 @@ def test_the_bench_scores_the_two_default_models() -> None:
 def test_a_bench_config_for_another_model_may_name_it(tmp_path: Path) -> None:
     # What CONTRIBUTING's checklist step 3 adds for a non-default model.
     for path in BENCH_CONFIGS:
-        (tmp_path / path.name).write_text(path.read_text())
+        (tmp_path / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     added = tmp_path / "gliner-pii-edge.toml"
     added.write_text(
         '[detection.ner]\nenabled = true\nbackend = "gliner"\n'
@@ -141,8 +141,8 @@ def test_ci_pulls_every_model_the_real_model_tests_load() -> None:
 
 @pytest.mark.parametrize("path", BENCH_CONFIGS, ids=lambda p: p.stem)
 def test_each_bench_config_has_recorded_baselines(path: Path) -> None:
-    thresholds = tomllib.loads((ROOT / "bench" / "ner_thresholds.toml").read_text())
-    ceilings = tomllib.loads((ROOT / "bench" / "ner_ceilings.toml").read_text())
+    thresholds = tomllib.loads((ROOT / "bench" / "ner_thresholds.toml").read_text(encoding="utf-8"))
+    ceilings = tomllib.loads((ROOT / "bench" / "ner_ceilings.toml").read_text(encoding="utf-8"))
     name = path.stem
     for entry in (thresholds[name]["synthetic"], ceilings[name]):
         assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", entry["recorded"])
@@ -166,8 +166,8 @@ def test_only_the_int8_edge_onnx_config_carries_the_cross_cpu_tolerance() -> Non
     # ceiling and a zero structured-regression budget would fail on whichever
     # runner the job lands on (docs/ner-bench.md, "False positives on agent
     # traffic"); every other config keeps both, so a real regression still shows.
-    thresholds = tomllib.loads((ROOT / "bench" / "ner_thresholds.toml").read_text())
-    ceilings = tomllib.loads((ROOT / "bench" / "ner_ceilings.toml").read_text())
+    thresholds = tomllib.loads((ROOT / "bench" / "ner_thresholds.toml").read_text(encoding="utf-8"))
+    ceilings = tomllib.loads((ROOT / "bench" / "ner_ceilings.toml").read_text(encoding="utf-8"))
     tolerant = "gliner-knowledgator-edge-onnx"
     assert ceilings[tolerant]["per_file"] is False
     assert "per_100kb_max" in ceilings[tolerant]
@@ -183,17 +183,17 @@ def test_only_the_int8_edge_onnx_config_carries_the_cross_cpu_tolerance() -> Non
 
 @pytest.mark.parametrize("path", MANUAL_CONFIGS, ids=lambda p: p.stem)
 def test_a_manual_config_has_recorded_baselines_and_says_why(path: Path) -> None:
-    thresholds = tomllib.loads((ROOT / "bench" / "ner_thresholds.toml").read_text())
+    thresholds = tomllib.loads((ROOT / "bench" / "ner_thresholds.toml").read_text(encoding="utf-8"))
     entry = thresholds[path.stem]["synthetic"]
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", entry["recorded"])
     for source in hub_sources(load_config(path).detection.ner):
         assert source.model_id in entry["note"] and str(source.revision) in entry["note"]
     requested = load_config(path).detection.ner.entities
     assert set(requested) <= set(entry["type_leak_max"])
-    ceilings = tomllib.loads((ROOT / "bench" / "ner_ceilings.toml").read_text())
+    ceilings = tomllib.loads((ROOT / "bench" / "ner_ceilings.toml").read_text(encoding="utf-8"))
     assert "per_100kb_max" in ceilings[path.stem]
     # Its comment says why CI does not run it.
-    assert "by hand" in path.read_text()
+    assert "by hand" in path.read_text(encoding="utf-8")
 
 
 def test_a_manual_model_gets_a_smoke_test_in_ci_but_no_bench() -> None:
@@ -313,7 +313,7 @@ def test_the_docs_name_when_the_ner_models_job_runs() -> None:
     triggers = _workflow("ci.yml")[True]  # YAML 1.1 reads the key "on" as true
     assert triggers["push"] == {"branches": ["main"]}
     assert set(triggers) == {"push", "pull_request", "schedule"}
-    docs = " ".join((ROOT / "docs" / "ner-bench.md").read_text().split())
+    docs = " ".join((ROOT / "docs" / "ner-bench.md").read_text(encoding="utf-8").split())
     assert (
         "(a job of `.github/workflows/ci.yml`, on pull requests, pushes to `main` and the"
         " weekly CI schedule)" in docs
@@ -399,11 +399,11 @@ def test_the_cpu_torch_recipe_is_the_only_one() -> None:
     # One CPU-torch recipe: scripts/cpu_torch.py (its SHA-256 table pinned to
     # uv.lock's torch by tests/test_cpu_torch_script.py). No second pin file.
     assert not (SCRIPTS / "ner_ci_torch_cpu.txt").exists()
-    assert "ner_ci_torch_cpu" not in ENV_SCRIPT.read_text()
+    assert "ner_ci_torch_cpu" not in ENV_SCRIPT.read_text(encoding="utf-8")
 
 
 def test_the_environment_script_checks_every_hash() -> None:
-    commands = _commands(ENV_SCRIPT.read_text())
+    commands = _commands(ENV_SCRIPT.read_text(encoding="utf-8"))
     # The export keeps the lock's hashes and goes through cpu_torch.py,
     # which takes torch and its GPU-only packages out whole and pins the
     # locked torch's CPU wheels by SHA-256 (never a line filter here).
@@ -434,8 +434,8 @@ def test_the_docs_scope_local_reproduction_to_what_the_script_runs_on() -> None:
     # The script runs the venv's POSIX interpreter (`$venv/bin/python`; a
     # Windows venv has Scripts/python.exe) and pipes through python3, so
     # docs/ner-bench.md must not promise a local run on Windows.
-    assert '"$venv/bin/python"' in ENV_SCRIPT.read_text()
-    text = (ROOT / "docs" / "ner-bench.md").read_text()
+    assert '"$venv/bin/python"' in ENV_SCRIPT.read_text(encoding="utf-8")
+    text = (ROOT / "docs" / "ner-bench.md").read_text(encoding="utf-8")
     start = text.index("To reproduce the job locally")
     paragraph = " ".join(text[start : text.index("```", start)].split())
     assert "CPython 3.13 venv; Linux, x86_64 or aarch64" in paragraph
@@ -457,7 +457,7 @@ def test_actions_are_pinned_and_checkouts_keep_no_credentials(name: str) -> None
 
 def test_claude_md_states_the_ci_invariants() -> None:
     # The repository's agent instructions name what this file pins.
-    text = (ROOT / "CLAUDE.md").read_text()
+    text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
     for needle in (
         real_models.REQUIRED_ENV,
         "`ner-models`",

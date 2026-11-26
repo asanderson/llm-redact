@@ -8,7 +8,7 @@ DOCS = Path(__file__).resolve().parent.parent / "docs"
 
 
 def test_docs_index_links_every_doc() -> None:
-    index = (DOCS / "README.md").read_text()
+    index = (DOCS / "README.md").read_text(encoding="utf-8")
     missing = [
         p.name
         for p in sorted(DOCS.glob("*.md"))
@@ -43,7 +43,7 @@ def test_public_docs_cite_no_private_planning_ids() -> None:
             *sorted((root / "scripts" / "pii_corpus").glob("*.md")),
             root / "scripts" / "pii_corpus" / "training_sources.toml",
         ]
-        if (ids := _planning_ids(path.read_text()))
+        if (ids := _planning_ids(path.read_text(encoding="utf-8")))
     }
     assert found == {}
 
@@ -88,7 +88,7 @@ def test_docs_code_fences_close() -> None:
     found = {
         str(path.relative_to(root)): lines
         for path in [*sorted(DOCS.glob("*.md")), root / "README.md", root / "CHANGELOG.md"]
-        if (lines := _fence_problems(path.read_text()))
+        if (lines := _fence_problems(path.read_text(encoding="utf-8")))
     }
     assert found == {}
 

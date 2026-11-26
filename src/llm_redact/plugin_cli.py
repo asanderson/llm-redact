@@ -228,7 +228,7 @@ def install(
         if path.exists() and path.read_text(encoding="utf-8") == content:
             unchanged += 1
             continue
-        path.write_text(content, encoding="utf-8")
+        path.write_text(content, encoding="utf-8", newline="\n")
         written += 1
     print(f"{tool}: {written} file(s) written, {unchanged} already current in {target}")
     print(f"{tool}: {_invocation_hint(tool)}")

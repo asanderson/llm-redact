@@ -102,7 +102,7 @@ def load_thresholds(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise BenchError(f"{path} not found")
     try:
-        return tomllib.loads(path.read_text())
+        return tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
         raise BenchError(f"{path}: {exc}") from exc
 
@@ -214,10 +214,21 @@ def write_dump(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
         # O_NOFOLLOW refuses it below where the platform has the flag (POSIX);
         # Windows has none, so the link is refused here too.
         raise OSError(errno.ELOOP, "refusing to write the dump through a symlink", str(path))
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    # O_BINARY: without it the Windows CRT opens the descriptor in text mode
+    # and writes \r\n for every \n, whatever the newline argument says.
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_TRUNC
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
     fd = os.open(path, flags, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as out:
-        os.fchmod(out.fileno(), 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as out:
+        if sys.platform != "win32":
+            # A truncated file keeps its old mode. Windows has no mode bits
+            # (and no fchmod before Python 3.13).
+            os.fchmod(out.fileno(), 0o600)
         for record in records:
             out.write(json.dumps(record) + "\n")
 
@@ -500,8 +511,10 @@ def _emit(args: argparse.Namespace, markdown: str, report: Mapping[str, object])
         print(markdown)
         return
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "report.md").write_text(markdown)
-    (args.out / "report.json").write_text(json.dumps(report, indent=2))
+    (args.out / "report.md").write_text(markdown, encoding="utf-8", newline="\n")
+    (args.out / "report.json").write_text(
+        json.dumps(report, indent=2), encoding="utf-8", newline="\n"
+    )
     print(f"report written to {args.out}/report.md and report.json")
 
 

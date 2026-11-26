@@ -738,6 +738,50 @@ def test_pull_to_writes_portable_folders_a_manifest_and_the_snippet(
     assert code == 0, verified
 
 
+def test_pull_to_writes_the_same_bytes_on_every_platform(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A folder written on Windows hashes as one written on Linux: the
+    manifest, the sidecars and an assembled gliner_config.json are written
+    with \\n line ends whatever the platform. Simulated here: a text write
+    that names no newline translates \\n to \\r\\n, as on Windows."""
+    import pathlib
+
+    install_hub(monkeypatch, _pull_hub())
+    config = _config(
+        tmp_path,
+        'backends = ["gliner", "hf"]',
+        f'[detection.ner.revisions]\nhf = "{HF_DEFAULT_PIN}"\n',
+    )
+    linux = tmp_path / "linux"
+    assert _run(capsys, "pull", "--config", str(config), "--to", str(linux))[0] == 0
+    real = pathlib.Path.write_text
+
+    def windows_write_text(
+        self: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        translated = "\r\n" if newline is None else newline
+        return real(self, data, encoding=encoding, errors=errors, newline=translated)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", windows_write_text)
+    windows = tmp_path / "windows"
+    assert _run(capsys, "pull", "--config", str(config), "--to", str(windows))[0] == 0
+
+    def tree(root: Path) -> dict[str, bytes]:
+        return {
+            path.relative_to(root).as_posix(): path.read_bytes()
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        }
+
+    assert tree(windows) == tree(linux)
+    assert not any(b"\r\n" in data for data in tree(windows).values())
+
+
 def test_pull_to_as_prints_the_mounted_paths(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -659,7 +659,9 @@ def write_portable(root: Path, pulled: list[Pulled]) -> list[tuple[str, str]]:
             temp = root / f".{name}.partial"
             staged.append(temp)
             models.append(_stage_folder(temp, name, model_id, item))
-        manifest.write_text(json_text(manifest_json(models, __version__)) + "\n", encoding="utf-8")
+        manifest.write_text(
+            json_text(manifest_json(models, __version__)) + "\n", encoding="utf-8", newline="\n"
+        )
         (root / MANIFEST_NAME).unlink(missing_ok=True)
         for temp, (name, _, _) in zip(staged, named, strict=True):
             _replace_folder(temp, root / name)
@@ -704,9 +706,11 @@ def _stage_folder(temp: Path, name: str, model_id: str, item: Pulled) -> "Manife
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(os.path.realpath(source), target)
     if item.files.config is not None:
-        (temp / GLINER_CONFIG).write_text(config_text(item.files.config), encoding="utf-8")
+        (temp / GLINER_CONFIG).write_text(
+            config_text(item.files.config), encoding="utf-8", newline="\n"
+        )
     identity = ModelIdentity(model_id, item.revision)
-    (temp / SIDECAR_NAME).write_text(sidecar_text(identity), encoding="utf-8")
+    (temp / SIDECAR_NAME).write_text(sidecar_text(identity), encoding="utf-8", newline="\n")
     records = file_records(temp, folder_files(temp))
     # The manifest names a Hub base model only: a local one is no Hub id,
     # whatever its name (its files are in the folder, each with its SHA-256).

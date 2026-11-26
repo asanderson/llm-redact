@@ -162,7 +162,7 @@ def run_service(args: argparse.Namespace) -> int:
             print(unit_text)
             return 0
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(unit_text)
+        path.write_text(unit_text, encoding="utf-8", newline="\n")
         print(f"wrote {path}")
         if sys.platform == "darwin":
             _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(path)])  # idempotent reinstall

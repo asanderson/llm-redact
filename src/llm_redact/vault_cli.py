@@ -21,6 +21,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from llm_redact import paths
 from llm_redact.config import apply_env_overrides, dial_url, load_config
 from llm_redact.placeholders import MAX_TOKEN_NUMBER, canonicalize
 from llm_redact.vault import (
@@ -79,23 +80,11 @@ def _resolve_db(args: argparse.Namespace) -> Path:
     return default_vault_path()
 
 
-def _readonly_uri(path: Path) -> str:
-    """A read-only sqlite `file:` URI with the path percent-encoded.
-
-    Without encoding, a `?` or `#` in the vault path would be parsed as the
-    URI's query/fragment — letting later text inject parameters (e.g. `vfs=`)
-    or defeat `mode=ro`. `/` and `:` stay literal (POSIX separators, Windows
-    drive letters)."""
-    from urllib.parse import quote
-
-    return f"file:{quote(path.resolve().as_posix(), safe='/:')}?mode=ro"
-
-
 def _connect(path: Path, *, readonly: bool) -> sqlite3.Connection:
     if not path.exists():
         raise FileNotFoundError(path)
     if readonly:
-        return sqlite3.connect(_readonly_uri(path), uri=True)
+        return sqlite3.connect(paths.sqlite_readonly_uri(path), uri=True)
     return sqlite3.connect(path, isolation_level=None)
 
 
@@ -715,7 +704,7 @@ def run_vault_backup(args: argparse.Namespace) -> int:
         print(f"cannot write backup to {dest}: {type(exc).__name__}")
         return 2
     os.close(fd)
-    src = sqlite3.connect(_readonly_uri(src_path), uri=True)
+    src = sqlite3.connect(paths.sqlite_readonly_uri(src_path), uri=True)
     dst = sqlite3.connect(dest)
     try:
         src.backup(dst)

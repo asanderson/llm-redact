@@ -48,18 +48,31 @@ and tags `vX.Y.Z`.
 ### Changed
 - **On Windows, llm-redact's per-user files now go under `%LOCALAPPDATA%\llm-redact`**, which
   stays on the machine (the config holds deny strings, so it should not roam with the profile):
-  the config file is `%LOCALAPPDATA%\llm-redact\config.toml`, and assembled GLiNER model folders
-  go to `%LOCALAPPDATA%\llm-redact\data\models`. Windows used the Linux locations under the
-  profile before (`%USERPROFILE%\.config\llm-redact`, `%USERPROFILE%\.local\share\llm-redact`).
-  An install with files there keeps using them until the new location holds the same kind of
-  file (a `config.toml`; anything in `data`), so upgrading moves nothing by itself. A set
-  `XDG_CONFIG_HOME` or `XDG_DATA_HOME` still wins on every platform. Linux, macOS and WSL are
-  unchanged.
-- An `XDG_CONFIG_HOME` or `XDG_DATA_HOME` that is not an absolute path is now ignored for the
-  default config file and model folders, as the XDG Base Directory specification says (an empty
-  one already was): a relative value named a folder under whatever the working directory was.
+  the config file is `%LOCALAPPDATA%\llm-redact\config.toml`, and the vault, audit and override
+  stores and assembled GLiNER model folders go to `%LOCALAPPDATA%\llm-redact\data`. Windows used
+  the Linux locations under the profile before (`%USERPROFILE%\.config\llm-redact`,
+  `%USERPROFILE%\.local\share\llm-redact`). An install with files there keeps using them until
+  the new location holds the same kind of file (a `config.toml`; anything in `data`), so
+  upgrading moves nothing and the vault's tokens keep restoring. `doctor` names the data folder
+  (and where it really is, when a link or the Microsoft Store's Python keeps it elsewhere), says
+  where it looked for a config file when it found none, and WARNs about each folder still read
+  from the old location, with the steps to move it: stop the proxy, move the files (each `.db`
+  with its `-wal` and `-shm` files), start the proxy. A set `XDG_CONFIG_HOME` or `XDG_DATA_HOME`
+  still wins on every platform. Linux, macOS and WSL are unchanged.
+- An `XDG_CONFIG_HOME` or `XDG_DATA_HOME` that is not an absolute path is now ignored, as the XDG
+  Base Directory specification says (an empty one already was): a relative value named a folder
+  under whatever the working directory was, so the vault moved with the directory a command ran
+  in.
 
 ### Fixed
+- `doctor` checked an encrypted vault's key through a `file:` URI built from the raw path. In a
+  folder whose name holds `#`, the path was cut there (the rest, and `mode=ro`, read as a
+  fragment): doctor created an empty database at the cut name and reported the vault as not
+  encrypted yet. A name holding `%` and two hex digits named another path and ended doctor with
+  a traceback. The URI is now percent-encoded, as the vault commands' already was, and a vault
+  on a Windows UNC path (also what a mapped network drive resolves to) is opened through an
+  empty authority, which SQLite accepts (it refuses `file://server/...`). `override list` and
+  doctor read the override store through the same URI, which they could not on a UNC path.
 - On Windows, the files llm-redact writes are no longer translated to `\r\n` line ends: a
   `models pull --to` folder (its manifest, the sidecars and an assembled `gliner_config.json`)
   written on Windows has the same bytes and digests as one written on Linux, and so do the agent

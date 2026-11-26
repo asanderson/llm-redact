@@ -150,7 +150,7 @@ class AuditConfig:
     # Default off: a privacy tool does not write request history to disk
     # unless asked. In-memory /status totals are always available.
     enabled: bool = False
-    path: str | None = None  # default: $XDG_DATA_HOME/llm-redact/audit.db
+    path: str | None = None  # default: audit.db in paths.data_dir()
     max_rows: int = 10000
     # A per-row HMAC hash-chain making deletion/alteration of any row
     # detectable. Off by default; the HMAC key is env-only
@@ -585,7 +585,7 @@ class VaultConfig:
     # "memory" is the deliberate default: persisting real secrets to disk
     # must be an explicit opt-in for a privacy tool.
     backend: str = "memory"
-    path: str | None = None  # default: $XDG_DATA_HOME/llm-redact/vault.db
+    path: str | None = None  # default: vault.db in paths.data_dir()
     session: str = "default"
     # "static": one namespace named by `session` (default). "per-conversation":
     # each conversation gets its own namespace derived from its first user
@@ -649,7 +649,7 @@ class OverridesConfig:
     enabled: bool = False
     # How long a code, and a one-time approval, stays usable.
     ttl_minutes: int = 15
-    # The override store; default $XDG_DATA_HOME/llm-redact/overrides.db.
+    # The override store; default overrides.db in paths.data_dir().
     path: str | None = None
 
 

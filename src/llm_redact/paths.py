@@ -1,6 +1,8 @@
 """Where llm-redact keeps its files, by kind: config, data, logs and model
 folders. Every default location comes from here, so the stores, the CLI and
-doctor agree on one convention per platform.
+doctor agree on one convention per platform. A read-only SQLite URI for
+one of those files (doctor, ``override list``, the vault commands) comes
+from here too, so it names the same file on every platform.
 
 - An XDG variable that is set wins on every platform (``XDG_CONFIG_HOME``,
   ``XDG_DATA_HOME``, ``XDG_STATE_HOME``). An empty or relative value counts
@@ -131,3 +133,27 @@ def uses_legacy_location() -> list[Path]:
     if _xdg("XDG_DATA_HOME") is None and data_dir() == legacy_data_dir():
         found.append(legacy_data_dir())
     return found
+
+
+def sqlite_readonly_uri_for(posix_path: str) -> str:
+    """A read-only SQLite ``file:`` URI for an absolute path written with
+    forward slashes (``Path.as_posix()``).
+
+    The path is percent-encoded: a ``?`` or ``#`` would otherwise end it
+    (the rest read as the query or a fragment, which drops ``mode=ro`` and
+    can open, or create, another file) and a ``%`` start an escape. ``/``
+    and ``:`` stay literal (separators, a Windows drive letter). A Windows
+    UNC path (``//server/share/...``, also what a mapped network drive
+    resolves to) gets an empty authority, ``file:////server/share/...``:
+    SQLite refuses ``file://server/...``, an authority other than
+    localhost."""
+    from urllib.parse import quote
+
+    scheme = "file://" if posix_path.startswith("//") else "file:"
+    return f"{scheme}{quote(posix_path, safe='/:')}?mode=ro"
+
+
+def sqlite_readonly_uri(path: Path) -> str:
+    """A read-only SQLite ``file:`` URI for ``path`` (resolved first): see
+    ``sqlite_readonly_uri_for``."""
+    return sqlite_readonly_uri_for(path.resolve().as_posix())

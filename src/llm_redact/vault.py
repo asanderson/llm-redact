@@ -12,6 +12,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol, TypeVar
 
+from llm_redact import paths
 from llm_redact.placeholders import MAX_TOKEN_NUMBER, format_placeholder
 from llm_redact.vault_writer import MISS, MapWrite, MapWriter, Removed, holding
 
@@ -466,9 +467,9 @@ LOOKUP_CHUNK = 500
 
 
 def default_vault_path() -> Path:
-    # An empty XDG_DATA_HOME is unset (the XDG spec), never the current dir.
-    xdg = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(xdg) / "llm-redact" / "vault.db"
+    """The sqlite vault's default file: ``vault.db`` in the data folder
+    (``paths.data_dir``; ``%LOCALAPPDATA%\\llm-redact\\data`` on Windows)."""
+    return paths.data_dir() / "vault.db"
 
 
 def _open_connection(path: Path, cipher: "VaultCipher | None" = None) -> sqlite3.Connection:

@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from . import paths
 from .config import ConfigError
 
 if TYPE_CHECKING:
@@ -142,9 +143,9 @@ class WriteAheadAudit(AuditLog, Protocol):
 
 
 def default_audit_path() -> Path:
-    # An empty XDG_DATA_HOME is unset (the XDG spec), never the current dir.
-    xdg = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(xdg) / "llm-redact" / "audit.db"
+    """The audit log's default file: ``audit.db`` in the data folder
+    (``paths.data_dir``; ``%LOCALAPPDATA%\\llm-redact\\data`` on Windows)."""
+    return paths.data_dir() / "audit.db"
 
 
 def audit_hmac_key_from_env() -> bytes | None:

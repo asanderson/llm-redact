@@ -21,12 +21,13 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from llm_redact import __version__
+from llm_redact import __version__, paths
 from llm_redact.config import (
     Config,
     ConfigError,
     VaultKmsConfig,
     apply_env_overrides,
+    config_search_candidates,
     dial_url,
     load_config,
     resolve_config_path,
@@ -107,6 +108,53 @@ def _check_platform(report: _Report) -> None:
     )
 
 
+def _where(folder: Path) -> str:
+    """``folder``, and where it really is when that differs: a link, or the
+    Microsoft Store's Python, which keeps what it writes under AppData in its
+    own package folder (other programs, an editor included, do not see it at
+    the path the proxy names)."""
+    try:
+        real = Path(os.path.realpath(folder)) if folder.exists() else folder
+    except (OSError, ValueError):
+        real = folder
+    if os.path.normcase(str(real)) == os.path.normcase(str(folder)):
+        return str(folder)
+    return f"{folder} (resolves to {real})"
+
+
+def _check_paths(report: _Report) -> None:
+    """Where llm-redact keeps its files by default and, on Windows, a WARN
+    for each folder still read from the location before
+    ``%LOCALAPPDATA%\\llm-redact``, with the steps to move it. A vault's
+    newest mappings can be in its ``-wal`` file: one moved without it would
+    number new values with numbers it already issued."""
+    report.line(
+        "PASS",
+        "paths",
+        f"data folder {_where(paths.data_dir())}: the vault, audit and override stores"
+        " (unless [vault], [audit] or [overrides] names a path) and model folders",
+    )
+    root = paths.windows_root()
+    for legacy in paths.uses_legacy_location():
+        if legacy == paths.legacy_config_dir():
+            report.line(
+                "WARN",
+                "paths",
+                f"the config file is read from {legacy / paths.CONFIG_FILE}, the location"
+                f" from before llm-redact used {root}: to move it, stop the proxy, move"
+                f" {paths.CONFIG_FILE} to {root}, then start the proxy again",
+            )
+        else:
+            report.line(
+                "WARN",
+                "paths",
+                f"the stores are kept in {legacy}, the location from before llm-redact used"
+                f" {root}: to move them, stop the proxy, move every file in that folder to"
+                f" {root / 'data'} (each .db file with its -wal and -shm files: a vault moved"
+                " without them loses its newest mappings), then start the proxy again",
+            )
+
+
 def _check_private(report: _Report, area: str, path: Path, want_dir_private: bool) -> None:
     if sys.platform == "win32":
         # POSIX mode bits are synthetic on Windows (regular files commonly
@@ -141,7 +189,12 @@ def _check_config(report: _Report, args: argparse.Namespace) -> Config | None:
         report.line("FAIL", "config", str(problem))
         return None
     if path is None or not path.exists():
-        report.line("WARN", "config", "no config file found; built-in defaults apply")
+        searched = ", ".join(str(candidate) for candidate in config_search_candidates())
+        report.line(
+            "WARN",
+            "config",
+            f"no config file found (looked for {searched}); built-in defaults apply",
+        )
         source = "defaults"
     else:
         source = str(path)
@@ -520,7 +573,7 @@ def _check_vault_key_matches(report: _Report, config: Config) -> None:
         report.line("FAIL", "vault", str(problem))
         return
     assert cipher is not None  # caller gates on encryption == "fernet"
-    conn = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.sqlite_readonly_uri(path), uri=True)
     try:
         if int(conn.execute("PRAGMA user_version").fetchone()[0]) < 3:
             report.line("WARN", "vault", f"{path} is not encrypted yet (migrates on next serve)")
@@ -1461,6 +1514,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         report.finish()
         return 1
     _check_platform(report)
+    _check_paths(report)
     _check_license(report, config)
     _check_licensed_features(report, config)
     _check_build(report, config)

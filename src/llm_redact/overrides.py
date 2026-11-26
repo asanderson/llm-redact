@@ -58,6 +58,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from llm_redact import paths
 from llm_redact.config import config_search_candidates
 
 logger = logging.getLogger(__name__)
@@ -131,9 +132,9 @@ _SCHEMA = (
 
 
 def default_overrides_path() -> Path:
-    # An empty XDG_DATA_HOME is unset (the XDG spec), never the current dir.
-    xdg = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(xdg) / "llm-redact" / "overrides.db"
+    """The override store's default file: ``overrides.db`` in the data folder
+    (``paths.data_dir``; ``%LOCALAPPDATA%\\llm-redact\\data`` on Windows)."""
+    return paths.data_dir() / "overrides.db"
 
 
 def new_code() -> str:
@@ -445,7 +446,7 @@ class OverrideStore:
         if not self.path.exists():
             return None
         conn = sqlite3.connect(
-            self.path.resolve().as_uri() + "?mode=ro",
+            paths.sqlite_readonly_uri(self.path),
             uri=True,
             check_same_thread=False,
             timeout=self._busy_timeout_ms / 1000,

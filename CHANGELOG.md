@@ -136,6 +136,12 @@ and tags `vX.Y.Z`.
   `[Environment]::SetEnvironmentVariable('NAME', '…', 'User')` to keep it for new terminals and
   programs, the value single-quoted so PowerShell expands nothing in it. An `export` line pasted
   into PowerShell was an error. Linux and macOS print the same `export` lines as before.
+- **On Windows, `doctor` checks who the stores' NTFS access control lists let in**: the vault
+  (and its folder) and the audit log FAIL when an entry allows anyone but your account, SYSTEM
+  and Administrators to read or change them (`BUILTIN\Users`, for a file under a folder at a
+  drive's root), naming them and how to list them (`icacls`). It used to WARN that it could not
+  check anything, since POSIX mode bits are synthetic there. A private file says whether its
+  list is protected or inherited from its folder.
 - An `XDG_CONFIG_HOME` or `XDG_DATA_HOME` that is not an absolute path is now ignored, as the XDG
   Base Directory specification says (an empty one already was): a relative value named a folder
   under whatever the working directory was, so the vault moved with the directory a command ran
@@ -169,6 +175,9 @@ and tags `vX.Y.Z`.
   folder half gone (its sidecar too, so the next pull refused it as not its own). The folder now
   stays whole, and the command says to stop the proxy and run it again. Linux and macOS retry
   nothing.
+- `doctor` passed a TLS certificate, key or client CA that serve cannot open on Windows: it asked
+  `os.access`, which reads only the read-only attribute there, never the access control list.
+  It now opens the file, on every platform.
 - `doctor` checked an encrypted vault's key through a `file:` URI built from the raw path. In a
   folder whose name holds `#`, the path was cut there (the rest, and `mode=ro`, read as a
   fragment): doctor created an empty database at the cut name and reported the vault as not

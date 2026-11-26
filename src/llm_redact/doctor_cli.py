@@ -252,17 +252,7 @@ def _check_loopback_names(report: _Report, config: Config) -> None:
 
 def _check_private(report: _Report, area: str, path: Path, want_dir_private: bool) -> None:
     if sys.platform == "win32":
-        # POSIX mode bits are synthetic on Windows (regular files commonly
-        # report 666) — checking them would only raise false alarms. NTFS
-        # ACLs are the real control, and the user-profile defaults are
-        # private to the user; say so instead of pretending to verify.
-        report.line(
-            "WARN",
-            area,
-            f"{path}: POSIX permission checks do not apply on Windows — keep"
-            " this file under your user profile, where default NTFS ACLs are"
-            " private to your account",
-        )
+        _check_private_windows(report, area, path, want_dir_private)
         return
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode & 0o077:
@@ -274,6 +264,52 @@ def _check_private(report: _Report, area: str, path: Path, want_dir_private: boo
         if parent_mode & 0o077:
             report.line(
                 "FAIL", area, f"{path.parent} is group/world accessible (mode {parent_mode:03o})"
+            )
+
+
+def _check_private_windows(report: _Report, area: str, path: Path, want_dir_private: bool) -> None:
+    """On Windows the NTFS access control list is the real control (POSIX
+    mode bits are synthetic: a regular file commonly reports 666): FAIL an
+    entry that lets in anyone but this account, SYSTEM and Administrators
+    (``winacl.foreign_access``), for the file and, like the POSIX check, its
+    folder."""
+    from llm_redact import winacl
+    from llm_redact.overrides import shell_quote
+
+    try:
+        user = winacl.current_user_sid()
+    except OSError as problem:
+        report.line(
+            "WARN",
+            area,
+            f"{path}: cannot check its NTFS access control list ({problem.strerror or problem})",
+        )
+        return
+    for target in (path, path.parent) if want_dir_private else (path,):
+        try:
+            dacl = winacl.read_dacl(target)
+        except OSError as problem:
+            report.line(
+                "WARN",
+                area,
+                f"{target}: cannot check its NTFS access control list"
+                f" ({problem.strerror or problem})",
+            )
+            continue
+        others = winacl.foreign_access(dacl, user)
+        if others:
+            report.line(
+                "FAIL",
+                area,
+                f"{target} lets in {', '.join(others)} (its NTFS access control list): remove"
+                " those entries, so that only your account, SYSTEM and Administrators keep"
+                f" access (icacls {shell_quote(str(target))} lists them)",
+            )
+        elif target == path:
+            protected = dacl is not None and dacl.protected
+            how = "protected" if protected else "inherited from its folder"
+            report.line(
+                "PASS", area, f"{path} is private to your account (NTFS access control list, {how})"
             )
 
 
@@ -808,6 +844,18 @@ def _check_extras(report: _Report, config: Config) -> None:
         report.line("PASS", "realtime", "websockets importable (WS relay active)")
 
 
+def _readable(path: Path) -> bool:
+    """Whether ``path`` opens and reads, as serve will open it. os.access
+    does not read Windows access control lists (it checks only the
+    read-only attribute there), so it passed a file serve cannot open."""
+    try:
+        with path.open("rb") as handle:
+            handle.read(1)
+    except OSError:
+        return False
+    return True
+
+
 def _check_tls_and_bind(report: _Report, config: Config) -> None:
     for label, value in (
         ("certfile", config.tls.certfile),
@@ -817,7 +865,7 @@ def _check_tls_and_bind(report: _Report, config: Config) -> None:
         if value is None:
             continue
         path = Path(value).expanduser()
-        if path.exists() and os.access(path, os.R_OK):
+        if _readable(path):
             report.line("PASS", "tls", f"{label} {path} readable")
         else:
             report.line("FAIL", "tls", f"{label} {path} missing or unreadable")

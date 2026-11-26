@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import sys
 import tomllib
 import urllib.parse
 from collections.abc import Iterable, Mapping
@@ -1257,7 +1258,26 @@ def default_config_path() -> Path:
 
 
 # Standard system path; also the documented container config mount point.
+# POSIX only: config_search_candidates leaves it out on Windows.
 ETC_CONFIG_PATH = Path("/etc/llm-redact/config.toml")
+
+
+def config_search_candidates() -> tuple[Path, ...]:
+    """The files the default config search tries, in order, after
+    ``LLM_REDACT_CONFIG``: the per-user file, then, on Linux and macOS (WSL
+    included), /etc/llm-redact/config.toml.
+
+    Windows has no /etc: there ``Path("/etc/llm-redact/config.toml")``
+    names ``\\etc\\llm-redact\\config.toml`` at the root of whatever drive
+    the working directory is on (``C:``, a USB stick, a network share),
+    where another local account can create folders. A config planted there
+    would be loaded, and ``init`` and the config editor would write the
+    operator's config to it, so on Windows the per-user file is the only
+    candidate. Loading, the write targets (``resolve_config_path``) and the
+    override hint (``overrides.hint_config``) all read this one list."""
+    if sys.platform == "win32":
+        return (default_config_path(),)
+    return (default_config_path(), ETC_CONFIG_PATH)
 
 
 def apply_env_overrides(config: Config) -> Config:
@@ -2677,8 +2697,9 @@ def load_config(path: Path | None = None) -> Config:
 
     Search order when no explicit path is given: $LLM_REDACT_CONFIG (set but
     missing is a hard error, never a silent fall-through), then
-    $XDG_CONFIG_HOME/llm-redact/config.toml, then /etc/llm-redact/config.toml,
-    then built-in defaults.
+    $XDG_CONFIG_HOME/llm-redact/config.toml, then (Linux and macOS only)
+    /etc/llm-redact/config.toml, then built-in defaults
+    (``config_search_candidates``).
     """
     if path is None:
         path = resolve_config_path()
@@ -2705,10 +2726,9 @@ def resolve_config_path() -> Path | None:
         if not path.exists():
             raise ConfigError(f"LLM_REDACT_CONFIG points to a missing file: {env_path}")
         return path
-    if default_config_path().exists():
-        return default_config_path()
-    if ETC_CONFIG_PATH.exists():
-        return ETC_CONFIG_PATH
+    for candidate in config_search_candidates():
+        if candidate.exists():
+            return candidate
     return None
 
 

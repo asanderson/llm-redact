@@ -11,6 +11,19 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Security
+- **On Windows, a config file at the root of a drive could be loaded, and `init` and the config
+  editor could write the operator's config to it.** When neither `LLM_REDACT_CONFIG` nor a
+  per-user `config.toml` existed, the default search tried `/etc/llm-redact/config.toml`. Windows
+  has no `/etc`: there that path names `\etc\llm-redact\config.toml` at the root of whatever drive
+  the working directory is on (`C:`, a USB stick, a network share), where another local account
+  can create folders. A config planted there was loaded (it could name another upstream or turn
+  detection off), `config show --path` and `doctor` reported it, and `llm-redact init` and the
+  llm-redact-pro config editor wrote the operator's config to it. On Windows the search now stops
+  at the per-user file; Linux and macOS (WSL included) still read `/etc/llm-redact/config.toml`.
+  Loading, the write targets and the refusal hint's `--config` decision read one list
+  (`config_search_candidates`). Affected: every release run on Windows, since 1.0.0.
+
 ## [1.13.0] - 2026-11-10
 
 Closes leaks where values went upstream unredacted: a card number written next to another digit

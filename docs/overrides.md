@@ -36,7 +36,8 @@ to allow: llm-redact override --config /srv/llm-redact/proxy.toml 7K3M9QX2HD4P -
 
 The path is absolute (as the proxy resolved it) and shell-quoted when it
 holds spaces. A proxy started with the file the default search finds (the
-XDG `~/.config/llm-redact/config.toml`, else `/etc/llm-redact/config.toml`),
+XDG `~/.config/llm-redact/config.toml`, else, on Linux and macOS,
+`/etc/llm-redact/config.toml`),
 or with none, prints the plain hint; a proxy that cannot check that search
 (a HOME it may not read) names its file all the same, and never refuses to
 start over it. A realtime close reason carries the

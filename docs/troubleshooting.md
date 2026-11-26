@@ -891,8 +891,8 @@ says the same. A model configured as a local folder is checked without it
 
 `llm-redact models list`, `verify` and `pull` could not read the
 configuration file: the one `--config` names, else the one `LLM_REDACT_CONFIG`
-names or the default search finds (the per-user `config.toml`, then
-`/etc/llm-redact/config.toml`). It does not exist (`FileNotFoundError`), is
+names or the default search finds (the per-user `config.toml`, then, on Linux
+and macOS, `/etc/llm-redact/config.toml`). It does not exist (`FileNotFoundError`), is
 a folder, may not be read, or holds bytes that are not text
 (`UnicodeDecodeError`); the message ends with the exception type. The command
 exits 2 without looking at any model — exit 1 is kept for a model that is not

@@ -6,6 +6,8 @@ must tear it down; the already-running path must leave the proxy alone.
 """
 
 import argparse
+import json
+import os
 import socket
 import subprocess
 import sys
@@ -281,3 +283,175 @@ def test_plugin_decorates_the_exported_base_url(
     assert "OPENAI=http://127.0.0.1:9/u/lrk_secret/v1" in out  # the identity prefix first
     assert "with a client identity" in err
     assert "lrk_secret" not in err
+
+
+# --- Windows: PATH-only lookup, shims, a graceful stop ----------------------------
+
+
+@pytest.fixture
+def windows_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+
+
+def _touch(folder: Path, *names: str) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (folder / name).write_text("", encoding="utf-8")
+    return folder
+
+
+def test_a_bare_name_resolves_on_path_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows_lookup: None
+) -> None:
+    from llm_redact.run_cli import resolve_program
+
+    work = _touch(tmp_path / "work", "claude.exe", "claude.cmd")
+    npm = _touch(tmp_path / "npm", "claude", "claude.cmd", "claude.ps1")
+    native = _touch(tmp_path / "native", "claude.exe")
+    monkeypatch.chdir(work)
+    # A relative entry (".", "") names the current directory: skipped, as is
+    # the current directory CreateProcess would search before PATH.
+    path = os.pathsep.join([".", "", str(npm), str(native)])
+    assert resolve_program("claude", path, ".COM;.EXE;.BAT;.CMD") == str(npm / "claude.cmd")
+    # In one folder an .exe goes before a .cmd shim.
+    _touch(npm, "claude.exe")
+    assert resolve_program("claude", path, ".COM;.EXE;.BAT;.CMD") == str(npm / "claude.exe")
+    # An extension a name already has is looked for as is.
+    assert resolve_program("claude.cmd", path, ".COM;.EXE;.BAT;.CMD") == str(npm / "claude.cmd")
+    # PATHEXT decides which extensions count; unset, the Windows default.
+    assert resolve_program("claude", os.pathsep.join(["", str(npm)]), ".CMD") == str(
+        npm / "claude.cmd"
+    )
+    assert resolve_program("claude", str(npm), None) == str(npm / "claude.exe")
+    assert resolve_program("missing", path, None) is None
+    # A name with a folder in it is used as given.
+    assert resolve_program(".\\claude", path, None) == ".\\claude"
+    assert resolve_program("C:claude", path, None) == "C:claude"
+
+
+def test_a_batch_file_with_arguments_cmd_reads_again_is_warned_about(
+    tmp_path: Path, windows_lookup: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from llm_redact.run_cli import _batch_warning
+
+    assert _batch_warning("C:\\npm\\claude.cmd", ["-p", "say hi"]) is None
+    assert _batch_warning("C:\\bin\\claude.exe", ["-p", 'say "hi" & bye']) is None
+    warning = _batch_warning("C:\\npm\\claude.cmd", ["-p", 'say "hi" & bye'])
+    assert warning is not None and "cmd.exe" in warning and "claude.cmd" in warning
+
+
+def _drain_config(tmp_path: Path) -> tuple[Path, Path]:
+    log_file = tmp_path / "proxy.log"
+    config = tmp_path / "config.toml"
+    config.write_text(f"[log]\nfile = {json.dumps(str(log_file))}\n", encoding="utf-8")
+    return config, log_file
+
+
+def test_the_ephemeral_proxy_drains_before_it_exits(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    # Its lifespan shutdown runs to its last line (the vault closed): on
+    # Windows a CTRL_BREAK_EVENT to its own process group, never a bare
+    # TerminateProcess; SIGTERM elsewhere.
+    config, log_file = _drain_config(tmp_path)
+    port = _free_port()
+    code = run_run(_args(port, config, "claude", ["--", sys.executable, "-c", CHILD_SNIPPET]))
+    assert code == 7
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+    assert any("serving on" in line for line in lines)
+    assert lines[-1].endswith("llm_redact: llm-redact stopped"), lines[-3:]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd shims and CreateProcess lookup")
+def test_run_runs_a_cmd_shim_from_path_never_one_in_the_current_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    from windows_fixtures import cmd_shim
+
+    bin_dir = cmd_shim(tmp_path / "bin", "fixture-tool", "from-path", exit_code=7)
+    work = cmd_shim(tmp_path / "work", "fixture-tool", "planted", exit_code=9)
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")]))
+    port = _free_port()
+    config = tmp_path / "config.toml"
+    config.write_text("", encoding="utf-8")
+    code = run_run(_args(port, config, "claude", ["--", "fixture-tool", "one arg"]))
+    out, _ = capfd.readouterr()
+    assert code == 7
+    assert "SHIM=from-path" in out and "planted" not in out
+    assert f"ANTH=http://127.0.0.1:{port}" in out
+    assert "ARGS=['one arg']" in out
+
+
+# --- WSL: a Windows program started from WSL gets the variables through WSLENV -----
+
+
+def test_wslenv_lists_the_exported_names_for_a_windows_program() -> None:
+    from llm_redact.run_cli import wslenv_with
+
+    assert wslenv_with(None, ["ANTHROPIC_BASE_URL"]) == "ANTHROPIC_BASE_URL/w"
+    assert (
+        wslenv_with("USERPROFILE/p:GOPATH/l", ["ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"])
+        == "USERPROFILE/p:GOPATH/l:ANTHROPIC_BASE_URL/w:OPENAI_BASE_URL/w"
+    )
+    # An entry already there stays as it is; an empty one is not repeated.
+    assert wslenv_with("ANTHROPIC_BASE_URL/u::", ["ANTHROPIC_BASE_URL", "X"]) == (
+        "ANTHROPIC_BASE_URL/u:X/w"
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="WSL is Linux")
+@pytest.mark.parametrize(("name", "windows"), [("tool.exe", True), ("tool", False)])
+def test_run_in_wsl_passes_wslenv_to_a_windows_program_only(
+    name: str,
+    windows: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    import stat as stat_mod
+
+    import llm_redact.run_cli as run_cli_mod
+    from llm_redact import platform_info
+
+    program = tmp_path / "bin" / name
+    program.parent.mkdir()
+    program.write_text('#!/bin/sh\necho "WSLENV=$WSLENV"\n', encoding="utf-8")
+    program.chmod(program.stat().st_mode | stat_mod.S_IXUSR)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(program.parent), os.environ["PATH"]]))
+    monkeypatch.setenv("WSLENV", "USERPROFILE/p")
+    monkeypatch.setattr(platform_info, "is_wsl", lambda *a: True)
+    monkeypatch.setattr(run_cli_mod, "_proxy_running", lambda url, timeout=1.0: True)
+    args = _proxy_args(Path("unused.toml"), ["--", name], proxy_url="http://127.0.0.1:9")
+    args.tools = "claude,codex"
+    assert run_run(args) == 0
+    out, _ = capfd.readouterr()
+    if windows:
+        assert "WSLENV=USERPROFILE/p:ANTHROPIC_BASE_URL/w:OPENAI_BASE_URL/w" in out
+    else:
+        assert "WSLENV=USERPROFILE/p\n" in out
+
+
+@pytest.mark.skipif(os.name != "posix", reason="WSL is Linux")
+def test_a_program_on_a_windows_drive_counts_as_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_redact import platform_info
+    from llm_redact.run_cli import _runs_windows_program
+
+    root = Path(os.path.realpath(tmp_path))
+    drive = root / "mnt" / "c"
+    (drive / "tools").mkdir(parents=True)
+    tool = drive / "tools" / "claude"
+    tool.write_text("", encoding="utf-8")
+    table = root / "mountinfo"
+    table.write_text(
+        "24 1 8:32 / / rw - ext4 /dev/sdc rw\n"
+        f"50 24 0:47 / {drive} rw - 9p C:\\134 rw,aname=drvfs\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(platform_info, "MOUNTINFO", table)
+    assert _runs_windows_program(str(tool)) is True
+    assert _runs_windows_program(str(root / "tool")) is False
+    assert _runs_windows_program(str(root / "TOOL.EXE")) is True

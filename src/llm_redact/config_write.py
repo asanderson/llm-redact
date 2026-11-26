@@ -616,6 +616,8 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
 
     lines.append("\n[log]")
     lines.append(f"format = {_toml_str(config.log.format)}")
+    if config.log.file is not None:
+        lines.append(f"file = {_toml_str(config.log.file)}")
 
     if config.tls.certfile is not None and config.tls.keyfile is not None:
         # Omitted entirely when unset: an empty [tls] table means the same

@@ -21,12 +21,13 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from llm_redact import __version__
+from llm_redact import __version__, paths
 from llm_redact.config import (
     Config,
     ConfigError,
     VaultKmsConfig,
     apply_env_overrides,
+    config_search_candidates,
     dial_url,
     load_config,
     resolve_config_path,
@@ -90,11 +91,23 @@ class _Report:
 
 
 def _check_platform(report: _Report) -> None:
-    """Windows-specific posture (silent elsewhere — no noise on the
+    """Windows- and WSL-specific posture (silent elsewhere — no noise on the
     platforms where nothing differs). The supported Windows scope is the
     Free tier plus the agent plugins; SIGHUP does not exist there, so the
     reload path is a restart (or, with llm-redact-pro, the dashboard config
-    editor's hot-apply)."""
+    editor's hot-apply). In WSL: the distribution and its networking mode."""
+    from llm_redact import platform_info
+
+    if platform_info.is_wsl():
+        distribution = platform_info.wsl_distribution() or "unknown"
+        mode = platform_info.networking_mode() or "unknown"
+        report.line(
+            "PASS",
+            "platform",
+            f"WSL (distribution {distribution}, networking mode {mode}): keep the stores in"
+            " the Linux file system, not on a Windows drive under /mnt",
+        )
+        return
     if sys.platform != "win32":
         return
     report.line(
@@ -105,6 +118,136 @@ def _check_platform(report: _Report) -> None:
         " proxy as a foreground/logon task (`llm-redact service install`"
         " prints a Task Scheduler command)",
     )
+
+
+def _where(folder: Path) -> str:
+    """``folder``, and where it really is when that differs: a link, or the
+    Microsoft Store's Python, which keeps what it writes under AppData in its
+    own package folder (other programs, an editor included, do not see it at
+    the path the proxy names)."""
+    try:
+        real = Path(os.path.realpath(folder)) if folder.exists() else folder
+    except (OSError, ValueError):
+        real = folder
+    if os.path.normcase(str(real)) == os.path.normcase(str(folder)):
+        return str(folder)
+    return f"{folder} (resolves to {real})"
+
+
+def _check_paths(report: _Report, config: Config | None = None) -> None:
+    """Where llm-redact keeps its files by default and, on Windows, a WARN
+    for each folder still read from the location before
+    ``%LOCALAPPDATA%\\llm-redact``, with the steps to move it. A vault's
+    newest mappings can be in its ``-wal`` file: one moved without it would
+    number new values with numbers it already issued."""
+    report.line(
+        "PASS",
+        "paths",
+        f"data folder {_where(paths.data_dir())}: the vault, audit and override stores"
+        " (unless [vault], [audit] or [overrides] names a path) and model folders",
+    )
+    if config is not None:
+        _check_windows_drive_stores(report, config)
+        from llm_redact.log import default_log_file, log_destination
+
+        configured = log_destination(config.log.file, console=True)
+        report.line(
+            "PASS",
+            "paths",
+            f"serve logs to {configured}"
+            if configured is not None
+            else "serve logs to stderr, and without a console (pythonw, a hidden logon task)"
+            f" to {default_log_file()}",
+        )
+    root = paths.windows_root()
+    for legacy in paths.uses_legacy_location():
+        if legacy == paths.legacy_config_dir():
+            report.line(
+                "WARN",
+                "paths",
+                f"the config file is read from {legacy / paths.CONFIG_FILE}, the location"
+                f" from before llm-redact used {root}: to move it, stop the proxy, move"
+                f" {paths.CONFIG_FILE} to {root}, then start the proxy again",
+            )
+        else:
+            report.line(
+                "WARN",
+                "paths",
+                f"the stores are kept in {legacy}, the location from before llm-redact used"
+                f" {root}: to move them, stop the proxy, move every file in that folder to"
+                f" {root / 'data'} (each .db file with its -wal and -shm files: a vault moved"
+                " without them loses its newest mappings), then start the proxy again",
+            )
+
+
+def _check_windows_drive_stores(report: _Report, config: Config) -> None:
+    """In WSL, a WARN for each store other than the vault (doctor's vault
+    check FAILs that one) and for the model folders on a Windows drive:
+    SQLite's locks do not hold there, and a model load reads slowly."""
+    from llm_redact.audit import default_audit_path
+    from llm_redact.overrides import default_overrides_path
+    from llm_redact.platform_info import windows_drive_problem
+
+    def configured(path: str | None, default: Path) -> Path:
+        return Path(path).expanduser() if path else default
+
+    places: list[tuple[str, Path]] = []
+    if config.audit.enabled:
+        places.append(("the audit log", configured(config.audit.path, default_audit_path())))
+    if config.overrides.enabled:
+        places.append(
+            ("the override store", configured(config.overrides.path, default_overrides_path()))
+        )
+    places.append(("the model folders", paths.models_dir()))
+    for what, path in places:
+        problem = windows_drive_problem(path)
+        if problem is not None:
+            report.line(
+                "WARN",
+                "paths",
+                f"{what}: {problem}, where SQLite's locks do not hold and reads are slow;"
+                " keep it in the Linux file system",
+            )
+
+
+def _check_loopback_names(report: _Report, config: Config) -> None:
+    """On Windows and in WSL, a WARN for an upstream, or the llm backend's
+    model server, named by ``localhost`` or ``[::1]``: Windows resolves
+    localhost to ::1 first, the servers people run there (Ollama, LM Studio)
+    listen on 127.0.0.1 only, and WSL's mirrored networking does not carry
+    ::1 across. 127.0.0.1 reaches them. Only the setting and the host name
+    are printed, never the URL (it may carry a credential)."""
+    from llm_redact import platform_info
+    from llm_redact.config import llm_backend_runs
+
+    if sys.platform != "win32" and not platform_info.is_wsl():
+        return
+    named: list[tuple[str, str]] = []
+    for name, provider in sorted(config.providers.items()):
+        if not provider.enabled:
+            continue
+        section = (
+            f"providers.custom.{name.removeprefix('custom:')}"
+            if name.startswith("custom:")
+            else f"providers.{name}"
+        )
+        named.append((f"[{section}] upstream_base_url", provider.upstream_base_url))
+    if llm_backend_runs(config.detection.ner):
+        named.append(("[detection.ner.llm] url", config.detection.ner.llm.url))
+    for setting, url in named:
+        try:
+            host = urllib.parse.urlsplit(url).hostname
+        except ValueError:
+            continue
+        if host is None or (host.lower() != "localhost" and host != "::1"):
+            continue
+        report.line(
+            "WARN",
+            "network",
+            f"{setting} names {host}: Windows resolves localhost to ::1 first, servers"
+            " running there (Ollama, LM Studio) listen on 127.0.0.1 only, and WSL's mirrored"
+            " networking does not carry ::1 — name 127.0.0.1 instead",
+        )
 
 
 def _check_private(report: _Report, area: str, path: Path, want_dir_private: bool) -> None:
@@ -141,7 +284,12 @@ def _check_config(report: _Report, args: argparse.Namespace) -> Config | None:
         report.line("FAIL", "config", str(problem))
         return None
     if path is None or not path.exists():
-        report.line("WARN", "config", "no config file found; built-in defaults apply")
+        searched = ", ".join(str(candidate) for candidate in config_search_candidates())
+        report.line(
+            "WARN",
+            "config",
+            f"no config file found (looked for {searched}); built-in defaults apply",
+        )
         source = "defaults"
     else:
         source = str(path)
@@ -292,7 +440,7 @@ def _check_port_free(report: _Report, config: Config) -> None:
 
 def _check_vault(report: _Report, config: Config) -> None:
     from llm_redact.config import RDBMS_BACKENDS
-    from llm_redact.vault import default_vault_path
+    from llm_redact.vault import default_vault_path, windows_drive_vault_problem
 
     if config.vault.backend == "memory":
         report.line("PASS", "vault", "in-memory backend (nothing on disk)")
@@ -300,7 +448,10 @@ def _check_vault(report: _Report, config: Config) -> None:
         _check_vault_rdbms(report, config)
     else:
         path = Path(config.vault.path).expanduser() if config.vault.path else default_vault_path()
-        if path.exists():
+        drive = windows_drive_vault_problem(path)
+        if drive is not None:
+            report.line("FAIL", "vault", f"{drive} — serve refuses to start")
+        elif path.exists():
             _check_private(report, "vault", path, want_dir_private=True)
         else:
             report.line("WARN", "vault", f"{path} not created yet (first request creates it)")
@@ -314,7 +465,7 @@ def _check_vault(report: _Report, config: Config) -> None:
                 "FAIL",
                 "vault",
                 'encryption = "fernet" but the crypto extra is not installed;'
-                " install it: pip install 'llm-redact-proxy[crypto]'",
+                ' install it: pip install "llm-redact-proxy[crypto]"',
             )
         if config.vault.kms is not None:
             _check_vault_kms(report, config)
@@ -520,7 +671,7 @@ def _check_vault_key_matches(report: _Report, config: Config) -> None:
         report.line("FAIL", "vault", str(problem))
         return
     assert cipher is not None  # caller gates on encryption == "fernet"
-    conn = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.sqlite_readonly_uri(path), uri=True)
     try:
         if int(conn.execute("PRAGMA user_version").fetchone()[0]) < 3:
             report.line("WARN", "vault", f"{path} is not encrypted yet (migrates on next serve)")
@@ -596,7 +747,7 @@ def _check_extras(report: _Report, config: Config) -> None:
                 "FAIL",
                 "otel",
                 "enabled but the otel extra is not installed;"
-                " install it: pip install 'llm-redact-proxy[otel]'",
+                ' install it: pip install "llm-redact-proxy[otel]"',
             )
         else:
             report.line("PASS", "otel", "sdk importable")
@@ -606,7 +757,7 @@ def _check_extras(report: _Report, config: Config) -> None:
             "WARN",
             "realtime",
             "websockets not installed — WebSocket APIs (OpenAI Realtime, Gemini"
-            " Live) will be refused; install: pip install 'llm-redact-proxy[realtime]'",
+            ' Live) will be refused; install: pip install "llm-redact-proxy[realtime]"',
         )
     else:
         report.line("PASS", "realtime", "websockets importable (WS relay active)")
@@ -1461,6 +1612,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         report.finish()
         return 1
     _check_platform(report)
+    _check_paths(report, config)
     _check_license(report, config)
     _check_licensed_features(report, config)
     _check_build(report, config)
@@ -1475,6 +1627,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_models(report, config)
     _check_extraction(report, config)
     _check_upstream_auth(report, config)
+    _check_loopback_names(report, config)
     _check_allowed_hosts(report, config)
     _check_allowed_origins(report, config)
     _check_routing(report, config, bool(getattr(args, "offline", False)))

@@ -50,7 +50,7 @@ import os
 import secrets
 import shlex
 import sqlite3
-import subprocess
+import sys
 import threading
 import time
 from collections import Counter
@@ -58,6 +58,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from llm_redact import paths
 from llm_redact.config import config_search_candidates
 
 logger = logging.getLogger(__name__)
@@ -131,9 +132,9 @@ _SCHEMA = (
 
 
 def default_overrides_path() -> Path:
-    # An empty XDG_DATA_HOME is unset (the XDG spec), never the current dir.
-    xdg = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(xdg) / "llm-redact" / "overrides.db"
+    """The override store's default file: ``overrides.db`` in the data folder
+    (``paths.data_dir``; ``%LOCALAPPDATA%\\llm-redact\\data`` on Windows)."""
+    return paths.data_dir() / "overrides.db"
 
 
 def new_code() -> str:
@@ -196,16 +197,46 @@ def hint_config(loaded: Path | None, env: Mapping[str, str]) -> str | None:
         text.encode("utf-8")
     except UnicodeEncodeError:
         return None
+    note = windows_quote_note(text)
+    if note is not None:
+        logger.warning("the config path a refusal's override command names: %s", note)
     return shell_quote(text)
+
+
+# On Windows, what makes an argument need quotes in cmd.exe or PowerShell
+# (a blank splits it; the rest end it or start a command, a group or a
+# subexpression). File names cannot hold " < > | ? *.
+_WINDOWS_QUOTED = frozenset(" \t&()^;,=!{}@'`$%[]")
+# Read inside double quotes all the same: cmd.exe expands %NAME%,
+# PowerShell $name and backtick escapes.
+_WINDOWS_EXPANDED = frozenset("%$`")
 
 
 def shell_quote(text: str) -> str:
     """``text`` quoted for the operator's shell: POSIX quoting, or on Windows
-    the command-line convention (double quotes only around a path with a
-    space), where POSIX single quotes would wrap every drive-letter path."""
-    if os.name == "nt":
-        return subprocess.list2cmdline([text])
-    return shlex.quote(text)
+    double quotes around an argument cmd.exe or PowerShell would otherwise
+    split or read (a blank, ``&``, ``(`` …), where POSIX single quotes would
+    wrap every drive-letter path. Backslashes before the closing quote are
+    doubled, as the C runtime reads them; ``windows_quote_note`` says when
+    a shell still reads part of it."""
+    if sys.platform != "win32":
+        return shlex.quote(text)
+    if text and not (_WINDOWS_QUOTED & set(text)):
+        return text
+    trailing = len(text) - len(text.rstrip("\\"))
+    return '"' + text + "\\" * trailing + '"'
+
+
+def windows_quote_note(text: str) -> str | None:
+    """On Windows, what to say about a quoted ``text`` a shell still reads
+    inside double quotes (``%NAME%`` in cmd.exe, ``$name`` or a backtick in
+    PowerShell); None when there is nothing to say."""
+    if sys.platform != "win32" or not (_WINDOWS_EXPANDED & set(text)):
+        return None
+    return (
+        "it holds % $ or `, which cmd.exe (%NAME%) or PowerShell ($name, `) reads even"
+        " inside double quotes: check the path before you run the command"
+    )
 
 
 def _searched_config(explicit: Path) -> bool:
@@ -445,7 +476,7 @@ class OverrideStore:
         if not self.path.exists():
             return None
         conn = sqlite3.connect(
-            self.path.resolve().as_uri() + "?mode=ro",
+            paths.sqlite_readonly_uri(self.path),
             uri=True,
             check_same_thread=False,
             timeout=self._busy_timeout_ms / 1000,

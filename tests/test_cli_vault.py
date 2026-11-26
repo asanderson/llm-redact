@@ -282,9 +282,9 @@ def test_vault_backup_refuses_overwrite_without_force(
 def test_readonly_uri_percent_encodes_query_metacharacters(tmp_path: Path) -> None:
     # Security review 3.1.1: a '?' or '#' in the vault path must be encoded so
     # it can't be parsed as the URI's query/fragment (defeating mode=ro).
-    from llm_redact.vault_cli import _readonly_uri
+    from llm_redact.paths import sqlite_readonly_uri
 
-    uri = _readonly_uri(tmp_path / "a?b#c.db")
+    uri = sqlite_readonly_uri(tmp_path / "a?b#c.db")
     assert uri.endswith("?mode=ro")
     assert "a?b" not in uri and "#c" not in uri
     assert "%3F" in uri and "%23" in uri

@@ -5,6 +5,7 @@ silently overwrites a file whose content was modified (that needs
 --force), and uninstall removes exactly the managed files.
 """
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -106,9 +107,11 @@ def test_install_prints_proxy_posture_hint(
 
 
 def test_install_proxy_url_probes_and_prints_export(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from llm_redact.plugin_cli import proxy_setup
+
+    monkeypatch.setattr(sys, "platform", "linux")  # the export line (Windows: test_shell_syntax)
 
     probed: list[str] = []
 
@@ -202,8 +205,12 @@ def test_interactive_prompt_offers_install(tmp_path: Path, monkeypatch: pytest.M
     assert calls and calls[-1][-2:] == ["service", "install"]
 
 
-def test_interactive_prompt_point_at_url(capsys: pytest.CaptureFixture[str]) -> None:
+def test_interactive_prompt_point_at_url(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     from llm_redact.plugin_cli import proxy_setup
+
+    monkeypatch.setattr(sys, "platform", "linux")  # the export line (Windows: test_shell_syntax)
 
     answers = iter(["p", "https://redact.corp.example:8787"])
     code = proxy_setup(

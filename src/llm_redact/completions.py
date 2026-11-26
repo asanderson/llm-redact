@@ -9,7 +9,8 @@ completion words (``CliCommand.completion``), merged in by ``all_commands``.
 
 # command -> (subcommands, options) — completion surface only.
 COMMANDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "serve": ((), ("--config", "--port", "--session", "--log-format", "--check")),
+    "serve": ((), ("--config", "--port", "--session", "--log-format", "--log-file", "--check")),
+    "reload": ((), ("--config", "--port")),
     "status": ((), ("--config", "--port", "--json", "--ca", "--cert", "--key")),
     "sessions": (("list", "prune"), ("--config", "--db", "--json", "--older-than", "--yes")),
     "lookup": ((), ("--config", "--db", "--value", "--session")),

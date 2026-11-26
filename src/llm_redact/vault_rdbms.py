@@ -108,9 +108,9 @@ ENV_TLS_UNVERIFIED = "LLM_REDACT_VAULT_TLS_UNVERIFIED"
 
 _DRIVER_MODULES = {"postgresql": "psycopg", "mysql": "pymysql", "oracle": "oracledb"}
 _EXTRA_HINTS = {
-    "postgresql": "pip install 'llm-redact-proxy[vault-postgres]'",
-    "mysql": "pip install 'llm-redact-proxy[vault-mysql]'",
-    "oracle": "pip install 'llm-redact-proxy[vault-oracle]'",
+    "postgresql": 'pip install "llm-redact-proxy[vault-postgres]"',
+    "mysql": 'pip install "llm-redact-proxy[vault-mysql]"',
+    "oracle": 'pip install "llm-redact-proxy[vault-oracle]"',
 }
 _SCHEMES = {
     "postgresql": ("postgresql", "postgres"),

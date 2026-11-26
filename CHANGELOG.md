@@ -57,6 +57,82 @@ that is not UTF-8 now fails with an error naming the offset of its first invalid
   mode. The flag is read on Linux only; elsewhere the report says `not checked`. A test now fails
   on any new rooted path without a drive that reaches a file or process call in the source unless
   it is listed with the check that keeps Windows away from it.
+- **On Windows, `llm-redact run -- <tool>` ran a program of that name from the current directory
+  before PATH**: CreateProcess searches the working directory first, so a `claude.exe` in a
+  cloned repository ran instead of the installed tool, with the proxy's base URLs in its
+  environment. A bare name is now looked up on PATH only (relative PATH entries, which name the
+  current directory, are skipped).
+
+### Added
+- **`[log] file` and `serve --log-file PATH`**: the log goes to a file instead of stderr, rotating
+  at 10 MiB and keeping 5 older files, created readable by its owner only (0600 in a 0700 folder
+  on Linux and macOS), UTF-8 with LF line ends on every platform. The lines are the stderr lines,
+  a text line prefixed with its time (UTC); JSON lines are unchanged. The path must be absolute
+  (`~` allowed): a relative one would depend on the directory `serve` starts in. The flag wins
+  over the config, and `[log]` stays restart-only. `serve --check` proves the file can be written
+  and keeps its own lines on the console. `doctor` names where `serve` logs.
+- **`serve` starts without a console**: under `pythonw.exe` or a hidden logon task (no stdout,
+  no stderr) it failed before serving anything, since uvicorn's default log configuration reads
+  `sys.stdout.isatty()`. It now logs to `proxy.log` in the log folder (`~/.local/state/llm-redact`;
+  `%LOCALAPPDATA%\llm-redact\logs` on Windows) unless a file is named, from its first line, so a
+  start that fails says why there.
+
+- **`llm-redact reload`: the SIGHUP reload on Windows**, which has no SIGHUP. The proxy waits on
+  an event named `Local\llm-redact-reload-<port>`; `llm-redact reload [--port N]` sets it, and the
+  proxy reloads exactly as on SIGHUP (the file read and a changed `[detection]` built off the
+  event loop, a bad file logged with the running configuration kept, `/status` `config_reload`
+  counting it, in-memory vault mappings kept). The event lives in the namespace of the Windows
+  session the proxy runs in, so another session cannot open it, and only the account that
+  started the proxy (with SYSTEM and administrators) may set it. A name another program created
+  first is never used: the proxy logs a WARNING and runs without it. The command exits 1 when no
+  proxy in this session listens on the port; on Linux and macOS it prints the `kill -HUP` form
+  and exits 2.
+
+- **`llm-redact run` inside WSL shares the proxy's address with a Windows program**: one started
+  from WSL (an `.exe`, or a file on a Windows drive) sees only the variables `WSLENV` names, so
+  `run -- claude.exe` reached the provider directly. Each exported variable is now added to
+  `WSLENV` as `NAME/w` (shared with Windows programs only), entries already there kept; a Linux
+  program's environment is unchanged.
+- On Windows and in WSL, `doctor` WARNs when a provider's `upstream_base_url` or the llm backend's
+  model server is named `localhost` or `[::1]`: Windows resolves localhost to `::1` first, servers
+  running there (Ollama, LM Studio) listen on 127.0.0.1 only, and WSL's mirrored networking does
+  not carry `::1` across. It names the setting and the host only.
+- **`/status` says which platform answered** (`platform`: `windows`, `wsl`, `linux` or `macos`),
+  where a native and a WSL proxy both run on one machine; `llm-redact status` prints it on its
+  first line. In WSL, `doctor` names the distribution and the networking mode (`wslinfo
+  --networking-mode`, where WSL ships it).
+
+### Changed
+- **In WSL, a SQLite vault on a Windows drive is refused at startup**: under `/mnt/c` (a 9p
+  mount in WSL 2, drvfs in WSL 1) SQLite's file locks and shared memory do not hold, and the
+  proxy writes through two connections (its background map writer has its own), so the vault
+  could lose writes and issue a token number twice. `serve` (and `serve --check`) stops with an
+  error naming the path and the Linux-side default, and `doctor` FAILs it; the audit log, the
+  override store and the model folders there get a WARN. A vault in the Linux file system, and
+  every path outside WSL, is unaffected. To keep an existing vault, stop the proxy and move it
+  (with its `-wal` and `-shm` files) into the Linux file system.
+- **On Windows, llm-redact's per-user files now go under `%LOCALAPPDATA%\llm-redact`**, which
+  stays on the machine (the config holds deny strings, so it should not roam with the profile):
+  the config file is `%LOCALAPPDATA%\llm-redact\config.toml`, and the vault, audit and override
+  stores and assembled GLiNER model folders go to `%LOCALAPPDATA%\llm-redact\data`. Windows used
+  the Linux locations under the profile before (`%USERPROFILE%\.config\llm-redact`,
+  `%USERPROFILE%\.local\share\llm-redact`). An install with files there keeps using them until
+  the new location holds the same kind of file (a `config.toml`; anything in `data`), so
+  upgrading moves nothing and the vault's tokens keep restoring. `doctor` names the data folder
+  (and where it really is, when a link or the Microsoft Store's Python keeps it elsewhere), says
+  where it looked for a config file when it found none, and WARNs about each folder still read
+  from the old location, with the steps to move it: stop the proxy, move the files (each `.db`
+  with its `-wal` and `-shm` files), start the proxy. A set `XDG_CONFIG_HOME` or `XDG_DATA_HOME`
+  still wins on every platform. Linux, macOS and WSL are unchanged.
+- On Windows, `init` and `plugin install --proxy-url` print the environment lines in PowerShell
+  syntax (what Windows Terminal opens): `$env:NAME = '…'` for the session and
+  `[Environment]::SetEnvironmentVariable('NAME', '…', 'User')` to keep it for new terminals and
+  programs, the value single-quoted so PowerShell expands nothing in it. An `export` line pasted
+  into PowerShell was an error. Linux and macOS print the same `export` lines as before.
+- An `XDG_CONFIG_HOME` or `XDG_DATA_HOME` that is not an absolute path is now ignored, as the XDG
+  Base Directory specification says (an empty one already was): a relative value named a folder
+  under whatever the working directory was, so the vault moved with the directory a command ran
+  in.
 
 ### Added
 - Browser-extension design and decision record (`docs/browser-extension.md`, listed in the
@@ -69,6 +145,31 @@ that is not UTF-8 now fails with an error naming the offset of its first invalid
   proposal until it ships.
 
 ### Fixed
+- Commands llm-redact prints for pasting work in cmd.exe and PowerShell too. The install hints
+  read `pip install 'llm-redact-proxy[crypto]'`, which in cmd.exe names a package called
+  `'llm-redact-proxy[crypto]'` quotes included; they now double-quote the extra, which every
+  shell reads. On Windows a printed path (the refusal override's `--config`, `models pull`'s
+  `verify --dir`) is double-quoted when it holds a blank or a character cmd.exe or PowerShell
+  would read (`&`, `(`, `)`, `;` …), not only a space, and a path holding `%`, `$` or a backtick,
+  which those shells read even inside double quotes, gets a note (for the override hint, a
+  WARNING at startup).
+- On Windows, `llm-redact run -- claude` did not find an npm-installed tool: npm installs a
+  `claude.cmd` shim, and CreateProcess adds only `.exe` to a bare name. The lookup now uses
+  PATHEXT's runnable extensions (`.exe` and `.com` before `.cmd` and `.bat` in one folder), and
+  says so when a batch file's arguments hold a character cmd.exe reads again (`"` `%` `&` …). The
+  ephemeral proxy `run` starts gets a process group of its own, so the terminal's Ctrl+C reaches
+  the tool and not the proxy under it, and is stopped with CTRL_BREAK_EVENT instead of
+  TerminateProcess, so its shutdown drains (the vault closed) before it exits; a file Windows
+  cannot run is a clear exit 126 instead of a traceback. The proxy logs `llm-redact stopped` as
+  the last line of every shutdown.
+- `doctor` checked an encrypted vault's key through a `file:` URI built from the raw path. In a
+  folder whose name holds `#`, the path was cut there (the rest, and `mode=ro`, read as a
+  fragment): doctor created an empty database at the cut name and reported the vault as not
+  encrypted yet. A name holding `%` and two hex digits named another path and ended doctor with
+  a traceback. The URI is now percent-encoded, as the vault commands' already was, and a vault
+  on a Windows UNC path (also what a mapped network drive resolves to) is opened through an
+  empty authority, which SQLite accepts (it refuses `file://server/...`). `override list` and
+  doctor read the override store through the same URI, which they could not on a UNC path.
 - On Windows, the files llm-redact writes are no longer translated to `\r\n` line ends: a
   `models pull --to` folder (its manifest, the sidecars and an assembled `gliner_config.json`)
   written on Windows has the same bytes and digests as one written on Linux, and so do the agent

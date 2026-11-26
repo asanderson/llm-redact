@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -339,9 +340,9 @@ def test_the_docs_promise_the_same_store_only_where_it_holds() -> None:
 def test_shell_quote_follows_the_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     # POSIX single quotes around anything unsafe; on Windows the
     # command-line convention, double quotes only around a space.
-    monkeypatch.setattr("llm_redact.overrides.os.name", "posix")
+    monkeypatch.setattr(sys, "platform", "linux")
     assert shell_quote("/etc/llm-redact/config.toml") == "/etc/llm-redact/config.toml"
     assert shell_quote("/my dir/c.toml") == "'/my dir/c.toml'"
-    monkeypatch.setattr("llm_redact.overrides.os.name", "nt")
+    monkeypatch.setattr(sys, "platform", "win32")
     assert shell_quote("C:\\cfg\\c.toml") == "C:\\cfg\\c.toml"
     assert shell_quote("C:\\my dir\\c.toml") == '"C:\\my dir\\c.toml"'

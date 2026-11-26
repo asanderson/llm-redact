@@ -10,6 +10,7 @@ scripts/mutation_equivalents.py instead.
 
 import re
 import sqlite3
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -265,12 +266,16 @@ def test_open_creates_nested_parent_directories(tmp_path: Path) -> None:
     assert path.exists()
 
 
-def test_default_vault_path_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_vault_path_layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # The documented data location, both with and without XDG_DATA_HOME
-    # (kills the env-var-name and path-segment mutants).
-    monkeypatch.setenv("XDG_DATA_HOME", "/custom/data")
-    assert default_vault_path() == Path("/custom/data/llm-redact/vault.db")
+    # (kills the env-var-name and path-segment mutants). An absolute value
+    # on this platform: a relative one counts as unset (llm_redact.paths).
+    custom = tmp_path / "custom" / "data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(custom))
+    assert default_vault_path() == custom / "llm-redact" / "vault.db"
     monkeypatch.delenv("XDG_DATA_HOME")
+    # The POSIX layout (Windows keeps it under %LOCALAPPDATA%: test_store_paths).
+    monkeypatch.setattr(sys, "platform", "linux")
     # as_posix(): the layout is what matters, not the platform separator.
     assert default_vault_path().as_posix().endswith(".local/share/llm-redact/vault.db")
 

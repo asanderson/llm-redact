@@ -58,7 +58,7 @@ from starlette.requests import HTTPConnection, Request
 from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
 
-from llm_redact import __version__
+from llm_redact import __version__, platform_info, winreload
 from llm_redact.audit import (
     AuditLog,
     AuditRecord,
@@ -1029,6 +1029,9 @@ class ProxyState:
         self.config = config
         self.config_path = config_path
         self.started_at = time.time()
+        # windows, wsl, linux or macos: which proxy answered, where a native
+        # and a WSL one both run (the /status platform field).
+        self.platform = platform_info.platform_name()
         # License resolution is informational only (the FOSS core has no
         # tier gates): the tier is surfaced and handed to the pro plugin's
         # factories. What fails closed is a config that requests a
@@ -3585,6 +3588,7 @@ async def _handle_local(
         return JSONResponse(
             {
                 "version": __version__,
+                "platform": state.platform,
                 "uptime_seconds": round(time.time() - state.started_at, 1),
                 "started_at": datetime.fromtimestamp(state.started_at, tz=UTC).isoformat(
                     timespec="seconds"
@@ -8937,8 +8941,13 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
         loop = asyncio.get_running_loop()
-        # The signal a reload handler was registered for; Windows has none.
+        # The signal a reload handler was registered for; Windows has none:
+        # there `llm-redact reload` sets a named event a thread waits on
+        # (winreload), which asks the same scheduler from that thread.
         sighup: int | None = None
+        reload_listener = winreload.start_listener(
+            state.config.port, lambda: loop.call_soon_threadsafe(state.reloads.request)
+        )
         if sys.platform != "win32":
             try:
                 # The reload runs as a task (state.reloads): the file read
@@ -8989,6 +8998,8 @@ def create_app(
             # SIGHUP then (a terminal closing) would end the process in the
             # middle of the sinks' final flush or the database closes.
             await state.reloads.close()
+            if reload_listener is not None:
+                reload_listener.stop()
             await state.connections.stop()
             for task in background_tasks:
                 task.cancel()
@@ -9031,6 +9042,9 @@ def create_app(
                 # Last: everything is closed, nothing a SIGHUP's default
                 # action could cut short.
                 loop.remove_signal_handler(sighup)
+            # The shutdown ran to its end (the vault closed): what a
+            # supervisor's log (or `run`'s ephemeral proxy test) can check.
+            logger.info("llm-redact stopped")
 
     app = Starlette(
         routes=[

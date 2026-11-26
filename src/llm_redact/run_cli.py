@@ -9,21 +9,49 @@ Signals: SIGINT reaches the child through the terminal's foreground
 process group, so the wrapper ignores it and just waits (the classic
 wrapper pattern — forwarding would double-signal); SIGTERM is forwarded.
 The wrapper's exit code is the child's.
+
+Windows: a bare program name is looked up on PATH only (``resolve_program``),
+never in the current directory, which CreateProcess searches first, and
+with PATHEXT's extensions, so an npm ``claude.cmd`` shim is found (an
+``.exe`` beside it goes first). A batch file's arguments are read again by
+cmd.exe, which is said when they hold a character it treats specially.
+The ephemeral proxy gets a process group of its own, so the terminal's
+Ctrl+C reaches the tool and not the proxy under it, and is stopped with
+CTRL_BREAK_EVENT, which uvicorn handles as SIGTERM: its shutdown drains
+before it exits (a kill follows only when it does not within the bound).
+
+WSL: a Windows program started from WSL (an ``.exe``, or a file on a
+Windows drive) sees only the variables ``WSLENV`` names, so each exported
+one is added there as ``NAME/w`` (shared with Win32 programs only); a
+Linux program's environment is unchanged.
 """
 
 import argparse
 import contextlib
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
+from pathlib import Path
 from types import FrameType
 
+from llm_redact import platform_info
 from llm_redact.config import apply_env_overrides, dial_url, load_config
 from llm_redact.init_cli import TOOL_EXPORTS, export_value
 
 _READY_TIMEOUT_SECONDS = 15.0
+# How long the ephemeral proxy may take to stop before it is killed.
+_STOP_TIMEOUT_SECONDS = 5.0
+# What CreateProcess runs itself (a .cmd or .bat through cmd.exe), in the
+# order one folder's matches are taken; PATHEXT decides which count.
+_RUNNABLE_EXTENSIONS = (".exe", ".com", ".cmd", ".bat")
+_DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+_BATCH_EXTENSIONS = (".cmd", ".bat")
+# What cmd.exe reads in a batch file's arguments before the program does.
+_CMD_SPECIAL = frozenset('"%!^&|<>()\r\n')
 
 # Names an EXISTING llm-redact proxy (this machine or a team server) for
 # every client-side command: `run` routes tools at it instead of spawning
@@ -74,6 +102,92 @@ def _proxy_running(base_url: str, timeout: float = 1.0) -> bool:
         return False
 
 
+def resolve_program(name: str, path: str | None, pathext: str | None) -> str | None:
+    """On Windows, the program a bare ``name`` runs: the first PATH entry
+    holding it with one of PATHEXT's runnable extensions (``.exe`` and
+    ``.com`` before ``.cmd`` and ``.bat`` in one folder; a name that has one
+    of them is looked for as is). Only absolute entries count: a relative
+    one ("." or empty) names the current directory, which CreateProcess
+    would search before PATH, so a program planted there never runs. A name
+    with a folder or drive in it is returned as given; None when nothing on
+    PATH matches."""
+    if any(mark in name for mark in ("/", "\\", ":")):
+        return name
+    allowed = {ext.strip().lower() for ext in (pathext or _DEFAULT_PATHEXT).split(";")}
+    extensions = [ext for ext in _RUNNABLE_EXTENSIONS if ext in allowed]
+    lowered = name.lower()
+    candidates = (
+        [name]
+        if any(lowered.endswith(ext) for ext in extensions)
+        else [name + ext for ext in extensions]
+    )
+    for entry in (path or "").split(os.pathsep):
+        folder = entry.strip().strip('"')
+        if not folder or not os.path.isabs(folder):
+            continue
+        for candidate in candidates:
+            program = os.path.join(folder, candidate)
+            if os.path.isfile(program):
+                return program
+    return None
+
+
+def _batch_warning(program: str, arguments: list[str]) -> str | None:
+    """What to say before running a batch file whose arguments hold a
+    character cmd.exe reads itself: they may not reach the program as
+    typed (a ``"`` can end the quoting, and an ``&`` after it start
+    another command)."""
+    if not program.lower().endswith(_BATCH_EXTENSIONS):
+        return None
+    if not any(_CMD_SPECIAL & set(argument) for argument in arguments):
+        return None
+    return (
+        f"llm-redact run: {os.path.basename(program)} is a batch file, so cmd.exe reads its"
+        ' arguments again: a " % ! ^ & | < > ( ) in them may not reach the program as typed'
+    )
+
+
+def wslenv_with(current: str | None, names: Iterable[str]) -> str:
+    """``WSLENV`` with each of ``names`` added as ``NAME/w`` — shared with a
+    Win32 program started from WSL, not with a Linux one: an entry already
+    there is kept as it is, empty entries are dropped."""
+    entries = [entry for entry in (current or "").split(":") if entry]
+    present = {entry.split("/", 1)[0] for entry in entries}
+    for name in names:
+        if name not in present:
+            entries.append(f"{name}/w")
+            present.add(name)
+    return ":".join(entries)
+
+
+def _runs_windows_program(program: str) -> bool:
+    """In WSL, whether ``program`` is a Windows one: an ``.exe``, or a file
+    on a Windows drive (WSL starts both as Win32 programs)."""
+    if program.lower().endswith(".exe"):
+        return True
+    mount = platform_info.mount_of(Path(program))
+    return mount is not None and mount.fstype in platform_info.WINDOWS_DRIVE_TYPES
+
+
+def _stop_ephemeral(proxy: subprocess.Popen[bytes]) -> None:
+    """Stop the ephemeral proxy so its shutdown drains: CTRL_BREAK_EVENT to
+    its own process group on Windows (uvicorn handles it as SIGTERM; a bare
+    terminate there is TerminateProcess), SIGTERM elsewhere; a kill only
+    when it has not exited within the bound."""
+    if sys.platform == "win32":
+        try:
+            proxy.send_signal(signal.CTRL_BREAK_EVENT)
+        except OSError:  # no console to deliver it through
+            proxy.terminate()
+    else:
+        proxy.terminate()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proxy.wait(timeout=_STOP_TIMEOUT_SECONDS)
+    if proxy.poll() is None:
+        proxy.kill()
+        proxy.wait()
+
+
 def _start_ephemeral_proxy(args: argparse.Namespace, base_url: str) -> subprocess.Popen[bytes]:
     command = [sys.executable, "-m", "llm_redact", "serve"]
     if args.config is not None:
@@ -82,7 +196,12 @@ def _start_ephemeral_proxy(args: argparse.Namespace, base_url: str) -> subproces
         command += ["--port", str(args.port)]
     # The proxy's own stderr logging stays visible: it interleaves with the
     # tool's output the same way a manually started proxy would.
-    proxy = subprocess.Popen(command)
+    if sys.platform == "win32":
+        # Its own group: the terminal's Ctrl+C reaches the tool, never the
+        # proxy under it, and CTRL_BREAK_EVENT can stop it alone.
+        proxy = subprocess.Popen(command, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+    else:
+        proxy = subprocess.Popen(command)
     deadline = time.monotonic() + _READY_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if proxy.poll() is not None:
@@ -90,7 +209,7 @@ def _start_ephemeral_proxy(args: argparse.Namespace, base_url: str) -> subproces
         if _proxy_running(base_url, timeout=0.5):
             return proxy
         time.sleep(0.1)
-    proxy.terminate()
+    _stop_ephemeral(proxy)
     raise RuntimeError(f"proxy did not answer at {base_url} within {_READY_TIMEOUT_SECONDS}s")
 
 
@@ -183,6 +302,22 @@ def run_run(args: argparse.Namespace) -> int:
     print(f"llm-redact: routing {routed} via {shown}{identified} ({origin})", file=sys.stderr)
 
     try:
+        if sys.platform == "win32":
+            # PATH only, with PATHEXT (an npm .cmd shim is found), never the
+            # current directory CreateProcess would search first.
+            program = resolve_program(command[0], env.get("PATH"), env.get("PATHEXT"))
+            if program is None:
+                print(f"llm-redact run: command not found: {command[0]}", file=sys.stderr)
+                return 127
+            command = [program, *command[1:]]
+            warning = _batch_warning(program, command[1:])
+            if warning is not None:
+                print(warning, file=sys.stderr)
+        elif platform_info.is_wsl():
+            target = shutil.which(command[0], path=env.get("PATH"))
+            if target is not None and _runs_windows_program(target):
+                exported = [TOOL_EXPORTS[tool][0] for tool in tools]
+                env["WSLENV"] = wslenv_with(env.get("WSLENV"), [*exported, *extra_env])
         try:
             child = subprocess.Popen(command, env=env)
         except FileNotFoundError:
@@ -195,6 +330,11 @@ def run_run(args: argparse.Namespace) -> int:
             return 127
         except PermissionError:
             print(f"llm-redact run: permission denied running: {command[0]}", file=sys.stderr)
+            return 126
+        except OSError as problem:
+            # A file CreateProcess cannot run (not a program: WinError 193).
+            reason = problem.strerror or type(problem).__name__
+            print(f"llm-redact run: cannot run {command[0]}: {reason}", file=sys.stderr)
             return 126
 
         def _forward_terminate(_signum: int, _frame: FrameType | None) -> None:
@@ -210,9 +350,4 @@ def run_run(args: argparse.Namespace) -> int:
         return returncode
     finally:
         if ephemeral is not None:
-            ephemeral.terminate()
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                ephemeral.wait(timeout=5)
-            if ephemeral.poll() is None:
-                ephemeral.kill()
-                ephemeral.wait()
+            _stop_ephemeral(ephemeral)

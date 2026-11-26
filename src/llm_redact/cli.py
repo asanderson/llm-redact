@@ -47,11 +47,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="log line framing (overrides [log] format; json = one object per line)",
     )
     serve.add_argument(
+        "--log-file",
+        default=None,
+        help="log to this file instead of stderr, rotating it (overrides [log] file)",
+    )
+    serve.add_argument(
         "--check",
         action="store_true",
         help="run serve's full startup build (config, detectors, vault open + key"
         " verify, bind policy) and exit without binding — the deploy/reload gate",
     )
+
+    reload = subparsers.add_parser(
+        "reload",
+        help="ask a running proxy to reload its config file (Windows; elsewhere SIGHUP)",
+    )
+    reload.add_argument("--config", type=Path, default=None, help="path to config.toml")
+    reload.add_argument("--port", type=int, default=None, help="the proxy's port")
 
     status = subparsers.add_parser("status", help="query a running proxy's status endpoint")
     status.add_argument("--config", type=Path, default=None, help="path to config.toml")
@@ -350,18 +362,36 @@ def plugin_commands(core_names: set[str]) -> "dict[str, CliCommand]":
     }
 
 
-def _serve_config(args: argparse.Namespace) -> Config:
+def _serve_config(args: argparse.Namespace, *, check: bool = False) -> Config:
     """Load the config and apply serve's CLI overrides — shared verbatim by
     `serve` and `serve --check` so the check exercises exactly what serve
-    would run."""
-    from llm_redact.log import setup_logging
+    would run. The check's own lines stay on the console (the operator, or
+    the agent plugin's config-edit command, reads them): it only proves the
+    log file can be written."""
+    from llm_redact.log import log_destination, log_handler, setup_logging
 
     config = apply_env_overrides(load_config(args.config))
     if args.log_format is not None:
         config = dataclasses.replace(
             config, log=dataclasses.replace(config.log, format=args.log_format)
         )
-    setup_logging(config.log.format)
+    if getattr(args, "log_file", None) is not None:
+        # Read against the directory serve starts in, then kept absolute (as
+        # /status and the llm-redact-pro editor report it).
+        chosen = str(Path(args.log_file).expanduser().absolute())
+        config = dataclasses.replace(config, log=dataclasses.replace(config.log, file=chosen))
+    destination = log_destination(config.log.file, console=sys.stderr is not None)
+    try:
+        if check:
+            if destination is not None:
+                log_handler(config.log.format, destination).close()
+            setup_logging(config.log.format)
+        else:
+            setup_logging(config.log.format, destination)
+    except OSError as problem:
+        raise ConfigError(
+            f"[log] file {destination} cannot be written ({type(problem).__name__})"
+        ) from None
     if args.session is not None:
         if config.vault.backend == "memory":
             logging.getLogger("llm_redact").warning(
@@ -394,7 +424,7 @@ def _run_serve_check(args: argparse.Namespace) -> int:
     from llm_redact.vault import VaultKeyError
 
     try:
-        config = _serve_config(args)
+        config = _serve_config(args, check=True)
         validate_bind_security(config.host, config.tls, os.environ)
         app = create_app(config, config_path=args.config)
     except (ConfigError, ValueError, VaultKeyError, re.error) as problem:
@@ -424,6 +454,104 @@ def _tolerant_output() -> None:
                 reconfigure(errors="backslashreplace")
 
 
+def _serve_without_console(args: argparse.Namespace) -> int:
+    """``serve`` with no stdout or stderr (pythonw.exe, a hidden logon task),
+    where nothing it printed would be seen: it logs to the default file from
+    its first line (the config may name another), a start that fails
+    included."""
+    from llm_redact.log import default_log_file, setup_logging
+    from llm_redact.vault import VaultKeyError
+
+    setup_logging("text", default_log_file(), delay=True)
+    logger = logging.getLogger("llm_redact")
+    try:
+        _run_serve(args)
+    except (ConfigError, ValueError, VaultKeyError, re.error) as problem:
+        logger.error("serve did not start: %s", problem)
+        return 1
+    except Exception:
+        logger.exception("serve did not start")
+        return 1
+    return 0
+
+
+def _run_serve(args: argparse.Namespace) -> None:
+    """``serve``: build the app and run it until it is stopped."""
+    from llm_redact import serving
+    from llm_redact.log import log_destination
+    from llm_redact.proxy import create_app, identity_exposure_warning
+
+    config = _serve_config(args)
+    # Fail-closed bind policy: refuse a non-loopback bind without full
+    # mutual TLS, before any socket opens.
+    validate_bind_security(config.host, config.tls, os.environ)
+    run_kwargs: dict[str, object] = {}
+    if (
+        config.log.format == "json"
+        or log_destination(config.log.file, console=sys.stderr is not None) is not None
+    ):
+        # Disable uvicorn's own logging config so its records propagate to
+        # the root handler: as JSON lines too (its default handlers would
+        # interleave plain text into the stream), into the log file, and,
+        # without a console, at all — its default formatter reads
+        # sys.stdout.isatty() and fails to start when there is no stdout.
+        run_kwargs["log_config"] = None
+    if config.tls.enabled:
+        run_kwargs["ssl_certfile"] = config.tls.certfile
+        run_kwargs["ssl_keyfile"] = config.tls.keyfile
+        if config.tls.client_ca is not None:
+            import ssl
+
+            from llm_redact.tls_scope import uvicorn_protocol_kwargs
+
+            run_kwargs["ssl_ca_certs"] = config.tls.client_ca
+            run_kwargs["ssl_cert_reqs"] = ssl.CERT_REQUIRED
+            # The verified client certificate reaches the app as the
+            # ASGI TLS extension (uvicorn drops it otherwise), for an
+            # access gate that maps certificates to users.
+            run_kwargs.update(uvicorn_protocol_kwargs())
+        logging.getLogger("llm_redact").info(
+            "TLS enabled (%s)",
+            "mutual: clients must present a certificate" if config.tls.mutual else "server-only",
+        )
+    # One startup line: uvicorn's own "running on ..." banner is
+    # suppressed by log_level="warning", so without this the proxy
+    # started in TOTAL silence — no confirmation, no port, no pointer
+    # to the status endpoint for a first-time user.
+    from llm_redact import __version__
+
+    scheme = "https" if config.tls.enabled else "http"
+    logging.getLogger("llm_redact").info(
+        "llm-redact %s serving on %s://%s:%d — status %s/__llm-redact/status",
+        __version__,
+        scheme,
+        url_host(config.host),
+        config.port,
+        dial_url(config.host, config.port, scheme=scheme),
+    )
+    app = create_app(config, config_path=args.config)
+    exposure = identity_exposure_warning(app.state.proxy, config.host)
+    if exposure is not None:
+        logging.getLogger("llm_redact").warning("%s", exposure)
+    # uvicorn.run, with a shutdown that first ends the dashboard's
+    # never-ending events streams (serving.ProxyServer).
+    serving.run_server(
+        app,
+        host=config.host,
+        port=config.port,
+        log_level="warning",
+        # Access-log lines include the full request line with query
+        # strings, which can carry provider API keys (Gemini ?key=).
+        access_log=False,
+        # The ASGI client address stays the socket peer: uvicorn would
+        # otherwise rewrite it from X-Forwarded-For (for any peer when
+        # FORWARDED_ALLOW_IPS=*), letting a client claim loopback or a
+        # trusted load balancer's address to an access gate.
+        proxy_headers=False,
+        **run_kwargs,
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     _tolerant_output()
     parser = build_parser()
@@ -433,77 +561,15 @@ def main(argv: list[str] | None = None) -> None:
     if plugin_command is not None:
         raise SystemExit(plugin_command.run(args))
     if args.command == "serve":
-        from llm_redact import serving
-        from llm_redact.proxy import create_app, identity_exposure_warning
-
         if args.check:
             raise SystemExit(_run_serve_check(args))
-        config = _serve_config(args)
-        # Fail-closed bind policy: refuse a non-loopback bind without full
-        # mutual TLS, before any socket opens.
-        validate_bind_security(config.host, config.tls, os.environ)
-        run_kwargs: dict[str, object] = {}
-        if config.log.format == "json":
-            # Disable uvicorn's own logging config so its records propagate
-            # to the root handler and come out as JSON lines too — its
-            # default handlers would interleave plain text into the stream.
-            run_kwargs["log_config"] = None
-        if config.tls.enabled:
-            run_kwargs["ssl_certfile"] = config.tls.certfile
-            run_kwargs["ssl_keyfile"] = config.tls.keyfile
-            if config.tls.client_ca is not None:
-                import ssl
+        if sys.stderr is None:
+            raise SystemExit(_serve_without_console(args))
+        _run_serve(args)
+    elif args.command == "reload":
+        from llm_redact.winreload import run_reload
 
-                from llm_redact.tls_scope import uvicorn_protocol_kwargs
-
-                run_kwargs["ssl_ca_certs"] = config.tls.client_ca
-                run_kwargs["ssl_cert_reqs"] = ssl.CERT_REQUIRED
-                # The verified client certificate reaches the app as the
-                # ASGI TLS extension (uvicorn drops it otherwise), for an
-                # access gate that maps certificates to users.
-                run_kwargs.update(uvicorn_protocol_kwargs())
-            logging.getLogger("llm_redact").info(
-                "TLS enabled (%s)",
-                "mutual: clients must present a certificate"
-                if config.tls.mutual
-                else "server-only",
-            )
-        # One startup line: uvicorn's own "running on ..." banner is
-        # suppressed by log_level="warning", so without this the proxy
-        # started in TOTAL silence — no confirmation, no port, no pointer
-        # to the status endpoint for a first-time user.
-        from llm_redact import __version__
-
-        scheme = "https" if config.tls.enabled else "http"
-        logging.getLogger("llm_redact").info(
-            "llm-redact %s serving on %s://%s:%d — status %s/__llm-redact/status",
-            __version__,
-            scheme,
-            url_host(config.host),
-            config.port,
-            dial_url(config.host, config.port, scheme=scheme),
-        )
-        app = create_app(config, config_path=args.config)
-        exposure = identity_exposure_warning(app.state.proxy, config.host)
-        if exposure is not None:
-            logging.getLogger("llm_redact").warning("%s", exposure)
-        # uvicorn.run, with a shutdown that first ends the dashboard's
-        # never-ending events streams (serving.ProxyServer).
-        serving.run_server(
-            app,
-            host=config.host,
-            port=config.port,
-            log_level="warning",
-            # Access-log lines include the full request line with query
-            # strings, which can carry provider API keys (Gemini ?key=).
-            access_log=False,
-            # The ASGI client address stays the socket peer: uvicorn would
-            # otherwise rewrite it from X-Forwarded-For (for any peer when
-            # FORWARDED_ALLOW_IPS=*), letting a client claim loopback or a
-            # trusted load balancer's address to an access gate.
-            proxy_headers=False,
-            **run_kwargs,
-        )
+        raise SystemExit(run_reload(args))
     elif args.command == "status":
         raise SystemExit(run_status(args))
     elif args.command == "sessions":
@@ -794,7 +860,9 @@ def run_status(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, indent=2))
         return 0
-    print(f"llm-redact {payload['version']} — up {payload['uptime_seconds']}s")
+    # An older proxy says no platform.
+    where = f" on {payload['platform']}" if payload.get("platform") else ""
+    print(f"llm-redact {payload['version']}{where} — up {payload['uptime_seconds']}s")
     license_info = payload.get("license") or {}
     if license_info:
         # The FOSS core enforces nothing — keyless, the caps a key would

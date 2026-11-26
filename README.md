@@ -433,7 +433,8 @@ essentials:
 
 - **Config reload without a restart**: edit the config file, then send
   SIGHUP — `kill -HUP $(pgrep -f 'llm-redact serve')`, or for containers
-  `docker kill --signal=HUP llm-redact`. Detection settings and upstream
+  `docker kill --signal=HUP llm-redact`; on Windows, which has no SIGHUP,
+  run `llm-redact reload`. Detection settings and upstream
   URLs apply as soon as the reload has built them — off the event loop,
   seconds when NER models load; `/__llm-redact/status` `config_reload`
   says when it applied or failed — vault, audit, host, port, allowed_hosts,
@@ -461,7 +462,10 @@ essentials:
 - **Logs**: one metadata-only line per request to stderr — run under
   systemd (journald owns retention) or cap the container log driver.
   `[log] format = "json"` switches to one JSON object per line for log
-  shippers (same content; never values or headers).
+  shippers (same content; never values or headers). `[log] file` (or
+  `serve --log-file PATH`) writes them to a file that rotates at 10 MiB
+  instead; `serve` without a console (pythonw.exe) logs to `proxy.log` in
+  `~/.local/state/llm-redact` (`%LOCALAPPDATA%\llm-redact\logs` on Windows).
 - **Data retention**: the audit log prunes itself (`[audit] max_rows`);
   `llm-redact sessions list|prune --older-than 90d` and
   `[vault] session_ttl_days` bound vault growth — whole idle sessions

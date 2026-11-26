@@ -20,6 +20,7 @@ from llm_redact.config import (
 )
 from llm_redact.config_write import emit_config_toml, write_config_atomic
 from llm_redact.detection.engine import DetectionConfig
+from llm_redact.shell_syntax import env_lines, keep_hint, set_word
 
 TOOL_EXPORTS: dict[str, tuple[str, str]] = {
     # tool name -> (env var, one-line description). Shared with the
@@ -128,7 +129,7 @@ def run_init(args: argparse.Namespace) -> int:
             and interactive
             and _ask_yes_no(
                 "Encrypt the vault at rest? (needs `pip install"
-                " 'llm-redact-proxy[crypto]'` and LLM_REDACT_VAULT_KEY)",
+                ' "llm-redact-proxy[crypto]"` and LLM_REDACT_VAULT_KEY)',
                 False,
             )
             else "none"
@@ -169,15 +170,19 @@ def run_init(args: argparse.Namespace) -> int:
     print("\nPoint your tools at the proxy:\n")
     for tool in tools:
         env, description = TOOL_EXPORTS[tool]
-        print(f"  export {env}={export_value(env, base_url)}    # {description}")
+        # The user's shell: export on POSIX, PowerShell on Windows.
+        first, *rest = env_lines(env, export_value(env, base_url))
+        print(f"  {first}    # {description}")
+        for line in rest:
+            print(f"  {line}")
     print("\nNext steps:")
     first_tool = tools[0]
     print(f"  llm-redact run -- {first_tool}            # one-liner: proxy + tool together")
-    print("  # or: add the export line(s) above to your shell profile and use serve:")
+    print(f"  # or: {keep_hint()} and use serve:")
     print("  llm-redact serve                 # run the proxy")
     print("  llm-redact status                # live counters + coverage posture")
     print('  llm-redact preview --text "mail me at a@corp.example"  # see redaction work')
     if encryption == "fernet":
-        print("  llm-redact vault gen-key         # then export LLM_REDACT_VAULT_KEY")
+        print(f"  llm-redact vault gen-key         # then {set_word()} LLM_REDACT_VAULT_KEY")
     print("  llm-redact service install       # run at login (launchd/systemd)")
     return 0

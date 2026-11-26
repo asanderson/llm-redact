@@ -48,6 +48,18 @@ LISTED: dict[tuple[str, str], tuple[str, str]] = {
         "cpu_model reads it on Linux only",
         "test_ner_bench.py::test_cpu_model_reads_proc_on_linux_only",
     ),
+    ("platform_info.py", "/proc/sys/kernel/osrelease"): (
+        "is_wsl reads it on Linux only",
+        "test_platform_info.py::test_windows_never_reads_the_linux_files",
+    ),
+    ("platform_info.py", "/proc/self/mountinfo"): (
+        "mount_of reads the system's table on Linux only",
+        "test_platform_info.py::test_windows_never_reads_the_linux_files",
+    ),
+    ("platform_info.py", "/usr/bin/wslinfo"): (
+        "networking_mode looks for it on Linux only",
+        "test_platform_info.py::test_windows_never_reads_the_linux_files",
+    ),
 }
 
 # Calls that open, stat, create, remove or run a path given as an argument.

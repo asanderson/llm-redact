@@ -165,8 +165,15 @@ def proxy_setup(
             print(f"existing proxy confirmed at {url}")
         else:
             print(f"WARNING: nothing answering at {url} yet — the commands work once it does")
-        print("point the CLI and your tools at it (add to your shell profile):")
-        print(f"  export {ENV_PROXY_URL}={url}")
+        from llm_redact.shell_syntax import env_lines
+
+        lines = env_lines(ENV_PROXY_URL, url)
+        # POSIX: the profile keeps an export; on Windows the second line
+        # keeps it in the user's environment.
+        where = " (add to your shell profile)" if len(lines) == 1 else ""
+        print(f"point the CLI and your tools at it{where}:")
+        for line in lines:
+            print(f"  {line}")
         return 0
     if install_proxy:
         return _install_local_proxy(runner)

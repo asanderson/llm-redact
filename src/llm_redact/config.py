@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from llm_redact import paths
 from llm_redact.detection.deny import DenyEntry
 from llm_redact.detection.engine import (
     BINARY_UPLOAD_MODES,
@@ -149,7 +150,7 @@ class AuditConfig:
     # Default off: a privacy tool does not write request history to disk
     # unless asked. In-memory /status totals are always available.
     enabled: bool = False
-    path: str | None = None  # default: $XDG_DATA_HOME/llm-redact/audit.db
+    path: str | None = None  # default: audit.db in paths.data_dir()
     max_rows: int = 10000
     # A per-row HMAC hash-chain making deletion/alteration of any row
     # detectable. Off by default; the HMAC key is env-only
@@ -584,7 +585,7 @@ class VaultConfig:
     # "memory" is the deliberate default: persisting real secrets to disk
     # must be an explicit opt-in for a privacy tool.
     backend: str = "memory"
-    path: str | None = None  # default: $XDG_DATA_HOME/llm-redact/vault.db
+    path: str | None = None  # default: vault.db in paths.data_dir()
     session: str = "default"
     # "static": one namespace named by `session` (default). "per-conversation":
     # each conversation gets its own namespace derived from its first user
@@ -648,7 +649,7 @@ class OverridesConfig:
     enabled: bool = False
     # How long a code, and a one-time approval, stays usable.
     ttl_minutes: int = 15
-    # The override store; default $XDG_DATA_HOME/llm-redact/overrides.db.
+    # The override store; default overrides.db in paths.data_dir().
     path: str | None = None
 
 
@@ -658,6 +659,11 @@ class LogConfig:
     # for log shippers). Log content is identical either way: paths,
     # statuses, and detection counts — never values or headers.
     format: str = "text"
+    # A file to log to instead of stderr, rotating (log.LOG_FILE_BYTES,
+    # log.LOG_FILE_BACKUPS); an absolute path, `~` allowed. `serve
+    # --log-file` overrides it. Without a console (pythonw, a hidden logon
+    # task) serve logs to log.default_log_file() when this is unset.
+    file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1252,9 +1258,10 @@ def identity_upstream_problem(url: str) -> str | None:
 
 
 def default_config_path() -> Path:
-    # An empty XDG_CONFIG_HOME is unset (the XDG spec), never the current dir.
-    xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(xdg) / "llm-redact" / "config.toml"
+    """The per-user config file: ``config.toml`` in ``paths.config_dir()``
+    (``$XDG_CONFIG_HOME/llm-redact``, else ``~/.config/llm-redact``, and on
+    Windows ``%LOCALAPPDATA%\\llm-redact``)."""
+    return paths.config_dir() / paths.CONFIG_FILE
 
 
 # Standard system path; also the documented container config mount point.
@@ -2120,6 +2127,25 @@ def _required_str(section: Mapping[str, Any], key: str, where: str) -> str:
     return value
 
 
+def log_file_problem(value: str) -> str | None:
+    """Why ``value`` cannot be ``[log] file``, or None: an absolute path
+    (``~`` allowed) with no control character. A relative one would name a
+    file under whatever directory serve starts in (a logon task's is
+    System32)."""
+    if any(ord(char) < 0x20 or char == "\x7f" for char in value):
+        return "[log] file must not contain control characters"
+    try:
+        absolute = Path(value).expanduser().is_absolute()
+    except RuntimeError:  # ~user with no such user, or no home directory
+        absolute = False
+    if not absolute:
+        return (
+            "[log] file must be an absolute path (or start with ~): a relative one"
+            " would name a file under whatever directory serve starts in"
+        )
+    return None
+
+
 def _optional_str(section: Mapping[str, Any], key: str, where: str) -> str | None:
     if key not in section:
         return None
@@ -2699,8 +2725,8 @@ def load_config(path: Path | None = None) -> Config:
     """Load configuration.
 
     Search order when no explicit path is given: $LLM_REDACT_CONFIG (set but
-    missing is a hard error, never a silent fall-through), then
-    $XDG_CONFIG_HOME/llm-redact/config.toml, then (Linux and macOS only)
+    missing is a hard error, never a silent fall-through), then the per-user
+    file (``default_config_path``), then (Linux and macOS only)
     /etc/llm-redact/config.toml, then built-in defaults
     (``config_search_candidates``).
 
@@ -3186,11 +3212,14 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     )
 
     log_raw = raw.get("log", {})
-    _require_keys(log_raw, {"format"}, "[log]")
+    _require_keys(log_raw, {"format", "file"}, "[log]")
     log_format = str(log_raw.get("format", "text"))
     if log_format not in ("text", "json"):
         raise ConfigError(f'[log] format must be "text" or "json", not {log_format!r}')
-    log = LogConfig(format=log_format)
+    log_file = _optional_str(log_raw, "file", "[log]")
+    if log_file is not None and (problem := log_file_problem(log_file)) is not None:
+        raise ConfigError(problem)
+    log = LogConfig(format=log_format, file=log_file)
 
     tls_raw = raw.get("tls", {})
     _require_keys(tls_raw, {"certfile", "keyfile", "client_ca"}, "[tls]")

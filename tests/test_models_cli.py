@@ -428,22 +428,25 @@ def test_verify_dir_skips_the_files_windows_adds_with_a_note(
     # Explorer adds desktop.ini, and a folder copied into WSL carries each
     # downloaded file's mark of the web as NAME:Zone.Identifier: no loader
     # reads either, so they are noted, not failed. Any other file still fails.
+    # On NTFS that name opens config.json's alternate data stream instead,
+    # which is no folder entry and leaves the file's own bytes (its SHA-256)
+    # as they were: there only desktop.ini is noted.
     monkeypatch.setitem(sys.modules, "huggingface_hub", None)
     folder = _pulled(tmp_path)
     (folder / "desktop.ini").write_text("[.ShellClassInfo]\n")
     (folder / "config.json:Zone.Identifier").write_text("[ZoneTransfer]\nZoneId=3\n")
+    skipped = ["desktop.ini"]
+    if sys.platform != "win32":
+        skipped.insert(0, "config.json:Zone.Identifier")
     code, out = _run(capsys, "verify", "--dir", str(tmp_path))
     assert code == 0
     assert out.splitlines()[-1] == (
-        f"note: {folder.name} also holds files Windows adds, which no loader reads (skipped):"
-        " config.json:Zone.Identifier, desktop.ini"
+        f"note: {folder.name} also holds files Windows adds, which no loader reads (skipped): "
+        + ", ".join(skipped)
     )
     code, out = _run(capsys, "verify", "--dir", str(tmp_path), "--json")
     assert code == 0
-    assert json.loads(out)["models"][0]["skipped"] == [
-        "config.json:Zone.Identifier",
-        "desktop.ini",
-    ]
+    assert json.loads(out)["models"][0]["skipped"] == skipped
     (folder / "extra.safetensors").write_text("")
     code, out = _run(capsys, "verify", "--dir", str(tmp_path))
     assert code == 1 and "extra.safetensors: not listed in the manifest" in out

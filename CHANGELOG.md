@@ -12,44 +12,12 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Security
-- **On Windows, a config file at the root of a drive could be loaded, and `init` and the config
-  editor could write the operator's config to it.** When neither `LLM_REDACT_CONFIG` nor a
-  per-user `config.toml` existed, the default search tried `/etc/llm-redact/config.toml`. Windows
-  has no `/etc`: there that path names `\etc\llm-redact\config.toml` at the root of whatever drive
-  the working directory is on (`C:`, a USB stick, a network share), where another local account
-  can create folders. A config planted there was loaded (it could name another upstream or turn
-  detection off), `config show --path` and `doctor` reported it, and `llm-redact init` and the
-  llm-redact-pro config editor wrote the operator's config to it. On Windows the search now stops
-  at the per-user file; Linux and macOS (WSL included) still read `/etc/llm-redact/config.toml`.
-  Loading, the write targets and the refusal hint's `--config` decision read one list
-  (`config_search_candidates`). Affected: every release run on Windows, since 1.0.0.
-- **On Windows, `llm-redact override CODE` read its confirmation from a file.** The approval
-  reads `allow` from the controlling terminal, `/dev/tty`, which on Windows names
-  `\dev\tty` at the root of the working directory's drive: a file another local account (or
-  software running as the operator) could create with `allow` in it approved the refusal without
-  a person typing anything. On Windows the command now refuses to approve without opening
-  anything; approving on the command line is not available there yet. Affected: 1.10.0 and later
-  on Windows, with `[overrides] enabled = true` (off by default).
-- **On Windows, a non-ASCII value in the config file was read wrong, and a deny string holding
-  one never matched.** The config file was decoded with the system's code page (cp1252 on a
-  Western install without `PYTHONUTF8`): saved as UTF-8, as TOML requires, `deny = ["Müller"]`
-  loaded as `MÃ¼ller`, so `Müller` in a prompt went upstream unredacted; allowlist entries and
-  custom-rule patterns with non-ASCII characters were read wrong the same way. The file is now
-  read as UTF-8 on every platform, one leading byte-order mark allowed. A file that is not UTF-8
-  is refused, naming the offset of its first invalid byte: a config saved as Windows "ANSI" text
-  (which loaded before) must be saved as UTF-8. Linux and macOS with a UTF-8 locale were not
-  affected.
-- `llm-redact fips-check` read the Linux kernel's FIPS flag, `/proc/sys/crypto/fips_enabled`, on
-  every platform: on Windows a file planted at a drive's root could make the report claim FIPS
-  mode. The flag is read on Linux only; elsewhere the report says `not checked`. A test now fails
-  on any new rooted path without a drive that reaches a file or process call in the source unless
-  it is listed with the check that keeps Windows away from it.
-- **On Windows, `llm-redact run -- <tool>` ran a program of that name from the current directory
-  before PATH**: CreateProcess searches the working directory first, so a `claude.exe` in a
-  cloned repository ran instead of the installed tool, with the proxy's base URLs in its
-  environment. A bare name is now looked up on PATH only (relative PATH entries, which name the
-  current directory, are skipped), so are entries naming the current drive's root (`\tools`) or a
-  drive's current folder (`C:tools`).
+- **On Windows, `llm-redact run -- <tool>` still looked for the tool in folders that move with the
+  working directory.** 1.13.1 stopped searching the current directory and skips relative PATH
+  entries, but an entry naming the current drive's root (`\tools`) or a drive's current folder
+  (`C:tools`) also depends on where the command runs from: on the drive of a cloned repository,
+  `\tools\claude.exe` is a file at that drive's root. Such entries are skipped now too. Affected:
+  1.13.1 and earlier on Windows, with such an entry on PATH.
 - **On Windows, `llm-redact run -- <tool>` let cmd.exe act on what the tool's arguments held
   when the tool is a batch file**, as npm's `claude.cmd` is: CreateProcess hands a batch file's
   command line to cmd.exe, and Python's quoting does not guard against it (BatBadBut), so an
@@ -57,8 +25,8 @@ and tags `vX.Y.Z`.
   read from a file) ran what the text said. A batch file now runs through `cmd.exe /d /v:OFF`
   with every argument in double quotes, where cmd.exe reads `& | < > ( ) ^ !` as text, and an
   argument holding what no quoting keeps from cmd.exe (`"`, `%`, a line break) is refused
-  (exit 2), naming the character: run the program the batch file starts instead. Affected:
-  every release run on Windows with a batch file named.
+  (exit 2), naming the character: run the program the batch file starts instead (1.13.1 only
+  warned about such an argument). Affected: every release run on Windows with a batch file named.
 - **On Windows, a proxy listening on all interfaces could have the connections local clients
   sent it taken by another program.** With `host = "0.0.0.0"`, `"::"` or empty (a non-loopback
   bind, so with mutual TLS or `LLM_REDACT_INSECURE_BIND=1`), another program could bind the
@@ -108,6 +76,99 @@ and tags `vX.Y.Z`.
   (docs/extraction.md). Affected: `[extraction]` (off by default) on Windows, since 1.10.0.
 
 ### Added
+- **On Windows, `llm-redact override CODE --once|--always` approves at the console again**: it
+  reads `allow` from `CONIN$`, the console even when stdin and stdout are redirected (1.13.1
+  stopped reading `/dev/tty`, a file at the drive's root there, and refused every approval).
+  Without a console (a service, `pythonw.exe`, a process started with `DETACHED_PROCESS`) it
+  refuses as it does without a terminal elsewhere. One started in a console of its own
+  (`CREATE_NEW_CONSOLE`, `CREATE_NO_WINDOW`) reads that console, which no one may be watching and
+  the program that started it can type into: approval guards against accidents, not against
+  software running as you (docs/overrides.md).
+
+### Changed
+- **On Windows, `doctor` checks who the stores' NTFS access control lists let in**: the vault
+  (with its `-wal` and `-shm`, and its folder with what the folder passes on to the files made in
+  it) and the audit log FAIL when another account owns them (an owner may always rewrite the
+  list) or an entry allows anyone but your account, SYSTEM and Administrators any right beyond
+  reading the attributes and the list (`BUILTIN\Users`, for a file under a folder at a drive's
+  root), naming them and how to list them (`icacls`). An entry of a kind doctor does not read is
+  named by its type. An OWNER RIGHTS entry, which Python 3.13 and later use for a
+  folder made private, counts as its owner. It used to WARN that it could not check anything,
+  since POSIX mode bits are synthetic there. A private file says whether its list is protected
+  or inherited from its folder.
+
+### Fixed
+- In WSL, `llm-redact run` now replaces an entry `WSLENV` already holds for a variable it exports
+  with `NAME/w`: 1.13.1 kept it, and one flagged `/u` never reached the Windows program, while `/p`
+  would have translated the URL as a path. Other entries stay.
+- On Windows, writing the config file (`init`, the config editor), `models pull --to` and an
+  assembled GLiNER folder failed with a PermissionError while another program held one of their
+  files for a moment, as a virus scanner, the search indexer or a sync client does right after a
+  file is written. Windows refuses to rename or delete a file another program has open; each such
+  step is now tried again for about two seconds, then reported with what to close (`init` prints
+  which file instead of a traceback; where Windows only says access is denied, the message also
+  names an account that may not change the file). `models pull --to` renames a folder it replaces
+  aside before deleting it: a running proxy holds the model files it loaded, and deleting first
+  left a folder half gone (its sidecar too, so the next pull refused it as not its own). The
+  folder now stays whole (put back when its replacement cannot move in), and the command says to
+  stop the proxy and run it again. Linux and macOS retry nothing.
+- `doctor` passed a TLS certificate, key or client CA that serve cannot open on Windows: it asked
+  `os.access`, which reads only the read-only attribute there, never the access control list.
+  It now opens the file, on every platform.
+
+## [1.13.1] - 2026-11-26
+
+A security release for Windows. Since 1.0.0 the default config search could load, and `init`
+could write, a config at the root of a drive that another local account can create; since
+1.10.0 `llm-redact override CODE` read its confirmation from a file at a drive's root, which
+approved a refusal without a person typing anything; a non-ASCII deny string never matched on a
+Western Windows install, so its value went upstream unredacted; and `fips-check` read the FIPS
+flag from a planted file. It also fixes text on Windows: the files llm-redact writes keep `\n`
+line ends (a `models pull --to` folder has the digests it has on Linux), and output sent to a
+pipe no longer fails on a character the code page lacks (`lookup` prints nothing rather than a
+value it cannot print exactly). Linux and macOS (WSL included) behave as before; a config file
+that is not UTF-8 now fails with an error naming the offset of its first invalid byte.
+
+### Security
+- **On Windows, a config file at the root of a drive could be loaded, and `init` and the config
+  editor could write the operator's config to it.** When neither `LLM_REDACT_CONFIG` nor a
+  per-user `config.toml` existed, the default search tried `/etc/llm-redact/config.toml`. Windows
+  has no `/etc`: there that path names `\etc\llm-redact\config.toml` at the root of whatever drive
+  the working directory is on (`C:`, a USB stick, a network share), where another local account
+  can create folders. A config planted there was loaded (it could name another upstream or turn
+  detection off), `config show --path` and `doctor` reported it, and `llm-redact init` and the
+  llm-redact-pro config editor wrote the operator's config to it. On Windows the search now stops
+  at the per-user file; Linux and macOS (WSL included) still read `/etc/llm-redact/config.toml`.
+  Loading, the write targets and the refusal hint's `--config` decision read one list
+  (`config_search_candidates`). Affected: every release run on Windows, since 1.0.0.
+- **On Windows, `llm-redact override CODE` read its confirmation from a file.** The approval
+  reads `allow` from the controlling terminal, `/dev/tty`, which on Windows names
+  `\dev\tty` at the root of the working directory's drive: a file another local account (or
+  software running as the operator) could create with `allow` in it approved the refusal without
+  a person typing anything. On Windows the command now refuses to approve without opening
+  anything; approving on the command line is not available there yet. Affected: 1.10.0 and later
+  on Windows, with `[overrides] enabled = true` (off by default).
+- **On Windows, a non-ASCII value in the config file was read wrong, and a deny string holding
+  one never matched.** The config file was decoded with the system's code page (cp1252 on a
+  Western install without `PYTHONUTF8`): saved as UTF-8, as TOML requires, `deny = ["Müller"]`
+  loaded as `MÃ¼ller`, so `Müller` in a prompt went upstream unredacted; allowlist entries and
+  custom-rule patterns with non-ASCII characters were read wrong the same way. The file is now
+  read as UTF-8 on every platform, one leading byte-order mark allowed. A file that is not UTF-8
+  is refused, naming the offset of its first invalid byte: a config saved as Windows "ANSI" text
+  (which loaded before) must be saved as UTF-8. Linux and macOS with a UTF-8 locale were not
+  affected.
+- `llm-redact fips-check` read the Linux kernel's FIPS flag, `/proc/sys/crypto/fips_enabled`, on
+  every platform: on Windows a file planted at a drive's root could make the report claim FIPS
+  mode. The flag is read on Linux only; elsewhere the report says `not checked`. A test now fails
+  on any new rooted path without a drive that reaches a file or process call in the source unless
+  it is listed with the check that keeps Windows away from it.
+- **On Windows, `llm-redact run -- <tool>` ran a program of that name from the current directory
+  before PATH**: CreateProcess searches the working directory first, so a `claude.exe` in a
+  cloned repository ran instead of the installed tool, with the proxy's base URLs in its
+  environment. A bare name is now looked up on PATH only (relative PATH entries, which name the
+  current directory, are skipped).
+
+### Added
 - **`[log] file` and `serve --log-file PATH`**: the log goes to a file instead of stderr, rotating
   at 10 MiB and keeping 5 older files, created readable by its owner only (0600 in a 0700 folder
   on Linux and macOS), UTF-8 with LF line ends on every platform. The lines are the stderr lines,
@@ -120,6 +181,7 @@ and tags `vX.Y.Z`.
   `sys.stdout.isatty()`. It now logs to `proxy.log` in the log folder (`~/.local/state/llm-redact`;
   `%LOCALAPPDATA%\llm-redact\logs` on Windows) unless a file is named, from its first line, so a
   start that fails says why there.
+
 - **`llm-redact reload`: the SIGHUP reload on Windows**, which has no SIGHUP. The proxy waits on
   an event named `Local\llm-redact-reload-<port>`; `llm-redact reload [--port N]` sets it, and the
   proxy reloads exactly as on SIGHUP (the file read and a changed `[detection]` built off the
@@ -130,24 +192,16 @@ and tags `vX.Y.Z`.
   first is never used: the proxy logs a WARNING and runs without it. The command exits 1 when no
   proxy in this session listens on the port; on Linux and macOS it prints the `kill -HUP` form
   and exits 2.
+
 - **`llm-redact run` inside WSL shares the proxy's address with a Windows program**: one started
   from WSL (an `.exe`, or a file on a Windows drive) sees only the variables `WSLENV` names, so
-  `run -- claude.exe` reached the provider directly. Each exported variable is now put in
-  `WSLENV` as `NAME/w` (shared with Windows programs only), replacing an entry already there for
-  it (one flagged `/u` never reaches a Windows program, and `/p` would translate the URL as a
-  path); other entries stay, and a Linux program's environment is unchanged.
+  `run -- claude.exe` reached the provider directly. Each exported variable is now added to
+  `WSLENV` as `NAME/w` (shared with Windows programs only), entries already there kept; a Linux
+  program's environment is unchanged.
 - On Windows and in WSL, `doctor` WARNs when a provider's `upstream_base_url` or the llm backend's
   model server is named `localhost` or `[::1]`: Windows resolves localhost to `::1` first, servers
   running there (Ollama, LM Studio) listen on 127.0.0.1 only, and WSL's mirrored networking does
   not carry `::1` across. It names the setting and the host only.
-- **On Windows, `llm-redact override CODE --once|--always` approves at the console again**: it
-  reads `allow` from `CONIN$`, the console even when stdin and stdout are redirected (1.13.1
-  stopped reading `/dev/tty`, a file at the drive's root there, and refused every approval).
-  Without a console (a service, `pythonw.exe`, a process started with `DETACHED_PROCESS`) it
-  refuses as it does without a terminal elsewhere. One started in a console of its own
-  (`CREATE_NEW_CONSOLE`, `CREATE_NO_WINDOW`) reads that console, which no one may be watching and
-  the program that started it can type into: approval guards against accidents, not against
-  software running as you (docs/overrides.md).
 - **`/status` says which platform answered** (`platform`: `windows`, `wsl`, `linux` or `macos`),
   where a native and a WSL proxy both run on one machine; `llm-redact status` prints it on its
   first line. In WSL, `doctor` names the distribution and the networking mode (`wslinfo
@@ -180,20 +234,20 @@ and tags `vX.Y.Z`.
   `[Environment]::SetEnvironmentVariable('NAME', '…', 'User')` to keep it for new terminals and
   programs, the value single-quoted so PowerShell expands nothing in it. An `export` line pasted
   into PowerShell was an error. Linux and macOS print the same `export` lines as before.
-- **On Windows, `doctor` checks who the stores' NTFS access control lists let in**: the vault
-  (with its `-wal` and `-shm`, and its folder with what the folder passes on to the files made in
-  it) and the audit log FAIL when another account owns them (an owner may always rewrite the
-  list) or an entry allows anyone but your account, SYSTEM and Administrators any right beyond
-  reading the attributes and the list (`BUILTIN\Users`, for a file under a folder at a drive's
-  root), naming them and how to list them (`icacls`). An entry of a kind doctor does not read is
-  named by its type. An OWNER RIGHTS entry, which Python 3.13 and later use for a
-  folder made private, counts as its owner. It used to WARN that it could not check anything,
-  since POSIX mode bits are synthetic there. A private file says whether its list is protected
-  or inherited from its folder.
 - An `XDG_CONFIG_HOME` or `XDG_DATA_HOME` that is not an absolute path is now ignored, as the XDG
   Base Directory specification says (an empty one already was): a relative value named a folder
   under whatever the working directory was, so the vault moved with the directory a command ran
   in.
+
+### Added
+- Browser-extension design and decision record (`docs/browser-extension.md`, listed in the
+  docs index's engineering record): the planned extension's architecture (one Apache-2.0 WXT
+  extension whose chat-site and browser API traffic is redacted through opt-in "site gateway"
+  endpoints while the page sends the redacted request itself, so the proxy forwards no browser
+  traffic), its decisions — twelve accepted on 2026-10-02 and, on 2026-11-26, Windows support
+  both natively and through WSL 2, chosen by where the agents run — and the spike register.
+  Planning only: nothing is implemented, and every key, endpoint and command it names is a
+  proposal until it ships.
 
 ### Fixed
 - Commands llm-redact prints for pasting work in cmd.exe and PowerShell too. The install hints
@@ -206,26 +260,13 @@ and tags `vX.Y.Z`.
   WARNING at startup).
 - On Windows, `llm-redact run -- claude` did not find an npm-installed tool: npm installs a
   `claude.cmd` shim, and CreateProcess adds only `.exe` to a bare name. The lookup now uses
-  PATHEXT's runnable extensions (`.exe` and `.com` before `.cmd` and `.bat` in one folder). The
+  PATHEXT's runnable extensions (`.exe` and `.com` before `.cmd` and `.bat` in one folder), and
+  says so when a batch file's arguments hold a character cmd.exe reads again (`"` `%` `&` …). The
   ephemeral proxy `run` starts gets a process group of its own, so the terminal's Ctrl+C reaches
   the tool and not the proxy under it, and is stopped with CTRL_BREAK_EVENT instead of
   TerminateProcess, so its shutdown drains (the vault closed) before it exits; a file Windows
   cannot run is a clear exit 126 instead of a traceback. The proxy logs `llm-redact stopped` as
   the last line of every shutdown.
-- On Windows, writing the config file (`init`, the config editor), `models pull --to` and an
-  assembled GLiNER folder failed with a PermissionError while another program held one of their
-  files for a moment, as a virus scanner, the search indexer or a sync client does right after a
-  file is written. Windows refuses to rename or delete a file another program has open; each such
-  step is now tried again for about two seconds, then reported with what to close (`init` prints
-  which file instead of a traceback; where Windows only says access is denied, the message also
-  names an account that may not change the file). `models pull --to` renames a folder it replaces
-  aside before deleting it: a running proxy holds the model files it loaded, and deleting first
-  left a folder half gone (its sidecar too, so the next pull refused it as not its own). The
-  folder now stays whole (put back when its replacement cannot move in), and the command says to
-  stop the proxy and run it again. Linux and macOS retry nothing.
-- `doctor` passed a TLS certificate, key or client CA that serve cannot open on Windows: it asked
-  `os.access`, which reads only the read-only attribute there, never the access control list.
-  It now opens the file, on every platform.
 - `doctor` checked an encrypted vault's key through a `file:` URI built from the raw path. In a
   folder whose name holds `#`, the path was cut there (the rest, and `mode=ro`, read as a
   fragment): doctor created an empty database at the cut name and reported the vault as not

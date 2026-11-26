@@ -329,15 +329,71 @@ def test_a_bare_name_resolves_on_path_only(
     assert resolve_program("C:claude", path, None) == "C:claude"
 
 
-def test_a_batch_file_with_arguments_cmd_reads_again_is_warned_about(
-    tmp_path: Path, windows_lookup: None, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from llm_redact.run_cli import _batch_warning
+@pytest.mark.parametrize(
+    ("entry", "one_folder"),
+    [
+        ("C:\\npm", True),
+        ("\\\\server\\share\\bin", True),
+        # The current drive's root, and drive C's current folder: both
+        # depend on where the command runs, as "." does.
+        ("\\tools", False),
+        ("C:tools", False),
+        (".", False),
+        ("tools", False),
+    ],
+)
+def test_a_path_entry_counts_only_when_it_names_one_folder(entry: str, one_folder: bool) -> None:
+    from llm_redact.run_cli import names_one_folder
 
-    assert _batch_warning("C:\\npm\\claude.cmd", ["-p", "say hi"]) is None
-    assert _batch_warning("C:\\bin\\claude.exe", ["-p", 'say "hi" & bye']) is None
-    warning = _batch_warning("C:\\npm\\claude.cmd", ["-p", 'say "hi" & bye'])
-    assert warning is not None and "cmd.exe" in warning and "claude.cmd" in warning
+    assert names_one_folder(entry, windows=True) is one_folder
+
+
+CMD = "C:\\Windows\\System32\\cmd.exe"
+
+
+def test_batch_files_run_through_the_system_folders_cmd(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Never a cmd.exe found on PATH or in the current folder.
+    from llm_redact.run_cli import _cmd_exe
+
+    monkeypatch.setenv("SYSTEMROOT", "D:\\WINNT")
+    assert _cmd_exe() == "D:\\WINNT\\System32\\cmd.exe"
+    monkeypatch.delenv("SYSTEMROOT")
+    assert _cmd_exe() == CMD
+
+
+def test_a_batch_file_runs_through_cmd_with_every_argument_quoted() -> None:
+    # CreateProcess hands a batch file's command line to cmd.exe, which acts
+    # on & | < > ( ) ^ itself (BatBadBut): an argument "a & calc" once ran
+    # calc. Quoted, cmd.exe reads them as text; /v:OFF keeps a ! a !, /d
+    # runs no AutoRun command.
+    from llm_redact.run_cli import batch_command_line
+
+    line = batch_command_line("C:\\npm\\claude.cmd", ["-p", "a & calc", "(x)^!y!", ""], cmd=CMD)
+    assert line == (
+        f'"{CMD}" /d /e:ON /v:OFF /s /c ""C:\\npm\\claude.cmd" "-p" "a & calc" "(x)^!y!" """'
+    )
+    # A trailing backslash would make the program read the closing quote as
+    # part of the argument: it is doubled.
+    assert batch_command_line("C:\\x.cmd", ["C:\\dir\\"], cmd=CMD).endswith('"C:\\dir\\\\""')
+
+
+@pytest.mark.parametrize(
+    ("argument", "named"),
+    [
+        ('say "hi"', '"'),  # ends the quoting
+        ("50% of %PATH%", "%"),  # expanded inside quotes too
+        ("one\ntwo", "a line feed"),  # ends the command
+        ("one\rtwo", "a carriage return"),
+    ],
+)
+def test_what_no_quoting_keeps_from_cmd_is_refused(argument: str, named: str) -> None:
+    from llm_redact.run_cli import batch_command_line
+
+    with pytest.raises(ValueError) as refusal:
+        batch_command_line("C:\\npm\\claude.cmd", ["-p", argument], cmd=CMD)
+    assert str(refusal.value) == named
+    with pytest.raises(ValueError):
+        batch_command_line("C:\\100%\\claude.cmd", [], cmd=CMD)  # in its path too
 
 
 def _drain_config(tmp_path: Path) -> tuple[Path, Path]:
@@ -383,6 +439,50 @@ def test_run_runs_a_cmd_shim_from_path_never_one_in_the_current_directory(
     assert "ARGS=['one arg']" in out
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd shims and CreateProcess lookup")
+def test_run_passes_what_cmd_would_act_on_to_a_cmd_shim_as_typed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    from windows_fixtures import cmd_shim
+
+    bin_dir = cmd_shim(tmp_path / "bin", "fixture-tool", "from-path", exit_code=7)
+    marker = tmp_path / "ran.txt"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")]))
+    monkeypatch.setenv("LLM_REDACT_TEST_VAR", "expanded")
+    config = tmp_path / "config.toml"
+    config.write_text("", encoding="utf-8")
+    hostile = [
+        f"a & echo x > {marker.name}",
+        "(x) ^y^ <in> |pipe",
+        "!LLM_REDACT_TEST_VAR!",
+        "tab\there",
+        "C:\\dir\\",
+        "",
+    ]
+    code = run_run(_args(_free_port(), config, "claude", ["--", "fixture-tool", *hostile]))
+    out, _ = capfd.readouterr()
+    assert code == 7
+    assert f"ARGS={hostile!r}" in out
+    assert not marker.exists()  # no command of an argument's ran
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd shims and CreateProcess lookup")
+def test_run_refuses_an_argument_a_cmd_shim_cannot_be_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    from windows_fixtures import cmd_shim
+
+    bin_dir = cmd_shim(tmp_path / "bin", "fixture-tool", "from-path", exit_code=7)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")]))
+    config = tmp_path / "config.toml"
+    config.write_text("", encoding="utf-8")
+    code = run_run(_args(_free_port(), config, "claude", ["--", "fixture-tool", "50%"]))
+    out, err = capfd.readouterr()
+    assert code == 2 and "SHIM=" not in out
+    assert "fixture-tool.cmd is a batch file" in err and "holds %" in err
+
+
 # --- WSL: a Windows program started from WSL gets the variables through WSLENV -----
 
 
@@ -394,10 +494,13 @@ def test_wslenv_lists_the_exported_names_for_a_windows_program() -> None:
         wslenv_with("USERPROFILE/p:GOPATH/l", ["ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"])
         == "USERPROFILE/p:GOPATH/l:ANTHROPIC_BASE_URL/w:OPENAI_BASE_URL/w"
     )
-    # An entry already there stays as it is; an empty one is not repeated.
-    assert wslenv_with("ANTHROPIC_BASE_URL/u::", ["ANTHROPIC_BASE_URL", "X"]) == (
-        "ANTHROPIC_BASE_URL/u:X/w"
+    # An entry already there for one of them is replaced: /u never reaches a
+    # Windows program and /p would translate the URL as a path, so the
+    # program would reach the provider directly. Others stay; empty ones go.
+    assert wslenv_with("ANTHROPIC_BASE_URL/u::X/p:TERM", ["ANTHROPIC_BASE_URL", "X"]) == (
+        "TERM:ANTHROPIC_BASE_URL/w:X/w"
     )
+    assert wslenv_with("ANTHROPIC_BASE_URL", ["ANTHROPIC_BASE_URL"]) == "ANTHROPIC_BASE_URL/w"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="WSL is Linux")

@@ -227,6 +227,15 @@ and tags `vX.Y.Z`.
   left a folder half gone (its sidecar too, so the next pull refused it as not its own). The
   folder now stays whole (put back when its replacement cannot move in), and the command says to
   stop the proxy and run it again. Linux and macOS retry nothing.
+- Model folders carried between Windows and WSL: a `models pull --to` manifest or a sidecar
+  saved with a UTF-8 byte-order mark (as editors on Windows may save JSON) is read, and one saved
+  as UTF-16 (what Windows PowerShell 5.1 writes with `>` and `Out-File`) is refused naming UTF-16
+  instead of "not a UTF-8 JSON document". `models verify --dir` notes and skips the files Windows
+  adds that no loader reads (Explorer's `desktop.ini`, and the `NAME:Zone.Identifier` files a
+  folder copied into WSL carries); any other unlisted file still fails. A model folder written
+  as the other side names it (a drive letter or UNC path inside WSL, `/mnt/c/...` on native
+  Windows) gets a hint naming `wslpath` and `models pull --as`. The NER bench's `--dump-errors`
+  file is private on Windows too.
 - `doctor` passed a TLS certificate, key or client CA that serve cannot open on Windows: it asked
   `os.access`, which reads only the read-only attribute there, never the access control list.
   It now opens the file, on every platform.

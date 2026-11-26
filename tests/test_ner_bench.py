@@ -372,6 +372,18 @@ def test_dump_problem_refuses_git_work_trees(tmp_path: Path) -> None:
     assert bench_ner.dump_problem(outside / "x.jsonl") is None
 
 
+def test_write_dump_makes_the_dump_private_on_windows_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_redact import winacl
+
+    made: list[Path] = []
+    monkeypatch.setattr(winacl, "make_private", lambda path, folder=False: made.append(path))
+    target = tmp_path / "dump.jsonl"
+    bench_ner.write_dump(target, [{"kind": "miss"}])
+    assert made == [target]
+
+
 def test_write_dump_is_private(tmp_path: Path) -> None:
     target = tmp_path / "errors.jsonl"
     target.write_text("old")

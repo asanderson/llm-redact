@@ -28,6 +28,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from llm_redact import winacl
 from llm_redact.bench import ner_fp, ner_latency
 from llm_redact.bench.datasets import (
     DATASETS,
@@ -229,6 +230,7 @@ def write_dump(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
             # A truncated file keeps its old mode. Windows has no mode bits
             # (and no fchmod before Python 3.13).
             os.fchmod(out.fileno(), 0o600)
+        winacl.make_private(path)  # Windows' 0600
         for record in records:
             out.write(json.dumps(record) + "\n")
 

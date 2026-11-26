@@ -422,6 +422,64 @@ def test_verify_dir_fails_on_a_changed_folder(
     assert any(problem in line for line in json.loads(out)["models"][0]["problems"])
 
 
+def test_verify_dir_skips_the_files_windows_adds_with_a_note(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Explorer adds desktop.ini, and a folder copied into WSL carries each
+    # downloaded file's mark of the web as NAME:Zone.Identifier: no loader
+    # reads either, so they are noted, not failed. Any other file still fails.
+    monkeypatch.setitem(sys.modules, "huggingface_hub", None)
+    folder = _pulled(tmp_path)
+    (folder / "desktop.ini").write_text("[.ShellClassInfo]\n")
+    (folder / "config.json:Zone.Identifier").write_text("[ZoneTransfer]\nZoneId=3\n")
+    code, out = _run(capsys, "verify", "--dir", str(tmp_path))
+    assert code == 0
+    assert out.splitlines()[-1] == (
+        f"note: {folder.name} also holds files Windows adds, which no loader reads (skipped):"
+        " config.json:Zone.Identifier, desktop.ini"
+    )
+    code, out = _run(capsys, "verify", "--dir", str(tmp_path), "--json")
+    assert code == 0
+    assert json.loads(out)["models"][0]["skipped"] == [
+        "config.json:Zone.Identifier",
+        "desktop.ini",
+    ]
+    (folder / "extra.safetensors").write_text("")
+    code, out = _run(capsys, "verify", "--dir", str(tmp_path))
+    assert code == 1 and "extra.safetensors: not listed in the manifest" in out
+
+
+@pytest.mark.parametrize("bom", [b"", b"\xef\xbb\xbf"])
+def test_verify_dir_reads_a_manifest_and_sidecar_saved_with_a_bom(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, bom: bytes
+) -> None:
+    # An editor on Windows may save JSON with a UTF-8 byte-order mark. The
+    # manifest digests the sidecar's bytes, so the manifest is re-listed.
+    monkeypatch.setitem(sys.modules, "huggingface_hub", None)
+    folder = _pulled(tmp_path)
+    sidecar = folder / SIDECAR_NAME
+    sidecar.write_bytes(bom + sidecar.read_bytes())
+    manifest = json.loads((tmp_path / MANIFEST_NAME).read_text())
+    manifest["models"][0]["files"] = file_records(folder, folder_files(folder))
+    (tmp_path / MANIFEST_NAME).write_bytes(bom + json.dumps(manifest).encode("utf-8"))
+    assert _run(capsys, "verify", "--dir", str(tmp_path))[0] == 0
+
+
+def test_verify_dir_names_utf16_when_it_finds_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Windows PowerShell 5.1 writes UTF-16 with > and Out-File.
+    _pulled(tmp_path)
+    manifest = tmp_path / MANIFEST_NAME
+    manifest.write_bytes(manifest.read_text().encode("utf-16"))
+    code, out = _run(capsys, "verify", "--dir", str(tmp_path))
+    assert code == 1
+    assert out.splitlines()[-1] == (
+        f"FAIL  {manifest}: UTF-16 text, not UTF-8 (Windows PowerShell 5.1 writes UTF-16 with >"
+        " and Out-File): save it as UTF-8"
+    )
+
+
 def test_verify_dir_checks_the_sidecar_and_what_the_loader_needs(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

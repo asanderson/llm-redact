@@ -84,6 +84,11 @@ and tags `vX.Y.Z`.
   model server is named `localhost` or `[::1]`: Windows resolves localhost to `::1` first, servers
   running there (Ollama, LM Studio) listen on 127.0.0.1 only, and WSL's mirrored networking does
   not carry `::1` across. It names the setting and the host only.
+- **On Windows, `llm-redact override CODE --once|--always` approves at the console again**: it
+  reads `allow` from `CONIN$`, the console even when stdin and stdout are redirected (1.13.1
+  stopped reading `/dev/tty`, a file at the drive's root there, and refused every approval).
+  Without a console (a service, `pythonw.exe`, a process started detached) it refuses as it does
+  without a terminal elsewhere.
 - **`/status` says which platform answered** (`platform`: `windows`, `wsl`, `linux` or `macos`),
   where a native and a WSL proxy both run on one machine; `llm-redact status` prints it on its
   first line. In WSL, `doctor` names the distribution and the networking mode (`wslinfo

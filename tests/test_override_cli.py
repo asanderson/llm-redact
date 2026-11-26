@@ -202,13 +202,43 @@ def test_the_terminal_opener_closes_the_terminal_when_it_cannot_wrap_it(
     assert closed == [True]
 
 
-def test_windows_never_opens_a_tty_file(
+class _Kept(io.StringIO):
+    """A StringIO whose text outlives its close."""
+
+    text = ""
+
+    def close(self) -> None:
+        self.text = self.getvalue()
+        super().close()
+
+
+class _Console:
+    """The two console files a Windows approval opens: CONIN$ answers,
+    CONOUT$ collects the prompt."""
+
+    def __init__(self, answer: str | OSError) -> None:
+        self.answer = answer
+        self.opened: list[tuple[str, str]] = []
+        self.prompt = _Kept()
+
+    def open(self, name: str, mode: str = "r", **kwargs: Any) -> Any:
+        self.opened.append((name, mode))
+        if isinstance(self.answer, OSError):
+            raise self.answer
+        if name == "CONIN$":
+            return io.StringIO(self.answer)
+        assert name == "CONOUT$" and kwargs.get("newline") == "\n"
+        return self.prompt
+
+
+def test_windows_reads_the_console_never_a_tty_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Windows has no /dev/tty: there "/dev/tty" names \\dev\\tty at the
     root of the working directory's drive, a file another local account can
-    create with ``allow`` in it. The real opener refuses before opening
-    anything, so the approval refuses and the code stays pending."""
+    create with ``allow`` in it. The approval reads the console instead
+    (CONIN$, CONOUT$: the console even when stdin and stdout are
+    redirected), and never opens /dev/tty."""
     opened: list[object] = []
 
     def record(*args: Any, **kwargs: Any) -> Any:
@@ -217,12 +247,72 @@ def test_windows_never_opens_a_tty_file(
 
     db = tmp_path / "o.db"
     code = _pending(db)
+    console = _Console("allow\n")
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(override_cli.io, "FileIO", record)
+    monkeypatch.setattr(override_cli, "open", console.open, raising=False)
+    monkeypatch.setattr("sys.stdin", io.StringIO("no\n"))
+    assert _run(code, "--always", "--db", str(db)) == 0
+    assert console.opened == [("CONIN$", "r"), ("CONOUT$", "w")]
+    assert opened == []
+    assert "Type 'allow' to confirm" in console.prompt.text
+    assert [e.state for e in OverrideStore(db).entries()] == ["always"]
+    assert "approved always" in capsys.readouterr().out
+
+
+def test_windows_without_a_console_refuses_as_without_a_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = tmp_path / "o.db"
+    code = _pending(db)
+    console = _Console(OSError(6, "The handle is invalid"))
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(override_cli, "open", console.open, raising=False)
     monkeypatch.setattr("sys.stdin", io.StringIO("allow\n"))
     assert _run(code, "--once", "--db", str(db)) == 1
-    assert "not available on Windows" in capsys.readouterr().err
-    assert opened == []
+    assert "approving an override needs a terminal" in capsys.readouterr().err
+    assert console.opened == [("CONIN$", "r")]
+    assert [e.state for e in OverrideStore(db).entries()] == ["pending"]
+
+
+def test_the_console_input_is_closed_when_the_output_cannot_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[str] = []
+
+    class Reader(io.StringIO):
+        def close(self) -> None:
+            closed.append("CONIN$")
+            super().close()
+
+    def open_(name: str, mode: str = "r", **kwargs: Any) -> Any:
+        if name == "CONIN$":
+            return Reader("")
+        raise OSError(6, "The handle is invalid")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(override_cli, "open", open_, raising=False)
+    with pytest.raises(OSError):
+        override_cli._open_tty()
+    assert closed == ["CONIN$"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a process Windows starts with no console")
+def test_a_windows_process_without_a_console_approves_nothing(tmp_path: Path) -> None:
+    import subprocess
+
+    db = tmp_path / "o.db"
+    code = _pending(db)
+    script = "import sys; from llm_redact.cli import main; main(sys.argv[1:])"
+    done = subprocess.run(
+        [sys.executable, "-c", script, "override", code, "--once", "--db", str(db)],
+        capture_output=True,
+        timeout=120,
+        check=False,
+        creationflags=subprocess.DETACHED_PROCESS,
+    )
+    assert done.returncode == 1
+    assert b"approving an override needs a terminal" in done.stderr
     assert [e.state for e in OverrideStore(db).entries()] == ["pending"]
 
 
@@ -238,11 +328,14 @@ def test_a_tty_file_planted_at_a_drive_root_approves_nothing(
     planted = root / "dev" / "tty"
     planted.parent.mkdir(parents=True)
     planted.write_bytes(b"allow\n")
-    with drive_rooted_at(root):
+    console = _Console("no\n")
+    with drive_rooted_at(root), pytest.MonkeyPatch.context() as patch:
         # The hazard is real here: the driveless path lands on the file.
         assert Path("/dev/tty").read_bytes() == b"allow\n"
+        patch.setattr(override_cli, "open", console.open, raising=False)
         assert _run(code, "--once", "--db", str(db)) == 1
-    assert "not available on Windows" in capsys.readouterr().err
+    assert "not approved" in capsys.readouterr().err
+    assert console.opened == [("CONIN$", "r"), ("CONOUT$", "w")]
     assert planted.read_bytes() == b"allow\n"
     assert [e.state for e in OverrideStore(db).entries()] == ["pending"]
 

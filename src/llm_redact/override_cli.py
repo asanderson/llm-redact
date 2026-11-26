@@ -140,8 +140,10 @@ class _Console:
 
 def _open_console() -> _Console:
     """The console of this process (OSError without one: pythonw, a service,
-    a process started detached). ``CONIN$`` and ``CONOUT$`` are device names
-    Windows reads as the console in any directory, never a file."""
+    a process started with DETACHED_PROCESS; one started in a console of its
+    own reads that console, which no one may be watching). ``CONIN$`` and
+    ``CONOUT$`` are device names Windows reads as the console in any
+    directory, never a file."""
     reader = open("CONIN$", encoding="utf-8")  # noqa: SIM115 — closed by _Console
     try:
         writer = open("CONOUT$", "w", encoding="utf-8", newline="\n")  # noqa: SIM115

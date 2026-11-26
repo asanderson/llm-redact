@@ -74,8 +74,11 @@ repeats the kind and types on the line it asks you to confirm, and waits for
 console, `CONIN$`, which is the console even when stdin and stdout are
 redirected). It never reads the answer from stdin and refuses without a
 terminal (on Windows, without a console: a service, `pythonw.exe`, a process
-started detached), so an agent that merely pipes `allow` into the command does
-not approve anything. With
+started with `DETACHED_PROCESS`), so an agent that merely pipes `allow` into the
+command does not approve anything. On Windows a process started in a console of
+its own (`CREATE_NEW_CONSOLE`, or `CREATE_NO_WINDOW`, a console no one sees)
+reads that console: no one may be watching it, and the program that started it
+can type into it, as the next paragraph says. With
 llm-redact-pro and a dashboard sign-in (`[auth.dashboard]`), the dashboard
 shows the same pending refusals with **Allow once** and **Always allow**
 buttons, and your rules with **Revoke**.

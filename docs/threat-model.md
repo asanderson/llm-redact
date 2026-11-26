@@ -386,7 +386,10 @@ the value's two parts ([detection.md](detection.md#how-ner-runs)).
   list that lets in only your account, SYSTEM and Administrators, which
   the folder passes on to the `-wal` and `-shm` files. The folder the vault
   is in is made private, as `chmod 700` makes it on POSIX, so give the
-  vault a folder of its own.
+  vault a folder of its own. A vault, folder, `-wal` or `-shm` another
+  account owns is refused, never taken over (its owner could change the
+  list back, and a handle it opened keeps its access), and so is a vault on
+  a drive that keeps no lists (FAT32, exFAT).
 - Optional **encryption at rest** (`fernet`): HKDF-split key into a
   domain-separated HMAC index key and a Fernet data key; wrong or missing
   key fails closed at open; the encrypt-in-place migration checkpoints
@@ -649,7 +652,12 @@ conscious decision, and each is surfaced rather than silent:
   file goes out as sent, and what the extractor did not read — it must
   report its reading incomplete then — was never scanned; the inspector
   (and any extraction service it uses) sees the file. Anything not read
-  completely keeps the rules above.
+  completely keeps the rules above. The local extractors run each file in a
+  process of its own with limits (on Windows a Job Object): they bound what
+  a crafted file can cost, not what a parser it exploits can do. On Windows
+  that process runs as the proxy's account, which may open the proxy's own
+  process and read its memory, and a Windows service it asks (WMI, the Task
+  Scheduler) starts programs outside the job ([extraction.md](extraction.md)).
 - `[detection] encrypted_content_passthrough = true` together with
   `acknowledge_encrypted_content_risk = true` exempts scalar
   `encrypted_content` values across supported JSON protocol walks. Both

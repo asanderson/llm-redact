@@ -22,7 +22,15 @@ from typing import Any
 import pytest
 
 from llm_redact import winacl
-from llm_redact.winacl import ADMINISTRATORS, NO_DACL, SYSTEM, Ace, Dacl, foreign_access
+from llm_redact.winacl import (
+    ADMINISTRATORS,
+    NO_DACL,
+    OWNER_RIGHTS,
+    SYSTEM,
+    Ace,
+    Dacl,
+    foreign_access,
+)
 
 USER = "S-1-5-21-1000-2000-3000-1001"
 USERS = "S-1-5-32-545"
@@ -71,6 +79,30 @@ def test_entries_that_grant_nothing_here_do_not_count() -> None:
         Ace(False, USERS, FULL, name="BUILTIN\\Users"),  # a deny entry
         Ace(True, USERS, SYNC_ONLY, name="BUILTIN\\Users"),  # synchronize, read the ACL
     )
+    assert foreign_access(dacl, USER) == []
+
+
+def test_owner_rights_stand_for_the_owner() -> None:
+    # Python 3.13+ makes a mkdir(mode=0o700) folder private through OWNER
+    # RIGHTS: private while this account owns it.
+    owner_rights = Ace(True, OWNER_RIGHTS, FULL, INHERITED, "OWNER RIGHTS")
+    mine = Dacl((Ace(True, SYSTEM, FULL), owner_rights), protected=True, owner=USER)
+    assert foreign_access(mine, USER) == []
+    theirs = Dacl(mine.aces, protected=True, owner="S-1-5-21-9-9-9-1002", owner_name="PC\\eve")
+    assert foreign_access(theirs, USER) == ["its owner, PC\\eve"]
+    unknown = Dacl(mine.aces, protected=True)
+    assert foreign_access(unknown, USER) == ["OWNER RIGHTS"]
+
+
+def test_another_owner_is_named_even_with_no_entry_for_it() -> None:
+    # An owner may always rewrite the list.
+    dacl = _private()
+    dacl = Dacl(dacl.aces, protected=True, owner="S-1-5-21-9-9-9-1002")
+    assert foreign_access(dacl, USER) == ["its owner, S-1-5-21-9-9-9-1002"]
+
+
+def test_the_creator_placeholders_match_no_account() -> None:
+    dacl = _private(Ace(True, "S-1-3-0", FULL, name="CREATOR OWNER"))
     assert foreign_access(dacl, USER) == []
 
 
@@ -213,8 +245,10 @@ def test_the_real_list_of_a_private_file_and_one_users_can_read(tmp_path: Path) 
     private = (f"*{user}:F", f"*{SYSTEM}:F", f"*{ADMINISTRATORS}:F")
     _icacls(str(vault), "/inheritance:r", "/grant:r", *private)
     dacl = winacl.read_dacl(vault)
-    assert dacl is not None and dacl.protected
-    assert {ace.sid for ace in dacl.aces} == {user, SYSTEM, ADMINISTRATORS}
+    assert dacl is not None and dacl.protected and dacl.owner in {user, ADMINISTRATORS}
+    # Python 3.13+ gives a mkdir(mode=0o700) folder an OWNER RIGHTS entry,
+    # which pytest's temporary folders carry down to the file.
+    assert {ace.sid for ace in dacl.aces} - {OWNER_RIGHTS} == {user, SYSTEM, ADMINISTRATORS}
     assert foreign_access(dacl, user) == []
     report = doctor._Report(json_mode=True)
     doctor._check_private(report, "vault", vault, False)

@@ -72,8 +72,9 @@ and tags `vX.Y.Z`.
   protected access control list that lets in only your account, SYSTEM and Administrators. A
   folder llm-redact makes private passes it on to what is created in it, a vault's `-wal` and
   `-shm` files included: the vault's and the override store's folder always, as `chmod 700` does
-  on POSIX, the config's and the log's when llm-redact creates them. A file Windows will not give
-  that list stops the command or the proxy, as a failed `chmod` does. The default locations
+  on POSIX, the config's and the log's when llm-redact creates them. One another account owns
+  becomes yours, since its owner could rewrite the list. A file Windows will not give that list
+  stops the command or the proxy, as a failed `chmod` does. The default locations
   under `%LOCALAPPDATA%` were private already, by inheritance. Affected: every release on
   Windows with a store outside the user profile.
 
@@ -160,11 +161,13 @@ and tags `vX.Y.Z`.
   programs, the value single-quoted so PowerShell expands nothing in it. An `export` line pasted
   into PowerShell was an error. Linux and macOS print the same `export` lines as before.
 - **On Windows, `doctor` checks who the stores' NTFS access control lists let in**: the vault
-  (and its folder) and the audit log FAIL when an entry allows anyone but your account, SYSTEM
-  and Administrators to read or change them (`BUILTIN\Users`, for a file under a folder at a
-  drive's root), naming them and how to list them (`icacls`). It used to WARN that it could not
-  check anything, since POSIX mode bits are synthetic there. A private file says whether its
-  list is protected or inherited from its folder.
+  (and its folder) and the audit log FAIL when another account owns them (an owner may always
+  rewrite the list) or an entry allows anyone but your account, SYSTEM and Administrators to read
+  or change them (`BUILTIN\Users`, for a file under a folder at a drive's root), naming them and
+  how to list them (`icacls`). An OWNER RIGHTS entry, which Python 3.13 and later use for a
+  folder made private, counts as its owner. It used to WARN that it could not check anything,
+  since POSIX mode bits are synthetic there. A private file says whether its list is protected
+  or inherited from its folder.
 - An `XDG_CONFIG_HOME` or `XDG_DATA_HOME` that is not an absolute path is now ignored, as the XDG
   Base Directory specification says (an empty one already was): a relative value named a folder
   under whatever the working directory was, so the vault moved with the directory a command ran

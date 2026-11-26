@@ -25,17 +25,27 @@ from typing import Any
 import pytest
 
 from llm_redact import winacl
-from llm_redact.winacl import ADMINISTRATORS, SYSTEM, Ace, Dacl, foreign_access, needs_private
+from llm_redact.winacl import (
+    ADMINISTRATORS,
+    OWNER_RIGHTS,
+    SYSTEM,
+    Ace,
+    Dacl,
+    foreign_access,
+    needs_private,
+)
 
 USER = "S-1-5-21-1000-2000-3000-1001"
+OTHER = "S-1-5-21-1000-2000-3000-1002"
 USERS = "S-1-5-32-545"
 FULL, PASSED_ON = 0x1F01FF, 0x03  # FILE_ALL_ACCESS; OBJECT_INHERIT | CONTAINER_INHERIT
 
 
-def _list(flags: int = 0, *extra: Ace, protected: bool = True) -> Dacl:
+def _list(flags: int = 0, *extra: Ace, protected: bool = True, owner: str = USER) -> Dacl:
     return Dacl(
         (Ace(True, USER, FULL, flags), Ace(True, SYSTEM, FULL, flags), *extra),
         protected=protected,
+        owner=owner,
     )
 
 
@@ -48,6 +58,9 @@ def _list(flags: int = 0, *extra: Ace, protected: bool = True) -> Dacl:
         (_list(0, Ace(True, USERS, FULL)), False, True),
         (_list(), True, True),  # a folder whose entries are not passed on
         (_list(PASSED_ON), True, False),
+        (_list(owner=OTHER), False, True),  # another account may rewrite it
+        # Python 3.13+'s private mkdir: OWNER RIGHTS, this account owning it
+        (_list(PASSED_ON, Ace(True, OWNER_RIGHTS, FULL, PASSED_ON)), True, False),
     ],
 )
 def test_what_is_already_private_is_left_alone(
@@ -60,6 +73,7 @@ class _Binding:
     def __init__(self, current: Dacl | None | OSError) -> None:
         self.current = current
         self.set: list[tuple[str, str, bool]] = []
+        self.owned: list[str] = []
 
     def current_user_sid(self) -> str:
         return USER
@@ -72,6 +86,9 @@ class _Binding:
     def make_private(self, path: str, user: str, *, folder: bool) -> None:
         self.set.append((path, user, folder))
 
+    def set_owner(self, path: str, user: str) -> None:
+        self.owned.append(user)
+
 
 def _windows(monkeypatch: pytest.MonkeyPatch, binding: _Binding) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
@@ -80,20 +97,23 @@ def _windows(monkeypatch: pytest.MonkeyPatch, binding: _Binding) -> None:
 
 
 @pytest.mark.parametrize(
-    ("current", "set_"),
+    ("current", "set_", "owned"),
     [
-        (_list(PASSED_ON), False),
-        (_list(protected=False), True),
-        (OSError(None, "cannot read it"), True),
+        (_list(PASSED_ON), False, False),
+        (_list(protected=False), True, False),
+        # Another account owns it: it could rewrite the list, so it is taken.
+        (_list(PASSED_ON, owner=OTHER), True, True),
+        (OSError(None, "cannot read it"), True, True),  # owner unknown
     ],
 )
 def test_make_private_sets_the_list_only_when_needed(
-    current: Any, set_: bool, monkeypatch: pytest.MonkeyPatch
+    current: Any, set_: bool, owned: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     binding = _Binding(current)
     _windows(monkeypatch, binding)
     winacl.make_private(Path("C:/data"), folder=True)
     assert binding.set == ([(str(Path("C:/data")), USER, True)] if set_ else [])
+    assert binding.owned == ([USER] if owned else [])
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin"])
@@ -191,7 +211,9 @@ def _private(path: Path, user: str, *, folder: bool = False) -> None:
     dacl = winacl.read_dacl(path)
     assert dacl is not None and dacl.protected, f"{path} inherits its list"
     assert foreign_access(dacl, user) == [], f"{path} lets others in"
-    assert {ace.sid for ace in dacl.aces} == {user, SYSTEM, ADMINISTRATORS}
+    # OWNER RIGHTS where Python 3.13+'s mkdir(mode=0o700) made it private,
+    # this account owning it; never another principal.
+    assert {ace.sid for ace in dacl.aces} <= {user, SYSTEM, ADMINISTRATORS, OWNER_RIGHTS}
     if folder:
         assert not needs_private(dacl, user, folder=True), f"{path} passes nothing on"
 

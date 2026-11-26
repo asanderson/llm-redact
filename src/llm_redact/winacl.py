@@ -32,6 +32,12 @@ from typing import Any
 
 SYSTEM = "S-1-5-18"
 ADMINISTRATORS = "S-1-5-32-544"
+# An entry for OWNER RIGHTS grants the file's owner (Python 3.13+ makes a
+# mkdir(mode=0o700) folder private with one); CREATOR OWNER and CREATOR
+# GROUP are placeholders for what a folder's children inherit, and match no
+# account.
+OWNER_RIGHTS = "S-1-3-4"
+_PLACEHOLDERS = frozenset({"S-1-3-0", "S-1-3-1"})
 # ACE types (winnt.h): the allow and deny entries files carry.
 _ALLOWED, _DENIED, _ALLOWED_CALLBACK = 0, 1, 9
 _INHERITED_ACE, _INHERIT_ONLY_ACE = 0x10, 0x08
@@ -66,28 +72,40 @@ class Ace:
 
 @dataclass(frozen=True)
 class Dacl:
-    """A discretionary ACL. ``protected``: it does not inherit from the
-    folder (SE_DACL_PROTECTED)."""
+    """A discretionary ACL, and the file's owner (who may always rewrite
+    it). ``protected``: it does not inherit from the folder
+    (SE_DACL_PROTECTED)."""
 
     aces: tuple[Ace, ...]
     protected: bool = False
+    owner: str | None = None
+    owner_name: str | None = None
 
 
 NO_DACL = "Everyone (it has no access control list)"
 
 
 def foreign_access(dacl: Dacl | None, user_sid: str) -> list[str]:
-    """Who besides ``user_sid``, SYSTEM and Administrators an allow entry
-    lets in, in the ACL's order, each once; a missing DACL (a NULL DACL)
+    """Who besides ``user_sid``, SYSTEM and Administrators can read or
+    change the file, each once: its owner when that is another account (an
+    owner may always rewrite the list), then the principal of every allow
+    entry, in the list's order. An OWNER RIGHTS entry stands for the owner;
+    the CREATOR placeholders match no account. A missing DACL (a NULL DACL)
     lets everyone in."""
     if dacl is None:
         return [NO_DACL]
     trusted = {user_sid, SYSTEM, ADMINISTRATORS}
     names: list[str] = []
+    if dacl.owner is not None and dacl.owner not in trusted:
+        names.append(f"its owner, {dacl.owner_name or dacl.owner}")
     for ace in dacl.aces:
         if not ace.allow or ace.inherit_only or not ace.mask & _ACCESS:
             continue
-        if ace.sid not in trusted and ace.shown not in names:
+        if ace.sid in trusted or ace.sid in _PLACEHOLDERS:
+            continue
+        if ace.sid == OWNER_RIGHTS and dacl.owner is not None:
+            continue  # the owner: named above when it is another account
+        if ace.shown not in names:
             names.append(ace.shown)
     return names
 
@@ -123,6 +141,11 @@ def make_private(path: Path, *, folder: bool = False) -> None:
         current = None
     if needs_private(current, user, folder=folder):
         binding.make_private(str(path), user, folder=folder)
+        if current is None or current.owner not in {user, SYSTEM, ADMINISTRATORS}:
+            # Another account owns it (or its owner is unknown): an owner
+            # may always rewrite the list, so it becomes this account's.
+            # The new list grants this account WRITE_OWNER to do so.
+            binding.set_owner(str(path), user)
 
 
 def read_dacl(path: Path) -> Dacl | None:
@@ -248,6 +271,9 @@ class _Windows:
             ctypes.c_void_p,
         ]
         self.set_named_security_info.restype = wintypes.DWORD
+        self.string_to_sid = advapi32.ConvertStringSidToSidW
+        self.string_to_sid.argtypes = [wintypes.LPCWSTR, pointer]
+        self.string_to_sid.restype = wintypes.BOOL
         self.local_free = kernel32.LocalFree
         self.local_free.argtypes = [ctypes.c_void_p]
         self.local_free.restype = ctypes.c_void_p
@@ -284,11 +310,19 @@ class _Windows:
 
     def read_dacl(self, path: str) -> Dacl | None:
         ctypes = self.ctypes
+        owner = ctypes.c_void_p()
         dacl = ctypes.c_void_p()
         descriptor = ctypes.c_void_p()
-        # SE_FILE_OBJECT, DACL_SECURITY_INFORMATION
+        # SE_FILE_OBJECT; OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
         status = self.get_named_security_info(
-            path, 1, 0x4, None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor)
+            path,
+            1,
+            0x1 | 0x4,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(descriptor),
         )
         if status != 0:
             message = ctypes.FormatError(status)
@@ -320,7 +354,12 @@ class _Windows:
                         name=self._account(sid),
                     )
                 )
-            return Dacl(tuple(aces), protected=bool(control.value & 0x1000))  # SE_DACL_PROTECTED
+            return Dacl(
+                tuple(aces),
+                protected=bool(control.value & 0x1000),  # SE_DACL_PROTECTED
+                owner=self._sid_text(owner) if owner.value else None,
+                owner_name=self._account(owner) if owner.value else None,
+            )
         finally:
             self.local_free(descriptor)
 
@@ -348,6 +387,20 @@ class _Windows:
                 raise OSError(None, f"cannot make it private ({message})", path, status)
         finally:
             self.local_free(descriptor)
+
+    def set_owner(self, path: str, user: str) -> None:
+        ctypes = self.ctypes
+        sid = ctypes.c_void_p()
+        if not self.string_to_sid(user, ctypes.byref(sid)):
+            raise self._failed("ConvertStringSidToSidW")
+        try:
+            # SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION
+            status = self.set_named_security_info(path, 1, 0x1, sid, None, None, None)
+            if status != 0:
+                message = ctypes.FormatError(status)
+                raise OSError(None, f"cannot take ownership of it ({message})", path, status)
+        finally:
+            self.local_free(sid)
 
     def _sid_text(self, sid: object) -> str:
         ctypes = self.ctypes

@@ -58,7 +58,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from llm_redact.config import ETC_CONFIG_PATH, default_config_path
+from llm_redact.config import config_search_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -168,10 +168,11 @@ def hint_config(loaded: Path | None, env: Mapping[str, str]) -> str | None:
     The proxy was started with an EXPLICIT config file — ``serve --config
     PATH`` (``loaded``), else ``LLM_REDACT_CONFIG`` (the operator's own shell
     may not set it) — that is not what ``llm-redact override`` finds by its
-    default search without that variable (the XDG file, else
-    /etc/llm-redact/config.toml). A path that does not encode as UTF-8 is
-    left out (the hint could not carry it; the plain hint stands). Computed
-    once at startup: overrides are restart-only.
+    default search without that variable (``config_search_candidates``: the
+    XDG file, else, on Linux and macOS, /etc/llm-redact/config.toml). A path
+    that does not encode as UTF-8 is left out (the hint could not carry it;
+    the plain hint stands). Computed once at startup: overrides are
+    restart-only.
 
     The default search is this process's own (its HOME/XDG_CONFIG_HOME, as
     ``serve`` searched); ``env`` supplies ``LLM_REDACT_CONFIG`` only. A
@@ -213,7 +214,7 @@ def _searched_config(explicit: Path) -> bool:
     not stat, a path it cannot resolve — reads as another file: the hint
     then names the explicit one, which the CLI reads without searching."""
     try:
-        for candidate in (default_config_path(), ETC_CONFIG_PATH):
+        for candidate in config_search_candidates():
             if candidate.exists():
                 return candidate.resolve() == explicit.resolve()
     except OSError:

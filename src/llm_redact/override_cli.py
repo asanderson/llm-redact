@@ -7,14 +7,15 @@
 Approving asks for a PERSON: the refusal is shown and a confirmation is
 read from the controlling terminal (``/dev/tty``) — never from stdin, so
 piping ``allow`` into the command approves nothing, and without a terminal
-the command refuses. This guards against an accidental approval, not
-against local software running as the operator: an agent with a shell can
-open a pseudo-terminal and type the answer, or edit the store file
-(docs/overrides.md). The CLI works on the override store
-file directly (like ``lookup``), as the local operator: it approves only
-refusals of requests the proxy admitted without a named user (llm-redact-pro
-named users approve their own in the dashboard); it lists and revokes any.
-Nothing printed is a value, a digest or a code.
+the command refuses. Windows has no /dev/tty, so there it refuses too (a
+file named ``\\dev\\tty`` is never read in its place). This guards against
+an accidental approval, not against local software running as the
+operator: an agent with a shell can open a pseudo-terminal and type the
+answer, or edit the store file (docs/overrides.md). The CLI works on the
+override store file directly (like ``lookup``), as the local operator: it
+approves only refusals of requests the proxy admitted without a named user
+(llm-redact-pro named users approve their own in the dashboard); it lists
+and revokes any. Nothing printed is a value, a digest or a code.
 
 Refusal overrides are off by default. While the config this command reads
 (``--config``, else the same search as ``serve``) leaves them off, every form
@@ -55,6 +56,11 @@ from llm_redact.overrides import (
 )
 
 CONFIRM_WORD = "allow"
+NO_TERMINAL_ON_WINDOWS = (
+    "approving an override on the command line is not available on Windows yet: the"
+    " confirmation is read from the controlling terminal (/dev/tty), which Windows does"
+    " not have"
+)
 
 
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -90,7 +96,14 @@ def _open_tty() -> IO[str]:
     wraps a terminal in a seekable BufferedRandom, which a terminal is not
     (io.UnsupportedOperation on every real one). Module-level so tests
     substitute a fake terminal; tests/test_override_cli.py also runs this
-    one under a real pseudo-terminal."""
+    one under a real pseudo-terminal.
+
+    Windows has no /dev/tty: there "/dev/tty" names ``\\dev\\tty`` at the
+    root of the working directory's drive, a file another local account can
+    create with the confirmation word in it. Nothing is opened there: the
+    approval refuses (OverrideError)."""
+    if sys.platform == "win32":
+        raise OverrideError(NO_TERMINAL_ON_WINDOWS)
     raw = io.FileIO("/dev/tty", "r+")
     try:
         return io.TextIOWrapper(raw, encoding="utf-8", write_through=True)

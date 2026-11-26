@@ -2,8 +2,12 @@
 gracefully. The wording rule (never "certified") is enforced on docs."""
 
 import re
+import sys
 from pathlib import Path
 
+import pytest
+
+from llm_redact import fips
 from llm_redact.fips import collect_fips_report, fips_mode_detected, run_fips_check
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "llm_redact"
@@ -71,3 +75,64 @@ def test_detection_logic() -> None:
 def test_run_fips_check_exit_code_matches_detection(capsys: object) -> None:
     code = run_fips_check()
     assert code == (0 if fips_mode_detected() else 1)
+
+
+class Untouchable:
+    """Stands in for /proc/sys/crypto/fips_enabled off Linux: any use of it
+    fails the test."""
+
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(f"the kernel flag path was used (.{name})")
+
+    def __fspath__(self) -> str:
+        raise AssertionError("the kernel flag path was opened")
+
+
+def test_the_kernel_flag_is_read_on_linux_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag is Linux's. On Windows "/proc/sys/crypto/fips_enabled" names
+    a file at the root of the working directory's drive, which another local
+    account can create: a planted ``1`` must not report FIPS mode."""
+    flag = tmp_path / "fips_enabled"
+    flag.write_text("1\n")
+    monkeypatch.setattr(fips, "_KERNEL_FLAG", flag)
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert dict(collect_fips_report())["kernel fips_enabled"] == "1"
+    monkeypatch.setattr(fips, "_KERNEL_FLAG", Untouchable())
+    for platform in ("win32", "darwin"):
+        monkeypatch.setattr(sys, "platform", platform)
+        kernel = dict(collect_fips_report())["kernel fips_enabled"]
+        assert kernel.startswith("not checked") and platform in kernel
+
+
+def test_a_missing_or_garbled_kernel_flag_never_reads_as_fips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(fips, "_KERNEL_FLAG", tmp_path / "missing")
+    assert dict(collect_fips_report())["kernel fips_enabled"].startswith("unknown")
+    garbage = tmp_path / "garbage"
+    garbage.write_bytes(b"\xff1\n")
+    monkeypatch.setattr(fips, "_KERNEL_FLAG", garbage)
+    kernel = dict(collect_fips_report())["kernel fips_enabled"]
+    assert kernel != "1" and not fips_mode_detected([("kernel fips_enabled", kernel)])
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="plants the file at a real drive root")
+def test_a_flag_planted_at_a_drive_root_changes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from drive_root import drive_rooted_at
+
+    root = tmp_path / "drive"
+    root.mkdir()
+    with drive_rooted_at(root):
+        before = run_fips_check(), capsys.readouterr().out
+        planted = root / "proc" / "sys" / "crypto" / "fips_enabled"
+        planted.parent.mkdir(parents=True)
+        planted.write_text("1\n")
+        # The hazard is real here: the driveless path lands on the file.
+        assert Path("/proc/sys/crypto/fips_enabled").read_text() == "1\n"
+        after = run_fips_check(), capsys.readouterr().out
+    assert after == before

@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import sys
 import tomllib
 import urllib.parse
 from collections.abc import Iterable, Mapping
@@ -1257,7 +1258,26 @@ def default_config_path() -> Path:
 
 
 # Standard system path; also the documented container config mount point.
+# POSIX only: config_search_candidates leaves it out on Windows.
 ETC_CONFIG_PATH = Path("/etc/llm-redact/config.toml")
+
+
+def config_search_candidates() -> tuple[Path, ...]:
+    """The files the default config search tries, in order, after
+    ``LLM_REDACT_CONFIG``: the per-user file, then, on Linux and macOS (WSL
+    included), /etc/llm-redact/config.toml.
+
+    Windows has no /etc: there ``Path("/etc/llm-redact/config.toml")``
+    names ``\\etc\\llm-redact\\config.toml`` at the root of whatever drive
+    the working directory is on (``C:``, a USB stick, a network share),
+    where another local account can create folders. A config planted there
+    would be loaded, and ``init`` and the config editor would write the
+    operator's config to it, so on Windows the per-user file is the only
+    candidate. Loading, the write targets (``resolve_config_path``) and the
+    override hint (``overrides.hint_config``) all read this one list."""
+    if sys.platform == "win32":
+        return (default_config_path(),)
+    return (default_config_path(), ETC_CONFIG_PATH)
 
 
 def apply_env_overrides(config: Config) -> Config:
@@ -2672,20 +2692,38 @@ def resolve_credentials(routing: RoutingConfig, environ: Mapping[str, str]) -> N
         )
 
 
+_UTF8_BOM = b"\xef\xbb\xbf"
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load configuration.
 
     Search order when no explicit path is given: $LLM_REDACT_CONFIG (set but
     missing is a hard error, never a silent fall-through), then
-    $XDG_CONFIG_HOME/llm-redact/config.toml, then /etc/llm-redact/config.toml,
-    then built-in defaults.
+    $XDG_CONFIG_HOME/llm-redact/config.toml, then (Linux and macOS only)
+    /etc/llm-redact/config.toml, then built-in defaults
+    (``config_search_candidates``).
+
+    The file is UTF-8 on every platform, whatever the locale (cp1252 on a
+    Western Windows install would load a non-ASCII deny string as mojibake
+    that never matches), with one leading byte-order mark allowed: bytes
+    that are not UTF-8 are a ConfigError naming the file and the offset.
     """
     if path is None:
         path = resolve_config_path()
         if path is None:
             return Config()
+    data = path.read_bytes()
+    body = data.removeprefix(_UTF8_BOM)
     try:
-        raw = tomllib.loads(path.read_text())
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        offset = len(data) - len(body) + exc.start
+        raise ConfigError(
+            f"{path}: not UTF-8 text (an invalid byte at offset {offset}); save it as UTF-8"
+        ) from None
+    try:
+        raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: {exc}") from exc
     return parse_config(raw, str(path))
@@ -2705,10 +2743,9 @@ def resolve_config_path() -> Path | None:
         if not path.exists():
             raise ConfigError(f"LLM_REDACT_CONFIG points to a missing file: {env_path}")
         return path
-    if default_config_path().exists():
-        return default_config_path()
-    if ETC_CONFIG_PATH.exists():
-        return ETC_CONFIG_PATH
+    for candidate in config_search_candidates():
+        if candidate.exists():
+            return candidate
     return None
 
 

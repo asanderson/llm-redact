@@ -49,10 +49,10 @@ is ever introduced, and also fails any doc that claims certification.
 
    The command reports Python's `_hashlib.get_fips_mode()`, the OpenSSL
    the `ssl` module linked, the OpenSSL `cryptography` linked (when the
-   extra is installed), the kernel flag, and the vault encryption
-   algorithm selections (static — the same inventory as the table above).
-   Exit code 0 means FIPS mode was detected on the host; 1 means it was
-   not.
+   extra is installed), the kernel flag (read on Linux only; elsewhere it
+   reports `not checked`), and the vault encryption algorithm selections
+   (static — the same inventory as the table above). Exit code 0 means FIPS
+   mode was detected on the host; 1 means it was not.
 
 On a FIPS host, non-approved algorithms are unavailable at the OpenSSL
 layer, so a regression that introduced one would fail loudly rather than

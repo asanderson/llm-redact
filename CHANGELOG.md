@@ -11,6 +11,40 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Security
+- **On Windows, a config file at the root of a drive could be loaded, and `init` and the config
+  editor could write the operator's config to it.** When neither `LLM_REDACT_CONFIG` nor a
+  per-user `config.toml` existed, the default search tried `/etc/llm-redact/config.toml`. Windows
+  has no `/etc`: there that path names `\etc\llm-redact\config.toml` at the root of whatever drive
+  the working directory is on (`C:`, a USB stick, a network share), where another local account
+  can create folders. A config planted there was loaded (it could name another upstream or turn
+  detection off), `config show --path` and `doctor` reported it, and `llm-redact init` and the
+  llm-redact-pro config editor wrote the operator's config to it. On Windows the search now stops
+  at the per-user file; Linux and macOS (WSL included) still read `/etc/llm-redact/config.toml`.
+  Loading, the write targets and the refusal hint's `--config` decision read one list
+  (`config_search_candidates`). Affected: every release run on Windows, since 1.0.0.
+- **On Windows, `llm-redact override CODE` read its confirmation from a file.** The approval
+  reads `allow` from the controlling terminal, `/dev/tty`, which on Windows names
+  `\dev\tty` at the root of the working directory's drive: a file another local account (or
+  software running as the operator) could create with `allow` in it approved the refusal without
+  a person typing anything. On Windows the command now refuses to approve without opening
+  anything; approving on the command line is not available there yet. Affected: 1.10.0 and later
+  on Windows, with `[overrides] enabled = true` (off by default).
+- **On Windows, a non-ASCII value in the config file was read wrong, and a deny string holding
+  one never matched.** The config file was decoded with the system's code page (cp1252 on a
+  Western install without `PYTHONUTF8`): saved as UTF-8, as TOML requires, `deny = ["Müller"]`
+  loaded as `MÃ¼ller`, so `Müller` in a prompt went upstream unredacted; allowlist entries and
+  custom-rule patterns with non-ASCII characters were read wrong the same way. The file is now
+  read as UTF-8 on every platform, one leading byte-order mark allowed. A file that is not UTF-8
+  is refused, naming the offset of its first invalid byte: a config saved as Windows "ANSI" text
+  (which loaded before) must be saved as UTF-8. Linux and macOS with a UTF-8 locale were not
+  affected.
+- `llm-redact fips-check` read the Linux kernel's FIPS flag, `/proc/sys/crypto/fips_enabled`, on
+  every platform: on Windows a file planted at a drive's root could make the report claim FIPS
+  mode. The flag is read on Linux only; elsewhere the report says `not checked`. A test now fails
+  on any new rooted path without a drive that reaches a file or process call in the source unless
+  it is listed with the check that keeps Windows away from it.
+
 ## [1.13.0] - 2026-11-10
 
 Closes leaks where values went upstream unredacted: a card number written next to another digit

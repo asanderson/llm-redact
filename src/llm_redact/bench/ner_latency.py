@@ -51,16 +51,22 @@ class NerLatencyStat:
     iterations: int
 
 
-def cpu_model(cpuinfo: Path = CPUINFO) -> str:
-    """The CPU's model name (Linux /proc/cpuinfo), else what the platform
-    module reports."""
-    try:
-        for line in cpuinfo.read_text().splitlines():
+def cpu_model(cpuinfo: Path | None = None) -> str:
+    """The CPU's model name (``cpuinfo``, else /proc/cpuinfo on Linux),
+    else what the platform module reports. /proc/cpuinfo is read on Linux
+    only: on Windows that path names a file at the root of the working
+    directory's drive, which another local account can create."""
+    if cpuinfo is None and sys.platform == "linux":
+        cpuinfo = CPUINFO
+    if cpuinfo is not None:
+        try:
+            text = cpuinfo.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        for line in text.splitlines():
             key, _, value = line.partition(":")
             if key.strip() == "model name" and value.strip():
                 return value.strip()
-    except OSError:
-        pass
     return platform.processor() or platform.machine() or "unknown"
 
 

@@ -683,4 +683,6 @@ max_rows = 10000
 # Environment overrides (precedence: CLI flag > env var > this file):
 #   LLM_REDACT_HOST, LLM_REDACT_PORT, LLM_REDACT_CONFIG
 # Config search order: $LLM_REDACT_CONFIG, then
-# $XDG_CONFIG_HOME/llm-redact/config.toml, then /etc/llm-redact/config.toml.
+# $XDG_CONFIG_HOME/llm-redact/config.toml, then (Linux and macOS only)
+# /etc/llm-redact/config.toml. Windows has no /etc: the search stops at the
+# per-user file.

@@ -196,6 +196,14 @@ def test_a_realtime_row_is_never_an_overhead_sample() -> None:
     assert state.metrics.requests[("openai", "101")] == 1
 
 
+# A bound below the time a 0.05 s asyncio.sleep takes by time.perf_counter,
+# the clock the request timing reads. The event loop schedules on
+# time.monotonic, which before Python 3.13 ticks only every 15.6 ms on
+# Windows, and runs a timer up to one tick early: a sleep there can end a
+# little over two ticks after it began (one measured 0.0498 s on CI).
+_SLEPT_AT_LEAST = 0.05 - 2 * time.get_clock_info("monotonic").resolution
+
+
 async def test_waits_are_charged_to_the_request_and_only_then() -> None:
     timing = _RequestTiming()
     token = proxy._REQUEST_TIMING.set(timing)
@@ -205,7 +213,7 @@ async def test_waits_are_charged_to_the_request_and_only_then() -> None:
             await _waited(_raises())
     finally:
         proxy._REQUEST_TIMING.reset(token)
-    assert timing.waited >= 0.05
+    assert timing.waited >= _SLEPT_AT_LEAST
     # Without a request's timing (a realtime frame, a background task)
     # nothing is charged and nothing fails.
     assert await _waited(asyncio.sleep(0, result=1)) == 1
@@ -230,7 +238,7 @@ async def test_the_client_pace_of_a_stream_is_charged_once_per_chunk() -> None:
     assert await anext(paced) == b"a"
     await asyncio.sleep(0.05)  # the client takes its time with the chunk
     assert await anext(paced) == b"b"
-    assert timing.waited >= 0.05
+    assert timing.waited >= _SLEPT_AT_LEAST
     with pytest.raises(StopAsyncIteration):
         await anext(paced)
     # Outside a request: no timing, nothing charged.

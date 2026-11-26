@@ -74,8 +74,6 @@ class LogFile(logging.handlers.RotatingFileHandler):
     lost."""
 
     def __init__(self, path: Path, *, delay: bool = False) -> None:
-        if not path.parent.exists():
-            path.parent.mkdir(parents=True, mode=0o700)
         super().__init__(
             path,
             maxBytes=LOG_FILE_BYTES,
@@ -86,6 +84,11 @@ class LogFile(logging.handlers.RotatingFileHandler):
         )
 
     def _open(self) -> TextIO:  # type: ignore[override]
+        # Its folder made here, so a delayed file that is never written
+        # leaves nothing behind.
+        folder = Path(self.baseFilename).parent
+        if not folder.exists():
+            folder.mkdir(parents=True, mode=0o700)
         # O_BINARY: the C runtime would turn "\n" into "\r\n" on Windows.
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
         fd = os.open(self.baseFilename, flags, 0o600)

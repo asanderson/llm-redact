@@ -10,4 +10,14 @@ Keys are qualified names as the gate prints them
 (llm_redact.module.Class.function).
 """
 
-ALLOWED_UNCOVERED: dict[str, str] = {}
+_WINDOWS_BINDING = (
+    "the kernel32 binding of `llm-redact reload`, defined only under"
+    " sys.platform == 'win32' (this gate runs on Linux); the Windows CI legs run it"
+    " (tests/test_reload_windows.py sets the real event of a running proxy)"
+)
+
+ALLOWED_UNCOVERED: dict[str, str] = {
+    "llm_redact.winreload._NamedEvents.__init__": _WINDOWS_BINDING,
+    "llm_redact.winreload._NamedEvents.wait": _WINDOWS_BINDING,
+    "llm_redact.winreload._NamedEvents.close": _WINDOWS_BINDING,
+}

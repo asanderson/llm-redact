@@ -163,6 +163,43 @@ def test_serve_check_fails_on_a_log_file_it_cannot_write(
     assert "serve --check: FAIL" in err and "[log] file" in err
 
 
+@pytest.mark.parametrize(
+    ("raised", "said"),
+    [
+        (None, None),
+        (ConfigError("[detection] unknown key: no_such_key"), "serve did not start: [detection]"),
+        (RuntimeError("boom"), "serve did not start"),
+    ],
+)
+def test_a_start_without_a_console_says_why_it_failed(
+    raised: Exception | None,
+    said: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # In-process (the subprocess tests below run it for real): the log
+    # line, and the exit code serve returns.
+    from llm_redact import cli
+
+    def run_serve(args: argparse.Namespace) -> None:
+        if raised is not None:
+            raise raised
+
+    monkeypatch.setattr(cli, "_run_serve", run_serve)
+    with caplog.at_level(logging.ERROR, logger="llm_redact"):
+        code = cli._serve_without_console(_serve_args(Path("unused.toml")))
+    assert code == (0 if raised is None else 1)
+    if said is None:
+        assert "serve did not start" not in caplog.text
+    else:
+        assert said in caplog.text
+
+
+def test_a_delayed_log_file_never_written_leaves_nothing(tmp_path: Path) -> None:
+    log.log_handler("text", tmp_path / "logs" / "proxy.log", delay=True).close()
+    assert list(tmp_path.iterdir()) == []
+
+
 def _free_port() -> int:
     probe = socket.socket()
     probe.bind(("127.0.0.1", 0))
@@ -187,15 +224,17 @@ def _serves(port: int, process: subprocess.Popen[bytes], seconds: float = 60) ->
 
 
 def _serve_without_console(
-    command: list[str], port: int, env: dict[str, str], log_file: Path
+    command: list[str], port: int, env: dict[str, str], log_file: Path, *, handles: bool = True
 ) -> str:
-    process = subprocess.Popen(
-        command,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    # pythonw with standard handles (DEVNULL) gets a sys.stderr writing to
+    # NUL; started as Task Scheduler starts it, with none, it has no
+    # sys.stdout or sys.stderr at all.
+    streams = (
+        {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if handles
+        else {}
     )
+    process = subprocess.Popen(command, env=env, **streams)
     try:
         assert _serves(port, process), (
             log_file.read_text(encoding="utf-8") if log_file.exists() else "no log"
@@ -258,6 +297,10 @@ def test_pythonw_serves_and_logs_under_localappdata(tmp_path: Path) -> None:
     env["LOCALAPPDATA"] = str(tmp_path / "AppData-Local")
     log_file = tmp_path / "AppData-Local" / "llm-redact" / "logs" / "proxy.log"
     text = _serve_without_console(
-        [str(pythonw), "-m", "llm_redact", "serve", "--config", str(config)], port, env, log_file
+        [str(pythonw), "-m", "llm_redact", "serve", "--config", str(config)],
+        port,
+        env,
+        log_file,
+        handles=False,
     )
     assert f"serving on http://127.0.0.1:{port}" in text

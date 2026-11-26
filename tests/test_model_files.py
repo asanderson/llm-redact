@@ -752,6 +752,8 @@ def test_the_models_dir_follows_xdg_data_home(
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     assert models_dir() == tmp_path / "llm-redact" / "models"
     monkeypatch.setenv("XDG_DATA_HOME", "")  # empty counts as unset
+    # The POSIX default (Windows keeps them under %LOCALAPPDATA%: test_paths).
+    monkeypatch.setattr(sys, "platform", "linux")
     assert models_dir() == Path.home() / ".local" / "share" / "llm-redact" / "models"
 
 

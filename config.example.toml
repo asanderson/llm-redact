@@ -111,6 +111,13 @@ upstream_base_url = "http://127.0.0.1:11434"
 # Content is identical either way: paths, statuses, and detection counts;
 # never values or headers. JSON logs are Free. Restart to apply.
 format = "text"
+# Log to a file instead of stderr (`serve --log-file PATH` overrides it): an
+# absolute path, `~` allowed. It rotates at 10 MiB, keeping 5 older files,
+# and is created readable by its owner only; a text line there starts with
+# its time (UTC). Without a console (pythonw.exe, a hidden logon task) serve
+# logs to proxy.log in ~/.local/state/llm-redact
+# (%LOCALAPPDATA%\llm-redact\logs on Windows) when this is unset.
+# file = "~/.local/state/llm-redact/proxy.log"
 
 # TLS (restart to apply). certfile + keyfile serve HTTPS; client_ca turns
 # on MUTUAL TLS (clients must present a certificate this CA signed) and is

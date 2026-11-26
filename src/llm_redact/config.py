@@ -659,6 +659,11 @@ class LogConfig:
     # for log shippers). Log content is identical either way: paths,
     # statuses, and detection counts — never values or headers.
     format: str = "text"
+    # A file to log to instead of stderr, rotating (log.LOG_FILE_BYTES,
+    # log.LOG_FILE_BACKUPS); an absolute path, `~` allowed. `serve
+    # --log-file` overrides it. Without a console (pythonw, a hidden logon
+    # task) serve logs to log.default_log_file() when this is unset.
+    file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2122,6 +2127,25 @@ def _required_str(section: Mapping[str, Any], key: str, where: str) -> str:
     return value
 
 
+def log_file_problem(value: str) -> str | None:
+    """Why ``value`` cannot be ``[log] file``, or None: an absolute path
+    (``~`` allowed) with no control character. A relative one would name a
+    file under whatever directory serve starts in (a logon task's is
+    System32)."""
+    if any(ord(char) < 0x20 or char == "\x7f" for char in value):
+        return "[log] file must not contain control characters"
+    try:
+        absolute = Path(value).expanduser().is_absolute()
+    except RuntimeError:  # ~user with no such user, or no home directory
+        absolute = False
+    if not absolute:
+        return (
+            "[log] file must be an absolute path (or start with ~): a relative one"
+            " would name a file under whatever directory serve starts in"
+        )
+    return None
+
+
 def _optional_str(section: Mapping[str, Any], key: str, where: str) -> str | None:
     if key not in section:
         return None
@@ -3188,11 +3212,14 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     )
 
     log_raw = raw.get("log", {})
-    _require_keys(log_raw, {"format"}, "[log]")
+    _require_keys(log_raw, {"format", "file"}, "[log]")
     log_format = str(log_raw.get("format", "text"))
     if log_format not in ("text", "json"):
         raise ConfigError(f'[log] format must be "text" or "json", not {log_format!r}')
-    log = LogConfig(format=log_format)
+    log_file = _optional_str(log_raw, "file", "[log]")
+    if log_file is not None and (problem := log_file_problem(log_file)) is not None:
+        raise ConfigError(problem)
+    log = LogConfig(format=log_format, file=log_file)
 
     tls_raw = raw.get("tls", {})
     _require_keys(tls_raw, {"certfile", "keyfile", "client_ca"}, "[tls]")

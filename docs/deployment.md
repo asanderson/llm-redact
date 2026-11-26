@@ -609,6 +609,15 @@ never a value or a placeholder id. That contract holds across every sink.
 - **JSON logs**: `[log] format = "json"` (or `serve --log-format json`)
   switches to one JSON object per line for log shippers — content is
   unchanged (paths, statuses, counts; never values or headers).
+- **Log file**: `[log] file = "/abs/path/proxy.log"` (or `serve --log-file
+  PATH`, which wins) writes the same lines to a file instead of stderr: it
+  rotates at 10 MiB keeping 5 older files, is created readable by its owner
+  only, and a text line there starts with its time (UTC). A relative path is
+  refused (it would depend on the directory `serve` starts in). `serve`
+  without a console — `pythonw.exe`, a hidden logon task — logs to
+  `proxy.log` in `~/.local/state/llm-redact` (`%LOCALAPPDATA%\llm-redact\logs`
+  on Windows) from its first line, a failed start included; `doctor` names
+  where `serve` logs. Restart to apply.
 
 The **audit log** (`[audit]`, with the tamper-evident chain, the zero-loss
 `required` mode — "no audit row, no service" — and off-machine S3/Azure

@@ -122,7 +122,7 @@ def _where(folder: Path) -> str:
     return f"{folder} (resolves to {real})"
 
 
-def _check_paths(report: _Report) -> None:
+def _check_paths(report: _Report, config: Config | None = None) -> None:
     """Where llm-redact keeps its files by default and, on Windows, a WARN
     for each folder still read from the location before
     ``%LOCALAPPDATA%\\llm-redact``, with the steps to move it. A vault's
@@ -134,6 +134,18 @@ def _check_paths(report: _Report) -> None:
         f"data folder {_where(paths.data_dir())}: the vault, audit and override stores"
         " (unless [vault], [audit] or [overrides] names a path) and model folders",
     )
+    if config is not None:
+        from llm_redact.log import default_log_file, log_destination
+
+        configured = log_destination(config.log.file, console=True)
+        report.line(
+            "PASS",
+            "paths",
+            f"serve logs to {configured}"
+            if configured is not None
+            else "serve logs to stderr, and without a console (pythonw, a hidden logon task)"
+            f" to {default_log_file()}",
+        )
     root = paths.windows_root()
     for legacy in paths.uses_legacy_location():
         if legacy == paths.legacy_config_dir():
@@ -1514,7 +1526,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         report.finish()
         return 1
     _check_platform(report)
-    _check_paths(report)
+    _check_paths(report, config)
     _check_license(report, config)
     _check_licensed_features(report, config)
     _check_build(report, config)

@@ -46,6 +46,24 @@ def _rows(report: _Report, area: str) -> list[dict[str, Any]]:
     return [row for row in report.rows if row["area"] == area]
 
 
+@pytest.mark.parametrize("configured", [False, True])
+def test_doctor_names_where_serve_logs(
+    configured: bool, tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_redact.config import LogConfig
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    file = str(tmp_path / "proxy.log") if configured else None
+    report = _Report(json_mode=True)
+    _check_paths(report, Config(log=LogConfig(file=file)))
+    message = _rows(report, "paths")[1]["message"]
+    if configured:
+        assert message == f"serve logs to {tmp_path / 'proxy.log'}"
+    else:
+        assert "stderr" in message
+        assert str(home / ".local" / "state" / "llm-redact" / "proxy.log") in message
+
+
 def test_doctor_names_the_data_folder(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     report = _Report(json_mode=True)

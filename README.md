@@ -461,7 +461,10 @@ essentials:
 - **Logs**: one metadata-only line per request to stderr — run under
   systemd (journald owns retention) or cap the container log driver.
   `[log] format = "json"` switches to one JSON object per line for log
-  shippers (same content; never values or headers).
+  shippers (same content; never values or headers). `[log] file` (or
+  `serve --log-file PATH`) writes them to a file that rotates at 10 MiB
+  instead; `serve` without a console (pythonw.exe) logs to `proxy.log` in
+  `~/.local/state/llm-redact` (`%LOCALAPPDATA%\llm-redact\logs` on Windows).
 - **Data retention**: the audit log prunes itself (`[audit] max_rows`);
   `llm-redact sessions list|prune --older-than 90d` and
   `[vault] session_ttl_days` bound vault growth — whole idle sessions

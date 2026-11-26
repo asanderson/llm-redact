@@ -45,6 +45,20 @@ and tags `vX.Y.Z`.
   on any new rooted path without a drive that reaches a file or process call in the source unless
   it is listed with the check that keeps Windows away from it.
 
+### Added
+- **`[log] file` and `serve --log-file PATH`**: the log goes to a file instead of stderr, rotating
+  at 10 MiB and keeping 5 older files, created readable by its owner only (0600 in a 0700 folder
+  on Linux and macOS), UTF-8 with LF line ends on every platform. The lines are the stderr lines,
+  a text line prefixed with its time (UTC); JSON lines are unchanged. The path must be absolute
+  (`~` allowed): a relative one would depend on the directory `serve` starts in. The flag wins
+  over the config, and `[log]` stays restart-only. `serve --check` proves the file can be written
+  and keeps its own lines on the console. `doctor` names where `serve` logs.
+- **`serve` starts without a console**: under `pythonw.exe` or a hidden logon task (no stdout,
+  no stderr) it failed before serving anything, since uvicorn's default log configuration reads
+  `sys.stdout.isatty()`. It now logs to `proxy.log` in the log folder (`~/.local/state/llm-redact`;
+  `%LOCALAPPDATA%\llm-redact\logs` on Windows) unless a file is named, from its first line, so a
+  start that fails says why there.
+
 ### Changed
 - **On Windows, llm-redact's per-user files now go under `%LOCALAPPDATA%\llm-redact`**, which
   stays on the machine (the config holds deny strings, so it should not roam with the profile):

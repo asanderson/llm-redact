@@ -19,10 +19,12 @@ _WINDOWS_BINDING = (
 _ACL_BINDING = (
     "the advapi32 binding doctor reads NTFS access control lists through, called only"
     " under sys.platform == 'win32' (this gate runs on Linux); the Windows CI legs run it"
-    " (tests/test_win_acl.py reads the real lists icacls sets)"
+    " (tests/test_win_acl.py reads the real lists icacls sets, tests/test_private_files.py"
+    " the lists it sets)"
 )
 
 ALLOWED_UNCOVERED: dict[str, str] = {
+    "llm_redact.winacl._Windows.make_private": _ACL_BINDING,
     "llm_redact.winacl._Windows.read_dacl": _ACL_BINDING,
     "llm_redact.winacl._Windows._sid_text": _ACL_BINDING,
     "llm_redact.winacl._Windows._account": _ACL_BINDING,

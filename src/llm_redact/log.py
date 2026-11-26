@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
 
-from llm_redact import __version__, paths
+from llm_redact import __version__, paths, winacl
 from llm_redact.jsonwalk import json_text
 
 _SERVICE = "llm-redact"
@@ -89,9 +89,15 @@ class LogFile(logging.handlers.RotatingFileHandler):
         folder = Path(self.baseFilename).parent
         if not folder.exists():
             folder.mkdir(parents=True, mode=0o700)
+            winacl.make_private(folder, folder=True)  # Windows' 0700
         # O_BINARY: the C runtime would turn "\n" into "\r\n" on Windows.
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
         fd = os.open(self.baseFilename, flags, 0o600)
+        try:
+            winacl.make_private(Path(self.baseFilename))  # Windows' 0600
+        except BaseException:
+            os.close(fd)
+            raise
         return os.fdopen(fd, "a", encoding="utf-8", errors="backslashreplace", newline="\n")
 
 

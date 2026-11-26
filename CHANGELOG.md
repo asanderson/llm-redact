@@ -64,6 +64,18 @@ and tags `vX.Y.Z`.
   unchanged. `doctor` probes the port as `serve` binds it and tells a port in use from one
   Windows reserves (for Hyper-V, WSL or Docker) or another program holds exclusively. Affected:
   every release run natively on Windows with a wildcard bind.
+- **On Windows, a store created outside the user profile could be read by every local account.**
+  The vault, the override store, the config file and its `.bak`, a `vault backup` and the log
+  file are created `0600` in a `0700` folder on POSIX, but Windows ignores those modes: each
+  inherited its folder's access control list, and a folder at the root of a drive
+  (`C:\llm-redact\vault.db`) lets every local account read what is in it. They now get a
+  protected access control list that lets in only your account, SYSTEM and Administrators. A
+  folder llm-redact makes private passes it on to what is created in it, a vault's `-wal` and
+  `-shm` files included: the vault's and the override store's folder always, as `chmod 700` does
+  on POSIX, the config's and the log's when llm-redact creates them. A file Windows will not give
+  that list stops the command or the proxy, as a failed `chmod` does. The default locations
+  under `%LOCALAPPDATA%` were private already, by inheritance. Affected: every release on
+  Windows with a store outside the user profile.
 
 ### Added
 - **`[log] file` and `serve --log-file PATH`**: the log goes to a file instead of stderr, rotating

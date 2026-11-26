@@ -8,6 +8,12 @@ an allow entry lets read or change the file. The model and that decision are
 plain Python and run on every OS; only ``read_dacl``, ``current_user_sid``
 and the name lookup call Windows.
 
+``make_private`` is the Windows twin of creating a file 0600 or a folder
+0700: a protected DACL that lets in only this account, SYSTEM and
+Administrators, inherited by everything created in a folder (a SQLite
+vault's ``-wal`` and ``-shm`` files included). It does nothing elsewhere,
+and nothing to a list already private (``needs_private``).
+
 An entry counts when it allows any of ``_ACCESS`` (reading or writing the
 data, changing the ACL or owner, deleting, or a generic right). Entries
 that apply only to what a folder's children inherit (INHERIT_ONLY) do not
@@ -18,6 +24,7 @@ doctor stricter.
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +35,7 @@ ADMINISTRATORS = "S-1-5-32-544"
 # ACE types (winnt.h): the allow and deny entries files carry.
 _ALLOWED, _DENIED, _ALLOWED_CALLBACK = 0, 1, 9
 _INHERITED_ACE, _INHERIT_ONLY_ACE = 0x10, 0x08
+_OBJECT_AND_CONTAINER_INHERIT = 0x01 | 0x02
 # FILE_READ_DATA, FILE_WRITE_DATA, FILE_APPEND_DATA, DELETE, WRITE_DAC,
 # WRITE_OWNER, GENERIC_ALL, GENERIC_WRITE, GENERIC_READ.
 _ACCESS = 0x1 | 0x2 | 0x4 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000 | 0x80000000
@@ -82,6 +90,39 @@ def foreign_access(dacl: Dacl | None, user_sid: str) -> list[str]:
         if ace.sid not in trusted and ace.shown not in names:
             names.append(ace.shown)
     return names
+
+
+def needs_private(dacl: Dacl | None, user_sid: str, *, folder: bool) -> bool:
+    """Whether ``make_private`` must set the list: anything but a protected
+    list that lets no one else in (and, for a folder, passes every entry on
+    to what is created in it)."""
+    if dacl is None or not dacl.protected or foreign_access(dacl, user_sid):
+        return True
+    passed_on = all(
+        ace.flags & _OBJECT_AND_CONTAINER_INHERIT == _OBJECT_AND_CONTAINER_INHERIT
+        for ace in dacl.aces
+        if ace.allow
+    )
+    return folder and not passed_on
+
+
+def make_private(path: Path, *, folder: bool = False) -> None:
+    """On Windows, let only this account, SYSTEM and Administrators into
+    ``path`` (a protected DACL; for a folder, one everything created in it
+    inherits). Nothing elsewhere, where the POSIX mode does it, nor where
+    ctypes has no WinDLL (only a platform name faked in a test lacks it).
+    OSError when Windows refuses, so a store is never left open to
+    others."""
+    if sys.platform != "win32" or not hasattr(ctypes, "WinDLL"):
+        return
+    binding = _windows()
+    user = binding.current_user_sid()
+    try:
+        current = binding.read_dacl(str(path))
+    except OSError:
+        current = None
+    if needs_private(current, user, folder=folder):
+        binding.make_private(str(path), user, folder=folder)
 
 
 def read_dacl(path: Path) -> Dacl | None:
@@ -180,6 +221,33 @@ class _Windows:
         self.close_handle = kernel32.CloseHandle
         self.close_handle.argtypes = [wintypes.HANDLE]
         self.close_handle.restype = wintypes.BOOL
+        self.string_to_descriptor = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+        self.string_to_descriptor.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            pointer,
+            ctypes.POINTER(wintypes.ULONG),
+        ]
+        self.string_to_descriptor.restype = wintypes.BOOL
+        self.get_dacl = advapi32.GetSecurityDescriptorDacl
+        self.get_dacl.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.BOOL),
+            pointer,
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        self.get_dacl.restype = wintypes.BOOL
+        self.set_named_security_info = advapi32.SetNamedSecurityInfoW
+        self.set_named_security_info.argtypes = [
+            wintypes.LPWSTR,
+            ctypes.c_int,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        self.set_named_security_info.restype = wintypes.DWORD
         self.local_free = kernel32.LocalFree
         self.local_free.argtypes = [ctypes.c_void_p]
         self.local_free.restype = ctypes.c_void_p
@@ -253,6 +321,31 @@ class _Windows:
                     )
                 )
             return Dacl(tuple(aces), protected=bool(control.value & 0x1000))  # SE_DACL_PROTECTED
+        finally:
+            self.local_free(descriptor)
+
+    def make_private(self, path: str, user: str, *, folder: bool) -> None:
+        ctypes = self.ctypes
+        inherit = "OICI" if folder else ""
+        # Full access for SYSTEM, Administrators and the user, protected (P):
+        # nothing inherited from the folder above.
+        sddl = f"D:P(A;{inherit};FA;;;SY)(A;{inherit};FA;;;BA)(A;{inherit};FA;;;{user})"
+        descriptor = ctypes.c_void_p()
+        if not self.string_to_descriptor(sddl, 1, ctypes.byref(descriptor), None):
+            raise self._failed("ConvertStringSecurityDescriptorToSecurityDescriptorW")
+        try:
+            present = self.wintypes.BOOL()
+            defaulted = self.wintypes.BOOL()
+            dacl = ctypes.c_void_p()
+            if not self.get_dacl(
+                descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)
+            ):
+                raise self._failed("GetSecurityDescriptorDacl")
+            # SE_FILE_OBJECT; DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
+            status = self.set_named_security_info(path, 1, 0x4 | 0x80000000, None, None, dacl, None)
+            if status != 0:
+                message = ctypes.FormatError(status)
+                raise OSError(None, f"cannot make it private ({message})", path, status)
         finally:
             self.local_free(descriptor)
 

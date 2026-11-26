@@ -12,7 +12,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol, TypeVar
 
-from llm_redact import paths
+from llm_redact import paths, winacl
 from llm_redact.placeholders import MAX_TOKEN_NUMBER, format_placeholder
 from llm_redact.vault_writer import MISS, MapWrite, MapWriter, Removed, holding
 
@@ -475,9 +475,12 @@ def default_vault_path() -> Path:
 def _open_connection(path: Path, cipher: "VaultCipher | None" = None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
+    # Windows' 0700: a protected list its -wal and -shm files inherit.
+    winacl.make_private(path.parent, folder=True)
     # Pre-create with tight permissions before SQLite touches it.
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     os.close(fd)
+    winacl.make_private(path)
     conn = sqlite3.connect(path, isolation_level=None)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=FULL")

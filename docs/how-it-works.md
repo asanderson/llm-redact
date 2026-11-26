@@ -260,8 +260,9 @@ while the vault row is the secret store and is never exported.
 - **Persistent vault** (`[vault] backend = "sqlite"`, no subscription needed): token
   mappings survive proxy restarts, so a conversation started before a restart
   keeps working and provider prompt caches stay coherent. The database holds the
-  real secret values — it is created `0600` in a `0700` directory, but enable it
-  only if you accept secrets on disk. Separate workspaces with `--session NAME`.
+  real secret values — it is created `0600` in a `0700` directory (on Windows,
+  with an access control list that lets in only your account, SYSTEM and
+  Administrators), but enable it only if you accept secrets on disk. Separate workspaces with `--session NAME`.
   Encrypting it at rest (`[vault] encryption = "fernet"`, below) or moving to a
   server RDBMS backend needs Pro.
 - **Vault encryption at rest** and the **server RDBMS backends**

@@ -245,7 +245,8 @@ point to the CLI, and the listing says `"can_approve": false`.
   applies to the next connection's matching frame.
 - `--always` lasts until `llm-redact override revoke`.
 - The store is `$XDG_DATA_HOME/llm-redact/overrides.db` (0600, its directory
-  0700), or `[overrides] path`.
+  0700; on Windows a protected access control list for your account, SYSTEM
+  and Administrators), or `[overrides] path`.
   - It holds no values: each refused value is an HMAC-SHA256 under a random
     per-install key kept in the same file. Someone who can read the file
     can therefore test guesses of a short value, such as a national ID

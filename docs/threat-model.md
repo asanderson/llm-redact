@@ -381,7 +381,12 @@ the value's two parts ([detection.md](detection.md#how-ner-runs)).
   process. Persistence is an explicit opt-in.
 - SQLite vaults are created `0600` in a `0700` directory, WAL with
   `synchronous=FULL` (a lost counter write could re-issue a live token
-  number and silently rehydrate the wrong secret).
+  number and silently rehydrate the wrong secret). Windows ignores those
+  modes: there the vault and its folder get a protected access control
+  list that lets in only your account, SYSTEM and Administrators, which
+  the folder passes on to the `-wal` and `-shm` files. The folder the vault
+  is in is made private, as `chmod 700` makes it on POSIX, so give the
+  vault a folder of its own.
 - Optional **encryption at rest** (`fernet`): HKDF-split key into a
   domain-separated HMAC index key and a Fernet data key; wrong or missing
   key fails closed at open; the encrypt-in-place migration checkpoints

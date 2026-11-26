@@ -21,6 +21,7 @@ import textwrap
 from collections.abc import Mapping
 from pathlib import Path
 
+from llm_redact import winacl
 from llm_redact.config import (
     CONFIDENCE_BACKENDS,
     DEFAULT_MAP_WRITE_WAIT_SECONDS,
@@ -715,6 +716,7 @@ def write_config_atomic(path: Path, text: str) -> Path | None:
     if not path.parent.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(path.parent, 0o700)
+        winacl.make_private(path.parent, folder=True)
 
     backup: Path | None = None
     if path.exists():
@@ -759,3 +761,5 @@ def _write_0600(path: Path, data: bytes, *, fsync: bool = False) -> None:
             os.fsync(fd)
     finally:
         os.close(fd)
+    # Windows' 0600; a rename keeps the list, so the replaced config has it.
+    winacl.make_private(path)

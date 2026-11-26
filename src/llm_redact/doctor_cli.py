@@ -409,6 +409,11 @@ def _check_live_vault(report: _Report, status: Any) -> None:
 
 
 def _check_port_free(report: _Report, config: Config) -> None:
+    from llm_redact import ports
+
+    if sys.platform == "win32" and ports.exclusive_option() is not None:
+        _check_port_free_windows(report, config)
+        return
     # An IPv6 bind needs an IPv6 socket: an IPv4 one fails to bind "::1"
     # whether or not the port is free.
     family = socket.AF_INET6 if ":" in config.host else socket.AF_INET
@@ -436,6 +441,46 @@ def _check_port_free(report: _Report, config: Config) -> None:
         report.line("PASS", "proxy", f"port {config.port} is free")
     finally:
         probe.close()
+
+
+def _check_port_free_windows(report: _Report, config: Config) -> None:
+    """On Windows, every address of the host bound exclusively
+    (``ports.bind_exclusive``): serve's own bind for a wildcard host, and
+    for a specific address the same answer a plain bind gets (Microsoft's
+    tables). WSAEADDRINUSE (10048) is a port in use; WSAEACCES (10013) one
+    Windows will not bind at all."""
+    from llm_redact.ports import bind_exclusive
+
+    try:
+        sockets = bind_exclusive(config.host, config.port)
+    except OSError as problem:
+        code = getattr(problem, "winerror", None) or problem.errno
+        if code == 10013:
+            report.line(
+                "WARN",
+                "proxy",
+                f"Windows will not bind port {config.port}: it may reserve it for Hyper-V, WSL"
+                " or Docker (see netsh int ipv4 show excludedportrange protocol=tcp), or"
+                " another program holds it exclusively — choose another port",
+            )
+        elif code == 10048:
+            report.line(
+                "WARN",
+                "proxy",
+                f"port {config.port} is in use by something that does not answer"
+                " /__llm-redact/status — is another service bound there?",
+            )
+        else:
+            report.line(
+                "WARN",
+                "proxy",
+                f"cannot bind port {config.port} on {config.host or 'all interfaces'}"
+                f" ({problem.strerror or problem})",
+            )
+        return
+    for sock in sockets:
+        sock.close()
+    report.line("PASS", "proxy", f"port {config.port} is free")
 
 
 def _check_vault(report: _Report, config: Config) -> None:

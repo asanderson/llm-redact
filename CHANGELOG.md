@@ -49,6 +49,21 @@ and tags `vX.Y.Z`.
   cloned repository ran instead of the installed tool, with the proxy's base URLs in its
   environment. A bare name is now looked up on PATH only (relative PATH entries, which name the
   current directory, are skipped).
+- **On Windows, a proxy listening on all interfaces could have the connections local clients
+  sent it taken by another program.** With `host = "0.0.0.0"`, `"::"` or empty (a non-loopback
+  bind, so with mutual TLS or `LLM_REDACT_INSECURE_BIND=1`), another program could bind the
+  proxy's port on 127.0.0.1 beside it and receive the connections sent there, the address that
+  `llm-redact run`, `status` and `doctor` dial for such a bind: a program running as the same
+  user while the proxy ran, or a program of any account that bound the port first, beside which
+  the proxy then started without a word. Over plain HTTP it received their prompts and
+  credentials; a client that verifies the proxy's certificate refuses it, so its requests failed
+  instead. On Windows `serve` now binds a wildcard host's addresses with SO_EXCLUSIVEADDRUSE: no
+  other socket shares the port, and a port another program holds stops `serve` (naming `netsh
+  int ipv4 show excludedportrange protocol=tcp` when Windows will not bind it at all). A
+  specific address, the default 127.0.0.1 included, was not exposed, and Linux and macOS are
+  unchanged. `doctor` probes the port as `serve` binds it and tells a port in use from one
+  Windows reserves (for Hyper-V, WSL or Docker) or another program holds exclusively. Affected:
+  every release run natively on Windows with a wildcard bind.
 
 ### Added
 - **`[log] file` and `serve --log-file PATH`**: the log goes to a file instead of stderr, rotating

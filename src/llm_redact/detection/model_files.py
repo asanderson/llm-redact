@@ -831,7 +831,7 @@ def assemble_folder(model: str, files: Mapping[str, Path], config: Mapping[str, 
         temp = Path(tempfile.mkdtemp(prefix=".assembling-", dir=root))
         for name, source in files.items():
             _link(source, temp / name)
-        (temp / GLINER_CONFIG).write_text(text, encoding="utf-8")
+        (temp / GLINER_CONFIG).write_text(text, encoding="utf-8", newline="\n")
         try:
             os.rename(temp, final)
             temp = None

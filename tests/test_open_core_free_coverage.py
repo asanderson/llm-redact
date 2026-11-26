@@ -55,6 +55,25 @@ def test_vault_key_from_command(monkeypatch: pytest.MonkeyPatch) -> None:
     assert key_from_command() is None
 
 
+def test_vault_key_command_output_that_is_not_utf8_is_no_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The output is read as UTF-8 whatever the locale; bytes that are not
+    # UTF-8 are no key, logged by TYPE only (the error carries the output).
+    import shlex
+    import subprocess
+    import sys
+
+    from llm_redact.vault_crypto import CMD_ENV_KEY, key_from_command
+
+    argv = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'\\xffsecret')"]
+    command = subprocess.list2cmdline(argv) if sys.platform == "win32" else shlex.join(argv)
+    monkeypatch.setenv(CMD_ENV_KEY, command)
+    with caplog.at_level("WARNING", logger="llm_redact"):
+        assert key_from_command() is None
+    assert "UnicodeDecodeError" in caplog.text and "secret" not in caplog.text
+
+
 def test_vault_key_from_keyring_without_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     # The keyring extra is not in the dev group, so this exercises the
     # ImportError fail-closed arm (None, never a silent downgrade).

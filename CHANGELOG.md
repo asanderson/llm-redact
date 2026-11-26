@@ -45,6 +45,16 @@ and tags `vX.Y.Z`.
   on any new rooted path without a drive that reaches a file or process call in the source unless
   it is listed with the check that keeps Windows away from it.
 
+### Fixed
+- On Windows, the files llm-redact writes are no longer translated to `\r\n` line ends: a
+  `models pull --to` folder (its manifest, the sidecars and an assembled `gliner_config.json`)
+  written on Windows has the same bytes and digests as one written on Linux, and so do the agent
+  command files `plugin install` writes and the bench reports. Every text file and pipe the
+  package reads or writes names its encoding (UTF-8), so none depends on the system's code page;
+  the vault key command's output is read as UTF-8, and output that is not is no key (logged by
+  type, as every other key-command failure). A test fails on any new text read or write in the
+  source that leaves the encoding, or a write's line ends, to the platform.
+
 ## [1.13.0] - 2026-11-10
 
 Closes leaks where values went upstream unredacted: a card number written next to another digit

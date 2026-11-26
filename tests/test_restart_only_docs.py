@@ -25,7 +25,7 @@ _LIST_RE = re.compile(r"((?:[A-Za-z_]+,\s*)+and\s+[A-Za-z_]+)\s+changes\b[^.]*?r
 
 @pytest.mark.parametrize("doc", ["README.md", "docs/deployment.md", "docs/troubleshooting.md"])
 def test_docs_enumerate_exactly_the_readonly_keys(doc: str) -> None:
-    text = (ROOT / doc).read_text()
+    text = (ROOT / doc).read_text(encoding="utf-8")
     match = _LIST_RE.search(text)
     assert match is not None, f"{doc}: restart-only sentence not found"
     names = {
@@ -45,7 +45,7 @@ _PATHS_RE = re.compile(r"`\[([a-z_.]+)\]`\s+((?:`[a-z_]+`,\s*)*`[a-z_]+`\s+and\s
 
 @pytest.mark.parametrize("doc", ["README.md", "docs/deployment.md", "docs/troubleshooting.md"])
 def test_docs_enumerate_exactly_the_restart_only_paths(doc: str) -> None:
-    text = (ROOT / doc).read_text()
+    text = (ROOT / doc).read_text(encoding="utf-8")
     expected = {(".".join(path[:-1]), path[-1]) for path in RESTART_ONLY_PATHS}
     tables = {table for table, _key in expected}
     found = [
@@ -110,14 +110,14 @@ _NER_OFF_ALONE = re.compile(r"(?:held|left here) with NER off")
 
 @pytest.mark.parametrize("doc", _START_RULE_DOCS)
 def test_docs_say_a_table_lies_dormant_whenever_the_backend_does_not_run(doc: str) -> None:
-    prose = _prose((ROOT / doc).read_text())
+    prose = _prose((ROOT / doc).read_text(encoding="utf-8"))
     assert _DORMANT in prose, f"{doc}: does not say {_DORMANT!r}"
     assert not _NER_OFF_ALONE.search(prose), f"{doc}: {_NER_OFF_ALONE.search(prose)}"
 
 
 @pytest.mark.parametrize("doc", _START_RULE_DOCS)
 def test_docs_state_when_a_reload_starts_the_llm_backend(doc: str) -> None:
-    prose = _prose((ROOT / doc).read_text())
+    prose = _prose((ROOT / doc).read_text(encoding="utf-8"))
     rule = prose.replace("that backend", "the backend").replace("the llm backend", "the backend")
     stated = f"{_STARTS_ONLY}, {_ALSO_WITHOUT_IT}"
     assert stated in rule, f"{doc}: does not say {stated!r}"
@@ -129,7 +129,7 @@ def test_the_threat_model_states_the_residual_of_a_start_by_reload() -> None:
     startup values — a dormant table's (NER off, or "llm" not among the
     backends) or the loopback defaults — and the threat model says so among
     the residual risks, plainly."""
-    prose = _prose((ROOT / "docs/threat-model.md").read_text())
+    prose = _prose((ROOT / "docs/threat-model.md").read_text(encoding="utf-8"))
     row = prose[prose.index("| The opt-in llm NER backend") :]
     residual = row[row.index("Residual:") : row.index(" |", row.index("Residual:"))]
     for phrase in (

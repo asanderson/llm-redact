@@ -33,6 +33,13 @@ def _cli(
     *args: str, encoding: str = "cp1252", stdin: bytes | None = None
 ) -> subprocess.CompletedProcess[bytes]:
     env = {**os.environ, "PYTHONUTF8": "0", "PYTHONIOENCODING": encoding}
+    try:
+        for arg in args:
+            os.fsencode(arg)
+    except UnicodeEncodeError:
+        # A POSIX process under a non-UTF-8 locale cannot pass the argument
+        # at all (Windows passes arguments as UTF-16: never this).
+        pytest.skip("this process's file system encoding cannot pass the argument")
     return subprocess.run(
         [sys.executable, "-m", "llm_redact", *args],
         input=stdin,

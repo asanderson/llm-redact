@@ -41,6 +41,11 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
+      # The same strict check of the other platforms' branches: mypy reads
+      # sys.platform checks per platform, so code behind a Windows or macOS
+      # check is only type-checked for that platform.
+      - run: uv run mypy --platform win32
+      - run: uv run mypy --platform darwin
 
   test-macos:
     # Both macOS architectures, one Python each: the platform-sensitive
@@ -73,15 +78,57 @@ jobs:
       - run: uv run pytest
 
   test-windows:
-    # Phase 26: the supported Windows scope is the Free tier + agent
-    # plugins, and this job is its verification — the FULL suite runs, with
-    # only narrow, pinned platform gates (POSIX mode assertions become
-    # conditional; doctor/service take their win32 branches). PYTHONUTF8
-    # keeps the guillemet placeholders printable on a cp1252 console.
-    name: test (Windows, py3.13)
+    # The supported Windows scope is the Free tier + agent plugins, and this
+    # job is its verification: the FULL suite runs, with only narrow, pinned
+    # platform gates (POSIX mode assertions become conditional; doctor and
+    # service take their win32 branches), on the oldest and the newest
+    # Python. No PYTHONUTF8: users run without it, so text I/O uses the
+    # system code page (cp1252 here) — every text read and write in src/
+    # names its encoding (tests/test_text_encoding_guard.py), and the suite
+    # must pass this way. The checkout is Git for Windows' autocrlf one,
+    # which tests/test_line_endings.py relies on. windows-11-arm is best
+    # effort until the support statement covers ARM64.
+    name: test (Windows ${{ matrix.arch }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.best_effort }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x64
+            python: "3.11"
+            best_effort: false
+          - runner: windows-latest
+            arch: x64
+            python: "3.14"
+            best_effort: false
+          - runner: windows-11-arm
+            arch: arm64
+            python: "3.13"
+            best_effort: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - run: uv run pytest
+      # Weekly, as the Linux job runs them on every push: the
+      # never-wrong-value-under-load checks on Windows' event loop.
+      - if: github.event_name == 'schedule'
+        run: uv run pytest -m soak
+
+  wheel-windows:
+    # The installed wheel, not the source tree: what `uv tool install` puts
+    # on a Windows machine prints its version, diagnoses itself and passes
+    # the startup gate, without PYTHONUTF8 and without a traceback.
+    name: installed wheel (Windows)
     runs-on: windows-latest
-    env:
-      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -89,10 +136,29 @@ jobs:
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: "3.13"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-      - run: uv sync --frozen
-      - run: uv run pytest
+      - run: uv build --wheel
+      - name: install into a clean tool directory
+        shell: pwsh
+        run: |
+          $env:UV_TOOL_DIR = Join-Path $env:RUNNER_TEMP "uv-tools"
+          $env:UV_TOOL_BIN_DIR = Join-Path $env:RUNNER_TEMP "uv-bin"
+          uv tool install (Get-ChildItem dist/*.whl).FullName
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $env:UV_TOOL_BIN_DIR | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: smoke
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: |
+          llm-redact --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # doctor exits 1 on a FAIL row (an extra this install lacks is
+          # one); what must hold is JSON out and no traceback.
+          llm-redact doctor --json 1> doctor.json 2> doctor.err
+          if ($LASTEXITCODE -gt 1) { exit 1 }
+          if (Select-String -Path doctor.err -Pattern "Traceback" -Quiet) { exit 1 }
+          Get-Content doctor.json -Raw | ConvertFrom-Json | Out-Null
+          llm-redact serve --check
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
   plugins:
     name: agent plugins (install e2e + validate)

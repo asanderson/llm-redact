@@ -1650,6 +1650,7 @@ def test_apply_limits_sets_each_cap_and_skips_refused_ones(monkeypatch: pytest.M
         RLIMIT_AS=1, RLIMIT_DATA=2, RLIMIT_CPU=3, RLIMIT_FSIZE=4, RLIMIT_CORE=5, RLIMIT_NOFILE=6
     )
     monkeypatch.setitem(sys.modules, "resource", resource)
+    monkeypatch.setattr(sys, "platform", "linux")
     calls: list[tuple[int, tuple[int, int]]] = []
 
     def setrlimit(which: int, value: tuple[int, int]) -> None:
@@ -1672,6 +1673,18 @@ def test_apply_limits_applies_none_without_resource_limits(monkeypatch: pytest.M
     # (the parent bounds its input instead) rather than failing to start.
     monkeypatch.setitem(sys.modules, "resource", None)
     apply_limits(256 << 20, 7)
+    # On Windows nothing is asked of a module of that name either.
+    asked: list[str] = []
+
+    class Resource:
+        def __getattr__(self, name: str) -> object:
+            asked.append(name)
+            raise AttributeError(name)
+
+    monkeypatch.setitem(sys.modules, "resource", Resource())
+    monkeypatch.setattr(sys, "platform", "win32")
+    apply_limits(256 << 20, 7)
+    assert asked == []
 
 
 # --- what OCR of the rendered pages covers (EXT-1) ------------------------------------

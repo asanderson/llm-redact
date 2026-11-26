@@ -29,6 +29,7 @@ import re
 import secrets
 import signal
 import sqlite3
+import sys
 import threading
 import time
 import unicodedata
@@ -8936,13 +8937,14 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
         loop = asyncio.get_running_loop()
-        sighup_registered = False
-        if hasattr(signal, "SIGHUP"):
+        # The signal a reload handler was registered for; Windows has none.
+        sighup: int | None = None
+        if sys.platform != "win32":
             try:
                 # The reload runs as a task (state.reloads): the file read
                 # and a changed [detection] built off the event loop.
                 loop.add_signal_handler(signal.SIGHUP, state.reloads.request)
-                sighup_registered = True
+                sighup = signal.SIGHUP
             except (NotImplementedError, RuntimeError, ValueError):
                 # Windows event loops / non-main threads (uvloop raises
                 # ValueError there, asyncio RuntimeError): reload unavailable.
@@ -9025,10 +9027,10 @@ def create_app(
                 # Flush the batched exporters; telemetry buffered at shutdown
                 # would otherwise be dropped.
                 state.telemetry.shutdown()
-            if sighup_registered:
+            if sighup is not None:
                 # Last: everything is closed, nothing a SIGHUP's default
                 # action could cut short.
-                loop.remove_signal_handler(signal.SIGHUP)
+                loop.remove_signal_handler(sighup)
 
     app = Starlette(
         routes=[

@@ -360,6 +360,7 @@ def run_verify_dir(args: argparse.Namespace) -> int:
                         "revision": check.model.revision,
                         "folder": check.model.folder,
                         "problems": check.problems,
+                        "skipped": check.skipped,
                     }
                     for check in results
                 ],
@@ -376,6 +377,11 @@ def run_verify_dir(args: argparse.Namespace) -> int:
         else:
             print(
                 f"OK    {where}: {model.folder} ({len(model.files)} files) matches {MANIFEST_NAME}"
+            )
+        if check.skipped:
+            print(
+                f"note: {model.folder} also holds files Windows adds, which no loader reads"
+                f" (skipped): {', '.join(check.skipped)}"
             )
     if extra:
         print(f"note: {root} also holds entries the manifest does not list: {', '.join(extra)}")

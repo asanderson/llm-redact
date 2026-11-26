@@ -183,6 +183,7 @@ def read_manifest(root: Path) -> list[ManifestModel]:
     """The models ``root``'s :data:`MANIFEST_NAME` lists; ManifestError
     when it is missing or is not a manifest of a schema this llm-redact
     reads."""
+    from llm_redact.detection.model_catalog import UTF16_HINT, Utf16Text, json_file_text
     from llm_redact.jsonwalk import loads_bounded
 
     path = root / MANIFEST_NAME
@@ -196,7 +197,9 @@ def read_manifest(root: Path) -> list[ManifestModel]:
     if len(raw) > MAX_MANIFEST_BYTES:
         raise ManifestError(f"{path} is larger than {MAX_MANIFEST_BYTES} bytes")
     try:
-        data = loads_bounded(raw.decode("utf-8"))
+        data = loads_bounded(json_file_text(raw))
+    except Utf16Text as exc:
+        raise ManifestError(f"{path}: {UTF16_HINT}") from exc
     except ValueError as exc:
         raise ManifestError(f"{path} is not a UTF-8 JSON document") from exc
     if not isinstance(data, Mapping) or data.get("manifest") != MANIFEST_KIND:
@@ -220,6 +223,17 @@ class FolderCheck:
 
     model: ManifestModel
     problems: list[str] = field(default_factory=list)
+    # Files Windows adds that no loader reads, skipped (``windows_added``).
+    skipped: list[str] = field(default_factory=list)
+
+
+def windows_added(path: str) -> bool:
+    """A file Windows adds to a folder that no loader reads: Explorer's
+    ``desktop.ini``, and the ``NAME:Zone.Identifier`` files that carry a
+    downloaded file's mark of the web into a file system without alternate
+    data streams (a folder copied into WSL)."""
+    name = path.rsplit("/", 1)[-1]
+    return name.lower() == "desktop.ini" or name.endswith(":Zone.Identifier")
 
 
 def check_files(root: Path, model: ManifestModel) -> FolderCheck:
@@ -244,7 +258,11 @@ def check_files(root: Path, model: ManifestModel) -> FolderCheck:
         elif file_digest(target) != sha:
             check.problems.append(f"{model.folder}/{path}: SHA-256 differs from the manifest")
     for path in folder_files(folder):
-        if path not in listed:
+        if path in listed:
+            continue
+        if windows_added(path):
+            check.skipped.append(path)
+        else:
             check.problems.append(f"{model.folder}/{path}: not listed in the manifest")
     if SIDECAR_NAME not in listed:
         check.problems.append(f"{model.folder}: the manifest lists no {SIDECAR_NAME}")

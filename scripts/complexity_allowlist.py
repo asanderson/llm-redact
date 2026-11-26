@@ -20,4 +20,6 @@ ALLOWED_UNCOVERED: dict[str, str] = {
     "llm_redact.winreload._NamedEvents.__init__": _WINDOWS_BINDING,
     "llm_redact.winreload._NamedEvents.wait": _WINDOWS_BINDING,
     "llm_redact.winreload._NamedEvents.close": _WINDOWS_BINDING,
+    "llm_redact.winreload._create_event": _WINDOWS_BINDING,
+    "llm_redact.winreload._signal": _WINDOWS_BINDING,
 }

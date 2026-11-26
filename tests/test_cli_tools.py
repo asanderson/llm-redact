@@ -28,7 +28,10 @@ def xdg_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path / "xdg" / "llm-redact" / "config.toml"
 
 
-def test_init_noninteractive_defaults(xdg_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_init_noninteractive_defaults(
+    xdg_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")  # the export lines (Windows: test_shell_syntax)
     assert run_init(_init_args()) == 0
     config = load_config(xdg_home)
     assert config.port == 8787
@@ -41,7 +44,10 @@ def test_init_noninteractive_defaults(xdg_home: Path, capsys: pytest.CaptureFixt
     assert "llm-redact serve" in out
 
 
-def test_init_flags(xdg_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_init_flags(
+    xdg_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")  # the export lines (Windows: test_shell_syntax)
     args = _init_args(tools="codex,gemini", vault="sqlite", encryption="fernet", port=9000)
     assert run_init(args) == 0
     config = load_config(xdg_home)

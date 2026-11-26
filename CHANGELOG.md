@@ -200,6 +200,14 @@ and tags `vX.Y.Z`.
   in.
 
 ### Fixed
+- On Windows, `pip install "llm-redact-proxy[perf]"` (or `uv tool install` with it) failed: uvloop
+  ships no Windows wheel and refuses to build there. The extra now leaves Windows out, where
+  uvicorn runs asyncio's own loop, so `[perf]` installs and changes nothing. A test walks
+  `uv.lock` and fails when an extra would need a package built from source on x64 Windows (on
+  ARM64, best effort, when a package joins the ones known to ship no wheel there: cryptography,
+  psycopg-binary, pyarrow, pyyaml and torch), and the Windows CI leg installs the wheel with
+  `[perf,crypto,keyring,realtime,extract]` from PyPI. The package names the operating systems CI
+  runs in its classifiers.
 - Commands llm-redact prints for pasting work in cmd.exe and PowerShell too. The install hints
   read `pip install 'llm-redact-proxy[crypto]'`, which in cmd.exe names a package called
   `'llm-redact-proxy[crypto]'` quotes included; they now double-quote the extra, which every

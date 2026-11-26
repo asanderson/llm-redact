@@ -1473,7 +1473,7 @@ otel = [
     { name = "opentelemetry-sdk" },
 ]
 perf = [
-    { name = "uvloop" },
+    { name = "uvloop", marker = "sys_platform != 'win32'" },
 ]
 presidio = [
     { name = "presidio-analyzer" },
@@ -1541,7 +1541,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'gliner2'", specifier = ">=4.38" },
     { name = "transformers", marker = "extra == 'hf'", specifier = ">=4.56" },
     { name = "uvicorn", specifier = ">=0.50.1" },
-    { name = "uvloop", marker = "extra == 'perf'", specifier = ">=0.19" },
+    { name = "uvloop", marker = "sys_platform != 'win32' and extra == 'perf'", specifier = ">=0.19" },
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0" },
 ]
 provides-extras = ["bench-data", "crypto", "extract", "gliner", "gliner2", "hf", "keyring", "ner", "otel", "perf", "presidio", "realtime", "stanza", "vault-mysql", "vault-oracle", "vault-postgres"]

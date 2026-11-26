@@ -638,7 +638,8 @@ sinks) and **OpenTelemetry** export (`[otel]`) are Pro features of the
 ## Performance and platform posture
 
 - **Event loop**: `pip install 'llm-redact-proxy[perf]'` adds uvloop;
-  uvicorn picks it up automatically — no configuration.
+  uvicorn picks it up automatically — no configuration. uvloop does not run
+  on Windows, so there the extra installs nothing and asyncio's loop runs.
 - **FIPS 140-3**: all cryptographic uses are FIPS-approved algorithm
   selections; run `llm-redact fips-check` on the host and see
   [fips.md](fips.md) for validated-host deployment.

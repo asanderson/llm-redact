@@ -73,7 +73,7 @@ padding differs), pinned to the published Keccak test vectors.
 | `vault-mysql` | `PyMySQL` | Pure-Python MySQL/MariaDB driver for the Pro RDBMS vault backend. |
 | `vault-oracle` | `oracledb` | Oracle thin-mode driver (no Instant Client) for the Pro RDBMS vault backend. |
 | `keyring` | `keyring` | Vault key in the OS keychain instead of an env var (`llm-redact vault set-key`). |
-| `perf` | `uvloop` | Faster event loop, auto-selected by uvicorn's `loop="auto"`. |
+| `perf` | `uvloop` | Faster event loop, auto-selected by uvicorn's `loop="auto"`. Not installed on Windows, which uvloop does not support. |
 | `realtime` | `websockets` | The realtime WS relay — serves both uvicorn's WS protocol and the upstream wss client. |
 | `otel` | `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` | Metadata-only traces/counters over OTLP/HTTP. |
 | `extract` | `pypdf` | PDF text layers for document extraction, in the isolated extraction worker only. |

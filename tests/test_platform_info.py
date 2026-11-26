@@ -143,8 +143,9 @@ def test_the_platform_name(
     ],
 )
 def test_the_networking_mode_comes_from_wslinfo(
-    script: str, mode: str | None, tmp_path: Path
+    script: str, mode: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")  # it is asked on Linux only
     wslinfo = tmp_path / "wslinfo"
     wslinfo.write_text(f'#!/bin/sh\n[ "$1" = --networking-mode ] || exit 2\n{script}\n')
     wslinfo.chmod(wslinfo.stat().st_mode | stat.S_IXUSR)

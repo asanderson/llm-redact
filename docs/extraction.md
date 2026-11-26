@@ -136,16 +136,26 @@ On **Windows**, which has no such limits for a process to set itself, the
 proxy puts the worker in a Job Object right after it starts, before a byte
 of the file reaches it: a memory limit of `worker_memory_mb` (committed
 memory: an allocation past it fails, and the file counts as not read), the
-same CPU-time limit, one process (it can start no other), and the job ends
-the worker when the proxy closes it or is itself killed. A worker that
-cannot be put in one reads nothing. Windows has no limit on the files a
-process writes or opens, so those two stay unlimited there: the worker's
-empty environment and isolated mode are what stand between a parser
-exploited by a crafted file and the disk. Its environment keeps
-`SYSTEMROOT` and `WINDIR` (the interpreter needs them to start; neither is
-a credential), and its `PATH` is the system folder alone
-(`%SYSTEMROOT%\System32`): Python's default there, `.;C:\bin`, names the
-current folder and a folder at the drive's root.
+same CPU-time limit, one process (the worker can start no process itself),
+and the job ends the worker when the proxy closes it or is itself killed. A
+worker that cannot be put in one reads nothing. In a virtual environment
+the worker runs on the base interpreter, told which environment it runs in
+as multiprocessing tells its workers: the environment's `python.exe` is a
+launcher that starts the interpreter as a process of its own, which the
+job's one-process limit would refuse. The worker gets no console window of
+its own. Its environment keeps `SYSTEMROOT` and `WINDIR` (the interpreter
+needs them to start; neither is a credential), and its `PATH` is the system
+folder alone (`%SYSTEMROOT%\System32`): Python's default there, `.;C:\bin`,
+names the current folder and a folder at the drive's root.
+
+What the job does not do: it bounds what a parser wedged or blown up by a
+crafted file can cost, not what one exploited by it can do. Windows has no
+limit on the files a process writes or opens, so those two stay unlimited
+there. A Windows service the worker asks (WMI, the Task Scheduler) starts
+programs outside the job. And the worker runs as the proxy's account, which
+Windows lets open the proxy's own process and read its memory, where the
+vault's values and the credentials the proxy holds are, as it lets any
+program running as that account.
 
 | Format | What is read | Incomplete when |
 | --- | --- | --- |

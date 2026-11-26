@@ -50,6 +50,7 @@ import importlib.util
 import json
 import logging
 import math
+import ntpath
 import os
 import sys
 import time
@@ -100,6 +101,50 @@ def worker_env(
     if "SYSTEMROOT" in env:
         env["PATH"] = env["SYSTEMROOT"].rstrip("\\") + "\\System32"
     return env
+
+
+def worker_launch(
+    command: Sequence[str],
+    *,
+    platform: str = sys.platform,
+    executable: str | None = None,
+    base_executable: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """The worker's command line and its whole environment (``worker_env``).
+
+    On Windows a virtual environment's ``python.exe`` is a launcher: it
+    starts the base interpreter as a process of its own and waits for it.
+    Confined to one active process (``winjob``), the launcher could not
+    start it, and the process reading the file would not be the one
+    confined. So a command naming this interpreter (``executable``, by
+    default ``sys.executable``) runs the base one (``sys._base_executable``)
+    itself, told which environment it runs in by ``__PYVENV_LAUNCHER__``,
+    as multiprocessing starts its workers (bpo-35797)."""
+    executable = sys.executable if executable is None else executable
+    if base_executable is None:
+        base_executable = getattr(sys, "_base_executable", None)
+    env = worker_env(platform, os.environ if environ is None else environ)
+    if (
+        platform == "win32"
+        and command
+        and base_executable
+        and _same_windows_file(command[0], executable)
+        and not _same_windows_file(base_executable, executable)
+    ):
+        env["__PYVENV_LAUNCHER__"] = executable
+        return (base_executable, *command[1:]), env
+    return tuple(command), env
+
+
+def _same_windows_file(first: str, second: str) -> bool:
+    return ntpath.normcase(first) == ntpath.normcase(second)
+
+
+def worker_creationflags(platform: str = sys.platform) -> int:
+    """CREATE_NO_WINDOW on Windows: started by a proxy without a console
+    (pythonw.exe, a logon task), the worker got a console window of its own."""
+    return 0x08000000 if platform == "win32" else 0
 
 
 _WORKER = (sys.executable, "-I", "-m", "llm_redact.extract_worker")
@@ -603,42 +648,49 @@ class ExtractionInspector:
         own exit (the deadline, a cancelled request, too much output)."""
         # The full reading and the display reading, each JSON-escaped.
         cap = 2 * self.config.max_text_chars * _JSON_BYTES_PER_CHAR + 4096
+        command, env = worker_launch(self._command)
         try:
             proc = await asyncio.create_subprocess_exec(
-                *self._command,
+                *command,
                 self._settings(),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                env=worker_env(),
+                env=env,
                 start_new_session=True,
+                creationflags=worker_creationflags(),
             )
         except OSError as exc:
             raise _Failed(f"start: {type(exc).__name__}") from None
         self.running += 1
         job: winjob.Job | None = None
         try:
-            if winjob.available():
-                # Windows' rlimits, before the worker reads a byte of the
-                # file; a worker that cannot be confined reads nothing.
-                try:
-                    job = winjob.confine(
-                        proc.pid,
-                        memory_bytes=self.config.worker_memory_mb << 20,
-                        cpu_seconds=math.ceil(self.config.timeout_seconds) + 1,
-                    )
-                except OSError as exc:
-                    raise _Failed(f"confine: {type(exc).__name__}") from None
-            output = await _exchange(proc, data, cap)
+            try:
+                if winjob.available():
+                    # Windows' rlimits, before the worker reads a byte of
+                    # the file; a worker that cannot be confined reads
+                    # nothing.
+                    try:
+                        job = winjob.confine(
+                            proc.pid,
+                            memory_bytes=self.config.worker_memory_mb << 20,
+                            cpu_seconds=math.ceil(self.config.timeout_seconds) + 1,
+                        )
+                    except OSError as exc:
+                        raise _Failed(f"confine: {type(exc).__name__}") from None
+                output = await _exchange(proc, data, cap)
+            finally:
+                self.running -= 1
+                if proc.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    self.killed += 1
+                    # Reaped (and its pipes closed) even when the request is
+                    # cancelled meanwhile: SIGKILL cannot be ignored.
+                    await asyncio.shield(proc.wait())
         finally:
-            self.running -= 1
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                self.killed += 1
-                # Reaped (and its pipes closed) even when the request is
-                # cancelled meanwhile: SIGKILL cannot be ignored.
-                await asyncio.shield(proc.wait())
+            # Closed even when that wait is cancelled: the job's handle
+            # would leak otherwise.
             if job is not None:
                 job.close()
         try:

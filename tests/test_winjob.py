@@ -11,6 +11,8 @@ The stand-ins run on every OS; the real Job Objects on the Windows legs."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -120,24 +122,160 @@ def test_the_memory_limit_counts_as_enforced_on_windows() -> None:
     assert extraction.MEMORY_LIMIT_ENFORCED is (sys.platform != "darwin")
 
 
+VENV = "C:\\work\\.venv\\Scripts\\python.exe"
+BASE = "C:\\Python312\\python.exe"
+
+
+def test_in_a_virtual_environment_the_worker_runs_the_base_interpreter() -> None:
+    # A virtual environment's python.exe is a launcher: it starts the base
+    # interpreter as a process of its own. Confined to one process, it could
+    # not (every worker exited 101 on the Windows legs), and the process
+    # reading the file would not have been the one confined.
+    command, env = extraction.worker_launch(
+        (VENV, "-I", "-m", "llm_redact.extract_worker"),
+        platform="win32",
+        executable=VENV,
+        base_executable=BASE,
+        environ={"SYSTEMROOT": "C:\\Windows", "API_KEY": "sk-secret"},
+    )
+    assert command == (BASE, "-I", "-m", "llm_redact.extract_worker")
+    # The environment named as multiprocessing does (bpo-35797): a path, no
+    # variable of the proxy's.
+    assert env == {
+        "SYSTEMROOT": "C:\\Windows",
+        "PATH": "C:\\Windows\\System32",
+        "__PYVENV_LAUNCHER__": VENV,
+    }
+
+
+def test_the_launcher_is_known_whatever_the_case_and_slashes() -> None:
+    command, env = extraction.worker_launch(
+        ("c:/work/.venv/scripts/PYTHON.EXE", "-I"),
+        platform="win32",
+        executable=VENV,
+        base_executable=BASE,
+        environ={},
+    )
+    assert command == (BASE, "-I") and env["__PYVENV_LAUNCHER__"] == VENV
+
+
+@pytest.mark.parametrize(
+    ("platform", "first", "base"),
+    [
+        ("win32", BASE, BASE),  # no virtual environment
+        ("win32", VENV, ""),  # an interpreter that names no base (embedded)
+        ("win32", "C:\\tools\\other.exe", BASE),  # another program
+        ("linux", VENV, BASE),  # POSIX: a venv's python is the interpreter
+    ],
+)
+def test_otherwise_the_command_runs_as_given(platform: str, first: str, base: str) -> None:
+    command, env = extraction.worker_launch(
+        (first, "-I"), platform=platform, executable=VENV, base_executable=base, environ={}
+    )
+    assert command == (first, "-I") and "__PYVENV_LAUNCHER__" not in env
+
+
+def test_the_worker_opens_no_console_window() -> None:
+    # A proxy started without a console (pythonw.exe, a logon task) made
+    # Windows open one for each worker.
+    assert extraction.worker_creationflags("win32") == 0x08000000  # CREATE_NO_WINDOW
+    assert extraction.worker_creationflags("linux") == 0
+
+
+async def test_a_cancelled_reap_still_closes_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    job = _Job()
+    monkeypatch.setattr(extraction.winjob, "available", lambda: True)
+    monkeypatch.setattr(extraction.winjob, "confine", lambda pid, **limits: job)
+
+    async def stuck(proc: Any, data: bytes, cap: int) -> bytes:
+        raise asyncio.CancelledError  # the request went away mid-read
+
+    real_wait = asyncio.subprocess.Process.wait
+
+    async def cancelled_wait(self: Any) -> int:
+        await real_wait(self)
+        raise asyncio.CancelledError  # and again while the worker is reaped
+
+    monkeypatch.setattr(extraction, "_exchange", stuck)
+    monkeypatch.setattr(asyncio.subprocess.Process, "wait", cancelled_wait)
+    with pytest.raises(asyncio.CancelledError):
+        await _inspector()._run_worker(b"123")
+    assert job.closed
+
+
 # Real Job Objects, Windows only.
 
 on_windows = pytest.mark.skipif(sys.platform != "win32", reason="Job Objects")
 
 
 def _child(script: str) -> subprocess.Popen[bytes]:
-    # Waits for a line on stdin, so it runs its script only once confined.
+    # Started as the proxy starts the worker (``worker_launch``: the base
+    # interpreter in a virtual environment). Waits for a line on stdin, so it
+    # runs its script only once confined.
+    command, env = extraction.worker_launch(
+        (sys.executable, "-I", "-c", f"import sys; sys.stdin.readline()\n{script}")
+    )
     return subprocess.Popen(
-        [sys.executable, "-I", "-c", f"import sys; sys.stdin.readline()\n{script}"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        command, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
 
 
 def _go(child: subprocess.Popen[bytes]) -> tuple[int, bytes, bytes]:
     out, err = child.communicate(b"\n", timeout=60)
     return child.returncode, out, err
+
+
+# Run as the worker: reads the file, then reports the job it is in (the
+# immediate one: the runner's own job may hold the proxy).
+JOB_PROBE = r"""
+import ctypes, json, sys
+from ctypes import wintypes
+sys.stdin.buffer.read()
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+kernel32.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.c_void_p]
+kernel32.QueryInformationJobObject.argtypes = [
+    wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p
+]
+class Basic(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+class Extended(ctypes.Structure):
+    _fields_ = [
+        ("Basic", Basic), ("Io", ctypes.c_uint64 * 6), ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcess", ctypes.c_size_t),
+        ("PeakJob", ctypes.c_size_t),
+    ]
+inside = wintypes.BOOL()
+kernel32.IsProcessInJob(kernel32.GetCurrentProcess(), None, ctypes.byref(inside))
+info = Extended()
+read = kernel32.QueryInformationJobObject(None, 9, ctypes.byref(info), ctypes.sizeof(info), None)
+facts = {
+    "in_job": bool(inside.value), "read": bool(read), "flags": info.Basic.LimitFlags,
+    "processes": info.Basic.ActiveProcessLimit, "memory": info.ProcessMemoryLimit,
+    "executable": sys.executable, "prefix": sys.prefix,
+}
+print(json.dumps({"format": "text", "text": json.dumps(facts), "complete": True}))
+"""
+
+
+@on_windows
+async def test_the_process_that_reads_the_file_is_the_one_in_the_job() -> None:
+    inspector = ExtractionInspector(
+        ExtractionConfig(enabled=True, worker_memory_mb=256),
+        command=(sys.executable, "-I", "-c", JOB_PROBE),
+    )
+    facts = json.loads((await inspector._run_worker(b"%PDF-1.7"))["text"])
+    assert facts["in_job"] and facts["read"]
+    assert facts["flags"] & winjob.LIMIT_FLAGS == winjob.LIMIT_FLAGS
+    assert facts["processes"] == 1 and facts["memory"] == 256 << 20
+    # Started on the base interpreter, it still runs in this environment.
+    assert facts["executable"] == sys.executable and facts["prefix"] == sys.prefix
 
 
 @on_windows
@@ -166,34 +304,42 @@ def test_a_confined_worker_cannot_start_a_process() -> None:
 
 @on_windows
 def test_closing_the_job_ends_the_worker() -> None:
-    child = _child("import time; time.sleep(120)")
+    # Ended, not finished: the exit code a job's close leaves is not one to
+    # rely on, what it printed is.
+    child = _child("import time; time.sleep(120); print('slept')")
     job = winjob.confine(child.pid, memory_bytes=256 << 20, cpu_seconds=30)
     assert child.stdin is not None
     child.stdin.write(b"\n")
     child.stdin.flush()
     job.close()
-    assert child.wait(timeout=30) != 0
+    out, _ = child.communicate(timeout=30)
+    assert b"slept" not in out
 
 
 @on_windows
 def test_a_worker_ends_with_a_proxy_that_is_killed(tmp_path: Path) -> None:
     # The "proxy" confines a sleeping worker, says its pid, then is killed:
-    # its handle closes with it, and the worker ends.
+    # its handle closes with it, and the worker ends. Both start on the base
+    # interpreter (``worker_launch``): a virtual environment's launcher would
+    # end what it started itself, proving nothing about the job.
     src = Path(extraction.__file__).resolve().parent.parent
-    proxy = subprocess.Popen(
-        [
+    command, env = extraction.worker_launch(
+        (
             sys.executable,
             "-c",
             "import subprocess, sys, time\n"
             f"sys.path.insert(0, {str(src)!r})\n"
-            "from llm_redact import winjob\n"
-            "worker = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+            "from llm_redact import extraction, winjob\n"
+            "command, env = extraction.worker_launch(\n"
+            "    (sys.executable, '-I', '-c', 'import time; time.sleep(120)')\n"
+            ")\n"
+            "worker = subprocess.Popen(command, env=env)\n"
             "winjob.confine(worker.pid, memory_bytes=256 << 20, cpu_seconds=30)\n"
             "print(worker.pid, flush=True)\n"
             "time.sleep(120)\n",
-        ],
-        stdout=subprocess.PIPE,
+        )
     )
+    proxy = subprocess.Popen(command, env=env, stdout=subprocess.PIPE)
     assert proxy.stdout is not None
     worker = int(proxy.stdout.readline())
     proxy.kill()

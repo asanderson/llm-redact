@@ -45,6 +45,20 @@ and tags `vX.Y.Z`.
   on any new rooted path without a drive that reaches a file or process call in the source unless
   it is listed with the check that keeps Windows away from it.
 
+### Changed
+- **On Windows, llm-redact's per-user files now go under `%LOCALAPPDATA%\llm-redact`**, which
+  stays on the machine (the config holds deny strings, so it should not roam with the profile):
+  the config file is `%LOCALAPPDATA%\llm-redact\config.toml`, and assembled GLiNER model folders
+  go to `%LOCALAPPDATA%\llm-redact\data\models`. Windows used the Linux locations under the
+  profile before (`%USERPROFILE%\.config\llm-redact`, `%USERPROFILE%\.local\share\llm-redact`).
+  An install with files there keeps using them until the new location holds the same kind of
+  file (a `config.toml`; anything in `data`), so upgrading moves nothing by itself. A set
+  `XDG_CONFIG_HOME` or `XDG_DATA_HOME` still wins on every platform. Linux, macOS and WSL are
+  unchanged.
+- An `XDG_CONFIG_HOME` or `XDG_DATA_HOME` that is not an absolute path is now ignored for the
+  default config file and model folders, as the XDG Base Directory specification says (an empty
+  one already was): a relative value named a folder under whatever the working directory was.
+
 ### Fixed
 - On Windows, the files llm-redact writes are no longer translated to `\r\n` line ends: a
   `models pull --to` folder (its manifest, the sidecars and an assembled `gliner_config.json`)

@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 import isolation
-from llm_redact import plugin_cli, service_cli
+from llm_redact import paths, plugin_cli, service_cli
 from llm_redact.audit import default_audit_path
 from llm_redact.bench.datasets import default_cache_dir
 from llm_redact.config import default_config_path
@@ -34,6 +34,7 @@ def _defaults() -> list[Path]:
         default_vault_path(),
         default_audit_path(),
         default_config_path(),
+        paths.models_dir(),
         service_cli._unit_path(),
         Path("~").expanduser(),
         *(plugin_cli._target_dir(tool, os.environ) for tool in plugin_cli.TOOLS),
@@ -116,15 +117,18 @@ def test_isolate_rewires_home_and_xdg_and_drops_deployment_settings(tmp_path: Pa
         "XDG_CONFIG_HOME": str(tmp_path / "config"),
         "XDG_DATA_HOME": str(tmp_path / "data"),
         "XDG_STATE_HOME": str(tmp_path / "state"),
+        "LOCALAPPDATA": str(tmp_path / "localappdata"),
+        "APPDATA": str(tmp_path / "appdata"),
         # Third-party caches stay where they were.
         "XDG_CACHE_HOME": str(Path("/real/home") / ".cache"),
         "LLM_REDACT_TEST_PG_DSN": "postgresql://ci",
         "PATH": "/usr/bin",
     }
-    assert all((tmp_path / sub).is_dir() for sub in ("home", "config", "data", "state"))
+    subs = ("home", "config", "data", "state", "localappdata", "appdata")
+    assert all((tmp_path / sub).is_dir() for sub in subs)
 
 
-@pytest.mark.parametrize("platform", ["linux", "darwin"])
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
 @pytest.mark.parametrize("tool_dirs", [False, True], ids=["home-defaults", "tool-dir-variables"])
 def test_the_watched_paths_cover_every_default_writer(
     platform: str, tool_dirs: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -134,7 +138,14 @@ def test_the_watched_paths_cover_every_default_writer(
     monkeypatch.setattr(sys, "platform", platform)
     for name in ("HOME", "USERPROFILE"):
         monkeypatch.setenv(name, str(tmp_path / "real-home"))
-    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+    names = (
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+    )
+    for name in (*names, "LOCALAPPDATA", "APPDATA"):
         if tool_dirs:
             monkeypatch.setenv(name, str(tmp_path / name.lower()))
         else:
@@ -246,7 +257,9 @@ def test_an_empty_xdg_variable_counts_as_unset(
 ) -> None:
     # The XDG spec: an empty value is unset — never a path relative to the
     # current directory.
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv(variable, "")
     assert default() == Path.home().joinpath(*tail)
-    monkeypatch.setenv(variable, "/xdg")
-    assert default() == Path("/xdg", *tail[-2:])
+    xdg = Path.home().parent / "xdg"  # absolute on every platform
+    monkeypatch.setenv(variable, str(xdg))
+    assert default() == xdg.joinpath(*tail[-2:])

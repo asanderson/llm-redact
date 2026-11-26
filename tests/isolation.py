@@ -3,8 +3,9 @@
 conftest.py applies it before anything is collected: every default location
 llm-redact and its CLIs read or write — the XDG config/data dirs, ``HOME``
 and ``USERPROFILE`` (``Path.home()`` reads the latter on Windows: the service
-unit, the agent plugins' command dirs, ``~`` in configured paths) and the
-agent tools' own dir variables — points into
+unit, the agent plugins' command dirs, ``~`` in configured paths), Windows'
+``LOCALAPPDATA`` and ``APPDATA`` (llm-redact's Windows home, when no XDG
+variable is set) and the agent tools' own dir variables — points into
 one throwaway directory for the whole session, subprocesses included (they
 inherit the environment); a deployment's ``LLM_REDACT_*`` variables (its
 config file, vault DSN and key, a proxy URL, a bind address) are dropped, so
@@ -72,7 +73,18 @@ def watched_paths(
         if platform == "darwin"
         else home / ".config" / "systemd" / "user" / "llm-redact.service"
     )
+    # Windows: llm-redact's own home when no XDG variable is set
+    # (llm_redact.paths), and the roaming twin nothing should write to.
+    windows = (
+        [
+            Path(environ.get("LOCALAPPDATA") or home / "AppData" / "Local") / "llm-redact",
+            Path(environ.get("APPDATA") or home / "AppData" / "Roaming") / "llm-redact",
+        ]
+        if platform == "win32"
+        else []
+    )
     return [
+        *windows,
         config / "llm-redact",
         data / "llm-redact",
         # The NER bench's dataset cache (bench/datasets/base.py): tests pass
@@ -129,6 +141,8 @@ def isolate(environ: MutableMapping[str, str], root: Path) -> None:
         ("XDG_CONFIG_HOME", "config"),
         ("XDG_DATA_HOME", "data"),
         ("XDG_STATE_HOME", "state"),
+        ("LOCALAPPDATA", "localappdata"),
+        ("APPDATA", "appdata"),
     ):
         path = root / sub
         path.mkdir(parents=True, exist_ok=True)

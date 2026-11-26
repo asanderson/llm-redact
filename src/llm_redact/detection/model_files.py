@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from llm_redact import paths
 from llm_redact.config import ConfigError
 from llm_redact.detection.model_catalog import MODEL_ID_RE, CatalogEntry, ModelIdentity
 
@@ -489,10 +490,11 @@ logger = logging.getLogger("llm_redact")
 
 
 def models_dir() -> Path:
-    """Where llm-redact assembles model folders: ``$XDG_DATA_HOME/llm-redact/
-    models`` (an empty XDG_DATA_HOME counts as unset)."""
-    xdg = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(xdg) / "llm-redact" / "models"
+    """Where llm-redact assembles model folders: ``models`` in the data
+    folder (``paths.models_dir``: ``$XDG_DATA_HOME/llm-redact/models``, else
+    ``~/.local/share/llm-redact/models``; on Windows under
+    ``%LOCALAPPDATA%\\llm-redact``)."""
+    return paths.models_dir()
 
 
 def _known_model_types(backend: str) -> Callable[[str], bool]:

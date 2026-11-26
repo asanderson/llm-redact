@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from llm_redact import paths
 from llm_redact.detection.deny import DenyEntry
 from llm_redact.detection.engine import (
     BINARY_UPLOAD_MODES,
@@ -1252,9 +1253,10 @@ def identity_upstream_problem(url: str) -> str | None:
 
 
 def default_config_path() -> Path:
-    # An empty XDG_CONFIG_HOME is unset (the XDG spec), never the current dir.
-    xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(xdg) / "llm-redact" / "config.toml"
+    """The per-user config file: ``config.toml`` in ``paths.config_dir()``
+    (``$XDG_CONFIG_HOME/llm-redact``, else ``~/.config/llm-redact``, and on
+    Windows ``%LOCALAPPDATA%\\llm-redact``)."""
+    return paths.config_dir() / paths.CONFIG_FILE
 
 
 # Standard system path; also the documented container config mount point.
@@ -2699,8 +2701,8 @@ def load_config(path: Path | None = None) -> Config:
     """Load configuration.
 
     Search order when no explicit path is given: $LLM_REDACT_CONFIG (set but
-    missing is a hard error, never a silent fall-through), then
-    $XDG_CONFIG_HOME/llm-redact/config.toml, then (Linux and macOS only)
+    missing is a hard error, never a silent fall-through), then the per-user
+    file (``default_config_path``), then (Linux and macOS only)
     /etc/llm-redact/config.toml, then built-in defaults
     (``config_search_candidates``).
 

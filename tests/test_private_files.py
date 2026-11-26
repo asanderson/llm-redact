@@ -259,6 +259,52 @@ def test_a_vault_that_cannot_be_kept_private_is_a_config_error(
     )
 
 
+@pytest.mark.parametrize(
+    ("step", "call"),
+    [("folder", 1), ("sidecars", 1), ("sidecars", 2)],
+    ids=["its-folder", "a-sidecar-before-sqlite-opens-it", "a-sidecar-once-sqlite-has-it"],
+)
+def test_every_privacy_step_of_the_vault_names_the_vault_when_it_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, call: int
+) -> None:
+    # Each step's refusal names the vault, whichever step it is: its folder,
+    # the sidecars SQLite would open, and the sidecars once SQLite has them,
+    # where the connection already opened is closed, never left holding them.
+    from llm_redact.config import ConfigError
+    from llm_redact.vault import _open_connection
+
+    calls = {"folder": 0, "sidecars": 0}
+
+    def at(name: str) -> None:
+        calls[name] += 1
+        if name == step and calls[name] == call:
+            raise OSError(None, "another account owns it (PC\\eve)", "x")
+
+    monkeypatch.setattr(
+        winacl, "make_private", lambda path, folder=False: at("folder") if folder else None
+    )
+    monkeypatch.setattr(winacl, "make_sidecars_private", lambda path: at("sidecars"))
+    opened: list[sqlite3.Connection] = []
+    connect = sqlite3.connect
+
+    def recorded(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        opened.append(connect(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(sqlite3, "connect", recorded)
+    vault = tmp_path / "data" / "vault.db"
+    with pytest.raises(ConfigError) as refusal:
+        _open_connection(vault)
+    assert str(refusal.value) == (
+        f"the vault {vault} cannot be kept private to this account: another account owns it"
+        " (PC\\eve)"
+    )
+    assert len(opened) == (1 if (step, call) == ("sidecars", 2) else 0)
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")
+
+
 def test_the_override_store_its_folder_and_sidecars_are_made_private(
     tmp_path: Path, made: list[tuple[str, bool | str]]
 ) -> None:

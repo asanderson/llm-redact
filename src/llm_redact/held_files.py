@@ -11,7 +11,11 @@ runs. POSIX never refuses for that reason, so nothing is retried there.
 
 ``retried`` runs such an operation again, with backoff over about two
 seconds, while Windows says the file is held; the last error is then raised
-for the caller to explain (``is_held``).
+for the caller to explain (``is_held``). Only a sharing violation is surely
+a hold (``sharing_violation``): Windows answers ERROR_ACCESS_DENIED for a
+file held without leave to delete it, for a folder holding an open file,
+and also for a read-only file or one the account may not change, so a
+message for it names both.
 """
 
 from __future__ import annotations
@@ -24,7 +28,8 @@ from typing import TypeVar
 _T = TypeVar("_T")
 
 # ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION
-HELD_WINERRORS = frozenset({5, 32})
+SHARING_VIOLATION = 32
+HELD_WINERRORS = frozenset({5, SHARING_VIOLATION})
 # The waits between attempts: about two seconds in all.
 DELAYS = (0.05, 0.1, 0.2, 0.4, 0.5, 0.75)
 
@@ -41,6 +46,12 @@ def is_held(error: BaseException) -> bool:
         and isinstance(error, OSError)
         and getattr(error, "winerror", None) in HELD_WINERRORS
     )
+
+
+def sharing_violation(error: BaseException) -> bool:
+    """Whether Windows refused because another program surely holds the
+    file (ERROR_SHARING_VIOLATION), not perhaps (ERROR_ACCESS_DENIED)."""
+    return is_held(error) and getattr(error, "winerror", None) == SHARING_VIOLATION
 
 
 def retried(

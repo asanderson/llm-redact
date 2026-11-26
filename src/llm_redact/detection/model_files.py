@@ -46,7 +46,7 @@ from typing import Any
 from llm_redact import paths
 from llm_redact.config import ConfigError
 from llm_redact.detection.model_catalog import MODEL_ID_RE, CatalogEntry, ModelIdentity
-from llm_redact.held_files import is_held, retried
+from llm_redact.held_files import is_held, retried, sharing_violation
 
 # Tokenizer files, by the names transformers looks for: a fast tokenizer's
 # tokenizer.json, its configuration, and the vocabularies a slow tokenizer
@@ -92,6 +92,15 @@ HF_PICKLE_PATTERNS = (*PICKLE_FILES, PICKLE_SHARDS)
 
 # A configuration file is read whole; none is near this size.
 MAX_CONFIG_BYTES = 4 * 1024 * 1024
+
+
+def _held_note(error: BaseException) -> str:
+    """What a refusal ``held_files.is_held`` matches adds to a message."""
+    if sharing_violation(error):
+        return "; another program holds a file there"
+    if is_held(error):
+        return "; another program may hold a file there, or your account may not change it"
+    return ""
 
 
 def _config_error(message: str) -> Exception:
@@ -845,8 +854,7 @@ def assemble_folder(model: str, files: Mapping[str, Path], config: Mapping[str, 
     except OSError as exc:
         raise _config_error(
             f"[detection.ner] gliner model {model!r}: cannot assemble its local folder"
-            f" under {root} ({type(exc).__name__})"
-            + ("; another program holds a file there" if is_held(exc) else "")
+            f" under {root} ({type(exc).__name__})" + _held_note(exc)
         ) from exc
     finally:
         if temp is not None:

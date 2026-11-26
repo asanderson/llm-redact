@@ -18,6 +18,7 @@ Output names backends, model ids, revisions, files and catalog facts only.
 """
 
 import argparse
+import contextlib
 import os
 import re
 import shutil
@@ -517,16 +518,17 @@ def run_pull(args: argparse.Namespace) -> int:
         print(f"FAIL  {problem}")
         return FAILED
     except OSError as exc:
-        from llm_redact.held_files import is_held
+        from llm_redact.held_files import is_held, sharing_violation
 
-        print(
-            f"FAIL  cannot write the model folders to {args.to} ({type(exc).__name__})"
-            + (
-                ": another program holds a file there; close it and run the command again"
-                if is_held(exc)
-                else ""
+        held = ""
+        if sharing_violation(exc):
+            held = ": another program holds a file there; close it and run the command again"
+        elif is_held(exc):
+            held = (
+                ": another program may hold a file there, or your account may not change it;"
+                " close such a program and run the command again"
             )
-        )
+        print(f"FAIL  cannot write the model folders to {args.to} ({type(exc).__name__}){held}")
         return FAILED
     _print_snippet(ner, args, written)
     return OK
@@ -699,23 +701,39 @@ def _replace_folder(temp: Path, final: Path) -> None:
     """Put the folder written at ``temp`` in the place of ``final``. The old
     folder is renamed aside before it is deleted: one Windows will not move
     (a running proxy that loaded the model holds its files) stays whole, and
-    the command says to stop the proxy (``held_files``)."""
-    from llm_redact.held_files import is_held, retried
+    the command says to stop the proxy (``held_files``). Should the new
+    folder then not move in, the old one is put back."""
+    from llm_redact.held_files import is_held, retried, sharing_violation
 
     aside = final.with_name(f".{final.name}.old")
+    moved_aside = False
     if final.exists():
         shutil.rmtree(aside, ignore_errors=True)  # (left by a run that was killed)
         try:
             retried(lambda: os.rename(final, aside))
         except OSError as error:
-            if is_held(error):
+            if sharing_violation(error):
                 raise PullError(
                     f"cannot replace {final}: a program holds its files. A running proxy that"
                     " loaded this model holds them for as long as it runs, a virus scanner for"
                     " a moment: stop the proxy and run the command again"
                 ) from error
+            if is_held(error):
+                raise PullError(
+                    f"cannot replace {final}: Windows refused to move it, as it does while a"
+                    " program holds its files (a running proxy that loaded this model holds"
+                    " them for as long as it runs, a virus scanner for a moment) or when your"
+                    " account may not change it: stop the proxy and run the command again"
+                ) from error
             raise
-    retried(lambda: os.rename(temp, final))
+        moved_aside = True
+    try:
+        retried(lambda: os.rename(temp, final))
+    except OSError:
+        if moved_aside:
+            with contextlib.suppress(OSError):
+                os.rename(aside, final)
+        raise
     shutil.rmtree(aside, ignore_errors=True)
 
 

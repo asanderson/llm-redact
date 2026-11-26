@@ -46,7 +46,7 @@ from llm_redact.config import (
     VaultKmsConfig,
 )
 from llm_redact.detection.engine import DetectionConfig, LlmNerConfig
-from llm_redact.held_files import HeldFile, is_held, retried
+from llm_redact.held_files import HeldFile, is_held, retried, sharing_violation
 
 _BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
 
@@ -731,15 +731,22 @@ def write_config_atomic(path: Path, text: str) -> Path | None:
         with contextlib.suppress(OSError):
             tmp.unlink()
         if is_held(error):
-            raise _held(path) from error
+            raise _held(path, error) from error
         raise
     return backup
 
 
-def _held(path: Path) -> HeldFile:
+def _held(path: Path, error: OSError) -> HeldFile:
+    if sharing_violation(error):
+        return HeldFile(
+            f"another program holds {path} open (an editor, a virus scanner or a sync client):"
+            " close it and run the command again"
+        )
     return HeldFile(
-        f"another program holds {path} open (an editor, a virus scanner or a sync client):"
-        " close it and run the command again"
+        f"Windows refused to change {path}: another program may hold it open (an editor, a"
+        " virus scanner or a sync client), or your account may not change it (it is read-only,"
+        " or its access control list does not let you): close such a program and run the"
+        " command again"
     )
 
 
@@ -748,7 +755,7 @@ def _write_0600(path: Path, data: bytes, *, fsync: bool = False) -> None:
         retried(lambda: path.unlink(missing_ok=True))
     except OSError as error:
         if is_held(error):
-            raise _held(path) from error
+            raise _held(path, error) from error
         raise
     # O_BINARY: without it the Windows CRT opens the fd in text mode and
     # rewrites the newlines we just emitted — the file must round-trip

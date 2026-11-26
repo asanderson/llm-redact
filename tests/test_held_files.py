@@ -143,6 +143,30 @@ def test_a_config_held_open_too_long_names_it_and_changes_nothing(
 
 
 @pytest.mark.usefixtures("windows")
+def test_a_denial_that_outlasts_the_retries_is_not_called_a_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ERROR_ACCESS_DENIED is what Windows answers for a file another program
+    # holds without leave to delete it, and also for a read-only file or one
+    # the account may not change: the message says both.
+    target = tmp_path / "config.toml"
+    target.write_text("port = 1\n", encoding="utf-8")
+
+    def replace(source: Any, target_: Any) -> None:
+        raise Denied(13, "access denied")
+
+    monkeypatch.setattr(os, "replace", replace)
+    with pytest.raises(HeldFile) as raised:
+        write_config_atomic(target, "port = 2\n")
+    assert str(raised.value) == (
+        f"Windows refused to change {target}: another program may hold it open (an editor, a"
+        " virus scanner or a sync client), or your account may not change it (it is read-only,"
+        " or its access control list does not let you): close such a program and run the"
+        " command again"
+    )
+
+
+@pytest.mark.usefixtures("windows")
 def test_a_backup_held_open_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     target = tmp_path / "config.toml"
     target.write_text("port = 1\n", encoding="utf-8")

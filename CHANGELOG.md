@@ -152,6 +152,16 @@ and tags `vX.Y.Z`.
   Windows PowerShell 5.1, from the same command table as the bash, zsh and fish scripts. Load it
   with `llm-redact completions powershell | Out-String | Invoke-Expression` (in your `$PROFILE`
   for every session).
+- **A Windows wheelhouse with every release**, for machines without internet:
+  `llm-redact-X.Y.Z-wheelhouse-win_amd64.zip` on the GitHub Release holds the release's wheel and
+  every locked wheel of the base install and the crypto, keyring, realtime and extract extras for
+  x64 Windows and Python 3.11 to 3.14, with the hash-pinned `requirements.txt` the install reads
+  and `SHA256SUMS`, under a build provenance attestation. The release builds it on Windows and
+  runs the documented install with no index for each of those Pythons (`pip check`,
+  `serve --check`, `doctor`) before attaching it; `scripts/build_wheelhouse.py` builds one with
+  other extras (the NER ones, which the release's leaves out). docs/air-gapped.md gives the
+  install, the PowerShell `SHA256SUMS` check, and the WSL path: WSL's own package and an approved
+  root filesystem brought in with `wsl --import`, then the Linux offline install.
 - **`/status` says which platform answered** (`platform`: `windows`, `wsl`, `linux` or `macos`),
   where a native and a WSL proxy both run on one machine; `llm-redact status` prints it on its
   first line. In WSL, `doctor` names the distribution and the networking mode (`wslinfo

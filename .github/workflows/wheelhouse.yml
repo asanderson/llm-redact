@@ -1,0 +1,68 @@
+name: Windows wheelhouse
+
+# The wheelhouse a release attaches for Windows machines without internet
+# (docs/air-gapped.md, "Native Windows: the release's wheelhouse"): every
+# locked package of the base install and the crypto, keyring, realtime and
+# extract extras, as wheels for x64 Windows and Python 3.11 to 3.14, each
+# checked against uv.lock's hash, with the release's wheel, the requirements
+# file the install reads and SHA256SUMS. scripts/build_wheelhouse.py builds
+# it here on Windows, where pip reads the requirements' markers as Windows
+# does, then runs the documented install in a fresh environment of each
+# Python with no index (pip check, serve --check, doctor) before it zips it.
+#
+# release.yml calls this with the release's wheel (the `dist` artifact) and
+# attests and attaches the zip it uploads; this workflow itself holds no
+# write permission. A pull request that changes it or the script runs it as
+# a dry run on a wheel built from the pull request; so does workflow_dispatch.
+# tests/test_wheelhouse.py pins its shape.
+
+on:
+  workflow_call:
+    inputs:
+      dist-artifact:
+        description: The artifact holding the release's wheel (empty builds one here).
+        type: string
+        default: ""
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/wheelhouse.yml
+      - scripts/build_wheelhouse.py
+
+permissions:
+  contents: read
+
+jobs:
+  wheelhouse:
+    name: Windows wheelhouse (x64, Python 3.11 to 3.14)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          python-version: "3.13"
+          enable-cache: false
+      - name: the release's wheel
+        if: ${{ inputs.dist-artifact }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.dist-artifact }}
+          path: dist
+      - name: a wheel of this checkout
+        if: ${{ !inputs.dist-artifact }}
+        run: uv build --wheel
+      - name: build the wheelhouse, install it with no index, zip it
+        shell: pwsh
+        run: |
+          $wheels = @(Get-ChildItem dist -Filter "llm_redact_proxy-*.whl")
+          if ($wheels.Count -ne 1) { Write-Error "expected one llm_redact_proxy wheel in dist, found $($wheels.Count)"; exit 1 }
+          uv run --no-project python scripts/build_wheelhouse.py --wheel $wheels[0].FullName --out wheelhouse --zip wheelhouse-zip
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheelhouse
+          path: wheelhouse-zip/*.zip
+          if-no-files-found: error

@@ -30,6 +30,9 @@ not seen by that check; the namespace still stops it)
    (`ghcr.io/asanderson/llm-redact:<version>-ner`: the `hf` and `gliner`
    extras on a CPU-only torch), or, without containers, a wheelhouse
    ([deployment.md, "Offline installs"](deployment.md#offline-installs-no-container)).
+   On native Windows, each release attaches one ready to install (without
+   the NER extras: [below](#native-windows-the-releases-wheelhouse)); a WSL
+   distribution takes the Linux path ([WSL](#wsl)).
 2. **The models**: one folder per model, written by `llm-redact models pull
    --to DIR`, with the manifest `llm-redact-models.json` beside them (every
    file's size and SHA-256). Each folder is self-contained: a GLiNER model's
@@ -148,6 +151,108 @@ directory: a model folder must be in place when the proxy starts …`
 ([troubleshooting](troubleshooting.md)); a folder that is incomplete names
 what the loader misses. `doctor` reports under `models` that downloads are
 off and that each model loads from its folder.
+
+## Native Windows: the release's wheelhouse
+
+Each release attaches `llm-redact-X.Y.Z-wheelhouse-win_amd64.zip` to its
+GitHub Release: the release's wheel and every package `uv.lock` names for
+the base install and the crypto, keyring, realtime and extract extras, as
+wheels for x64 Windows and Python 3.11 to 3.14, with the `requirements.txt`
+the install reads (each package at its locked version, with its SHA-256)
+and `SHA256SUMS`. The release workflow builds it on Windows
+([`scripts/build_wheelhouse.py`](../scripts/build_wheelhouse.py)), runs the
+install below with no index for each of those Pythons (then `pip check`,
+`serve --check` and `doctor`), and attaches it with a signed build
+provenance attestation.
+
+On the connected machine:
+
+```powershell
+gh release download vX.Y.Z --repo asanderson/llm-redact --pattern "llm-redact-X.Y.Z-wheelhouse-win_amd64.zip"
+gh attestation verify llm-redact-X.Y.Z-wheelhouse-win_amd64.zip --repo asanderson/llm-redact
+(Get-FileHash -Algorithm SHA256 llm-redact-X.Y.Z-wheelhouse-win_amd64.zip).Hash   # note it
+```
+
+Carry the zip in, with an installer of Python 3.11 to 3.14 for x64 Windows
+(python.org's, which installs the `py` launcher used below), then, inside:
+
+```powershell
+(Get-FileHash -Algorithm SHA256 llm-redact-X.Y.Z-wheelhouse-win_amd64.zip).Hash   # the value you noted
+Expand-Archive llm-redact-X.Y.Z-wheelhouse-win_amd64.zip -DestinationPath C:\llm-redact\wheelhouse
+cd C:\llm-redact\wheelhouse
+
+# Every file as SHA256SUMS lists it, and no file it does not list:
+$listed = @{}
+foreach ($line in Get-Content SHA256SUMS) {
+  $hash, $name = $line -split '  ', 2
+  $listed[$name] = $true
+  if ((Get-FileHash -Algorithm SHA256 -LiteralPath $name).Hash -ne $hash) { throw "SHA-256 differs: $name" }
+}
+Get-ChildItem -File | Where-Object { $_.Name -ne 'SHA256SUMS' -and -not $listed[$_.Name] } |
+  ForEach-Object { throw "not listed in SHA256SUMS: $($_.Name)" }
+
+py -3.13 -m venv C:\llm-redact\venv      # or -3.11, -3.12, -3.14: the Python you carried in
+$python = 'C:\llm-redact\venv\Scripts\python.exe'
+& $python -m pip install --no-index --find-links . --no-deps --require-hashes -r requirements.txt
+& $python -m pip install --no-index --no-deps llm_redact_proxy-X.Y.Z-py3-none-any.whl
+& $python -m pip check
+C:\llm-redact\venv\Scripts\llm-redact.exe doctor
+```
+
+`doctor` exits 0 when no row FAILs. The attestation vouches for the zip,
+the hash you note carries that to the other side, and the `SHA256SUMS`
+check shows that the folder holds exactly what the release built.
+
+The wheelhouse carries no NER extra: torch's wheel alone takes hundreds of
+megabytes for each Python. For NER on a Windows machine without internet,
+run the proxy in a WSL distribution with the `-ner` image or the Linux
+wheelhouse ([WSL](#wsl)), or build a wheelhouse of your own on a connected
+x64 Windows machine from a checkout of the release, with uv installed: PyPI's
+Windows torch wheels are the CPU build, so the script needs no torch split.
+
+```powershell
+python scripts\build_wheelhouse.py --wheel llm_redact_proxy-X.Y.Z-py3-none-any.whl --out wheelhouse `
+  --python 3.13 --extra crypto --extra keyring --extra realtime --extra extract --extra hf --extra gliner
+```
+
+It downloads the locked wheels and runs the same install and checks; carry
+the folder in and install it as above.
+
+## WSL
+
+Inside a WSL distribution llm-redact is a Linux install: the `-ner` image
+in the distribution's Docker or Podman, or a Linux wheelhouse
+([deployment.md, "Offline installs"](deployment.md#offline-installs-no-container),
+built on a connected Linux machine of the distribution's CPU architecture
+and Python minor version). What differs is bringing WSL and the
+distribution in:
+
+1. On the connected machine, take WSL's package for x64 Windows,
+   `wsl.<version>.x64.msi` from [WSL's releases](https://github.com/microsoft/WSL/releases),
+   and an approved root filesystem as a tar file: one your organization
+   publishes, or a distribution you set up in WSL there and wrote with
+   `wsl --export <name> rootfs.tar`. Carry both in with the wheelhouse or
+   the saved image.
+2. Inside, from an administrator's PowerShell, enable the Virtual Machine
+   Platform feature, restart, install the package, and import the root
+   filesystem:
+
+   ```powershell
+   dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+   # restart Windows, then:
+   msiexec /i wsl.<version>.x64.msi
+   wsl --import llm-redact C:\WSL\llm-redact rootfs.tar --version 2
+   wsl -d llm-redact
+   ```
+
+3. In the distribution, install from the wheelhouse with no index, as
+   deployment.md shows, or `docker load` the image, and continue with
+   [Inside the enclave](#inside-the-enclave).
+
+Keep the vault, the model folders and the wheelhouse on the
+distribution's own file system (under `/home` or `/opt`), not under
+`/mnt/c`: the proxy refuses a SQLite vault on a Windows drive (its locks do
+not hold there), and models load slowly from one; `doctor` names both.
 
 ## Model folders on native Windows
 

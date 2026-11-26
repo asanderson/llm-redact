@@ -496,6 +496,12 @@ Where the files live under a hardened deployment:
 
 ## Offline installs (no container)
 
+On native Windows, take the wheelhouse each release attaches instead
+([air-gapped.md, "Native Windows: the release's wheelhouse"](air-gapped.md#native-windows-the-releases-wheelhouse)):
+built and installed with no index on Windows for Python 3.11 to 3.14, with
+the crypto, keyring, realtime and extract extras and no NER extra. In a WSL
+distribution, the Linux steps below apply ([air-gapped.md, "WSL"](air-gapped.md#wsl)).
+
 For a machine without internet access and without containers, build a
 wheelhouse on a connected machine of the same OS, CPU architecture and
 Python minor version, from a checkout of the release you install. Every

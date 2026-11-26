@@ -71,6 +71,7 @@ uv run python -m llm_redact.bench --latency --check   # + in-process overhead be
 uv run python scripts/live_smoke.py            # live-API tests (needs keys, costs money)
 LLM_REDACT_DOGFOOD=1 uv run python scripts/dogfood_claude.py  # real claude CLI e2e (needs auth, costs money)
 ./scripts/container_smoke.sh docker            # container e2e (needs a container engine)
+python scripts/build_wheelhouse.py --wheel dist/llm_redact_proxy-X.Y.Z-py3-none-any.whl --out wheelhouse --zip .  # Windows + uv: the release's offline wheelhouse (wheelhouse.yml; docs/air-gapped.md), installed with no index for 3.11-3.14 before it zips
 ```
 
 `pyproject.toml` is the single source of project metadata and tool configuration (ruff, pytest, mypy). Runtime dependencies are deliberately only httpx, starlette, and uvicorn; config/CLI use stdlib (`tomllib`, `argparse`, dataclasses). Do not add pydantic or FastAPI — the proxy must forward unknown JSON fields verbatim, never validate or reshape them.

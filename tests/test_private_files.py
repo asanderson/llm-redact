@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -39,9 +40,10 @@ USER = "S-1-5-21-1000-2000-3000-1001"
 OTHER = "S-1-5-21-1000-2000-3000-1002"
 USERS = "S-1-5-32-545"
 FULL, PASSED_ON = 0x1F01FF, 0x03  # FILE_ALL_ACCESS; OBJECT_INHERIT | CONTAINER_INHERIT
+INHERIT_ONLY = 0x08
 
 
-def _list(flags: int = 0, *extra: Ace, protected: bool = True, owner: str = USER) -> Dacl:
+def _list(flags: int = 0, *extra: Ace, protected: bool = True, owner: str | None = USER) -> Dacl:
     return Dacl(
         (Ace(True, USER, FULL, flags), Ace(True, SYSTEM, FULL, flags), *extra),
         protected=protected,
@@ -52,7 +54,7 @@ def _list(flags: int = 0, *extra: Ace, protected: bool = True, owner: str = USER
 @pytest.mark.parametrize(
     ("dacl", "folder", "needed"),
     [
-        (None, False, True),  # no list: everyone
+        (Dacl(None, owner=USER), False, True),  # no list: everyone
         (_list(protected=False), False, True),  # inherited: the folder decides
         (_list(), False, False),  # protected, no one else
         (_list(0, Ace(True, USERS, FULL)), False, True),
@@ -61,33 +63,39 @@ def _list(flags: int = 0, *extra: Ace, protected: bool = True, owner: str = USER
         (_list(owner=OTHER), False, True),  # another account may rewrite it
         # Python 3.13+'s private mkdir: OWNER RIGHTS, this account owning it
         (_list(PASSED_ON, Ace(True, OWNER_RIGHTS, FULL, PASSED_ON)), True, False),
+        # A folder that passes another account's entry on to what is made in it
+        (_list(PASSED_ON, Ace(True, USERS, FULL, PASSED_ON | INHERIT_ONLY)), True, True),
     ],
 )
-def test_what_is_already_private_is_left_alone(
-    dacl: Dacl | None, folder: bool, needed: bool
-) -> None:
+def test_what_is_already_private_is_left_alone(dacl: Dacl, folder: bool, needed: bool) -> None:
     assert needs_private(dacl, USER, folder=folder) is needed
 
 
 class _Binding:
-    def __init__(self, current: Dacl | None | OSError) -> None:
-        self.current = current
+    """Windows' calls: one list per path (``lists``; a missing path is a
+    file that is not there). A list set is read back as set, unless the
+    drive keeps none (``holds=False``)."""
+
+    def __init__(self, lists: dict[str, Dacl | OSError], *, holds: bool = True) -> None:
+        self.lists = lists
+        self.holds = holds
         self.set: list[tuple[str, str, bool]] = []
-        self.owned: list[str] = []
 
     def current_user_sid(self) -> str:
         return USER
 
-    def read_dacl(self, path: str) -> Dacl | None:
-        if isinstance(self.current, OSError):
-            raise self.current
-        return self.current
+    def read_dacl(self, path: str) -> Dacl:
+        found = self.lists.get(Path(path).name, OSError(None, "it is not there", path, 2))
+        if isinstance(found, OSError):
+            raise found
+        return found
 
     def make_private(self, path: str, user: str, *, folder: bool) -> None:
-        self.set.append((path, user, folder))
-
-    def set_owner(self, path: str, user: str) -> None:
-        self.owned.append(user)
+        self.set.append((Path(path).name, user, folder))
+        if self.holds:
+            flags = PASSED_ON if folder else 0
+            owner = self.lists[Path(path).name].owner  # type: ignore[union-attr]
+            self.lists[Path(path).name] = _list(flags, owner=owner or USER)
 
 
 def _windows(monkeypatch: pytest.MonkeyPatch, binding: _Binding) -> None:
@@ -97,23 +105,93 @@ def _windows(monkeypatch: pytest.MonkeyPatch, binding: _Binding) -> None:
 
 
 @pytest.mark.parametrize(
-    ("current", "set_", "owned"),
+    ("current", "set_"),
     [
-        (_list(PASSED_ON), False, False),
-        (_list(protected=False), True, False),
-        # Another account owns it: it could rewrite the list, so it is taken.
-        (_list(PASSED_ON, owner=OTHER), True, True),
-        (OSError(None, "cannot read it"), True, True),  # owner unknown
+        (_list(PASSED_ON), False),
+        (_list(protected=False), True),
+        (_list(PASSED_ON, owner=ADMINISTRATORS), False),  # made by an elevated process
+        (_list(PASSED_ON, owner=SYSTEM), False),
     ],
 )
 def test_make_private_sets_the_list_only_when_needed(
-    current: Any, set_: bool, owned: bool, monkeypatch: pytest.MonkeyPatch
+    current: Dacl, set_: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    binding = _Binding(current)
+    binding = _Binding({"data": current})
     _windows(monkeypatch, binding)
     winacl.make_private(Path("C:/data"), folder=True)
-    assert binding.set == ([(str(Path("C:/data")), USER, True)] if set_ else [])
-    assert binding.owned == ([USER] if owned else [])
+    assert binding.set == ([("data", USER, True)] if set_ else [])
+
+
+@pytest.mark.parametrize(
+    ("current", "reason"),
+    [
+        # Another account owns it: an owner may always change who may open
+        # it, and a handle it opened before keeps its access. Taking it over
+        # would leave both; it is refused instead.
+        (_list(PASSED_ON, owner=OTHER), "another account owns it (PC\\eve)"),
+        (Dacl(None, owner=OTHER), "another account owns it (PC\\eve)"),
+        (_list(PASSED_ON, owner=None), "Windows names no owner for it"),
+        (Dacl(None, owner="S-1-1-0"), "Windows names Everyone as its owner"),
+        (OSError(None, "cannot read its access control list (Access is denied.)"), "cannot read"),
+    ],
+)
+def test_a_file_another_account_owns_is_refused_never_taken_over(
+    current: Any, reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if isinstance(current, Dacl) and current.owner == OTHER:
+        current = Dacl(current.aces, current.protected, OTHER, "PC\\eve")
+    binding = _Binding({"vault.db": current})
+    _windows(monkeypatch, binding)
+    with pytest.raises(OSError, match=re.escape(reason)):
+        winacl.make_private(Path("C:/data/vault.db"))
+    assert binding.set == []
+
+
+def test_a_list_that_does_not_hold_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Read back after it is set: a drive that keeps no lists (FAT32, exFAT)
+    # takes the call and stores nothing.
+    binding = _Binding({"vault.db": _list(protected=False)}, holds=False)
+    _windows(monkeypatch, binding)
+    with pytest.raises(OSError, match="its access control list did not hold"):
+        winacl.make_private(Path("D:/data/vault.db"))
+    assert binding.set == [("vault.db", USER, False)]
+
+
+def test_a_databases_wal_shm_and_journal_are_made_private_or_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "vault.db"
+    for name in ("vault.db-wal", "vault.db-shm"):
+        (tmp_path / name).write_bytes(b"")
+    binding = _Binding({"vault.db-wal": _list(protected=False), "vault.db-shm": _list(PASSED_ON)})
+    _windows(monkeypatch, binding)
+    winacl.make_sidecars_private(database)  # no -journal: nothing to do
+    assert binding.set == [("vault.db-wal", USER, False)]
+    # One another account put there is refused, never opened.
+    binding.lists["vault.db-shm"] = Dacl(_list().aces, True, OTHER, "PC\\eve")
+    with pytest.raises(OSError, match=re.escape("another account owns it (PC\\eve)")):
+        winacl.make_sidecars_private(database)
+
+
+def test_a_wal_that_goes_meanwhile_is_no_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Another process closing the database removes its -wal.
+    database = tmp_path / "vault.db"
+    binding = _Binding({"vault.db-wal": OSError(None, "it is not there", None, 2)})
+    _windows(monkeypatch, binding)
+    winacl.make_sidecars_private(database)
+    assert binding.set == []
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_posix_reads_no_sidecar_list(
+    tmp_path: Path, platform: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "vault.db-wal").write_bytes(b"")
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(winacl, "_windows", lambda: pytest.fail("asked Windows"))
+    winacl.make_sidecars_private(tmp_path / "vault.db")
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin"])
@@ -133,25 +211,56 @@ def test_a_faked_windows_platform_without_the_api_sets_no_list(
 
 
 @pytest.fixture
-def made(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
-    calls: list[tuple[str, bool]] = []
+def made(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool | str]]:
+    calls: list[tuple[str, bool | str]] = []
     monkeypatch.setattr(
         winacl, "make_private", lambda path, folder=False: calls.append((Path(path).name, folder))
+    )
+    monkeypatch.setattr(
+        winacl, "make_sidecars_private", lambda path: calls.append((Path(path).name, "sidecars"))
     )
     return calls
 
 
-def test_the_sqlite_vault_and_its_folder_are_made_private(
-    tmp_path: Path, made: list[tuple[str, bool]]
+def test_the_sqlite_vault_its_folder_and_sidecars_are_made_private(
+    tmp_path: Path, made: list[tuple[str, bool | str]]
 ) -> None:
     from llm_redact.vault import _open_connection
 
     _open_connection(tmp_path / "data" / "vault.db").close()
-    assert made == [("data", True), ("vault.db", False)]
+    # The sidecars before SQLite opens them, and again once it has: one put
+    # there meanwhile through a folder handle opened before is refused.
+    assert made == [
+        ("data", True),
+        ("vault.db", False),
+        ("vault.db", "sidecars"),
+        ("vault.db", "sidecars"),
+    ]
 
 
-def test_the_override_store_and_its_folder_are_made_private(
-    tmp_path: Path, made: list[tuple[str, bool]]
+def test_a_vault_that_cannot_be_kept_private_is_a_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # serve and serve --check print it; no traceback.
+    from llm_redact.config import ConfigError
+    from llm_redact.vault import _open_connection
+
+    def refused(path: Path, folder: bool = False) -> None:
+        if not folder:
+            raise OSError(None, "another account owns it (PC\\eve): ...", str(path))
+
+    monkeypatch.setattr(winacl, "make_private", refused)
+    vault = tmp_path / "data" / "vault.db"
+    with pytest.raises(ConfigError) as refusal:
+        _open_connection(vault)
+    assert str(refusal.value) == (
+        f"the vault {vault} cannot be kept private to this account: another account owns it"
+        " (PC\\eve): ..."
+    )
+
+
+def test_the_override_store_its_folder_and_sidecars_are_made_private(
+    tmp_path: Path, made: list[tuple[str, bool | str]]
 ) -> None:
     from llm_redact.overrides import OverrideStore
 
@@ -160,11 +269,16 @@ def test_the_override_store_and_its_folder_are_made_private(
         assert store._open(create=True) is not None
     finally:
         store.close()
-    assert made == [("data", True), ("overrides.db", False)]
+    assert made == [
+        ("data", True),
+        ("overrides.db", False),
+        ("overrides.db", "sidecars"),
+        ("overrides.db", "sidecars"),
+    ]
 
 
 def test_the_config_its_folder_and_backup_are_made_private(
-    tmp_path: Path, made: list[tuple[str, bool]]
+    tmp_path: Path, made: list[tuple[str, bool | str]]
 ) -> None:
     from llm_redact.config_write import write_config_atomic
 
@@ -176,7 +290,7 @@ def test_the_config_its_folder_and_backup_are_made_private(
     assert made == [("config.toml.bak", False), ("config.toml.tmp", False)]
 
 
-def test_a_vault_backup_is_made_private(tmp_path: Path, made: list[tuple[str, bool]]) -> None:
+def test_a_vault_backup_is_made_private(tmp_path: Path, made: list[tuple[str, bool | str]]) -> None:
     from llm_redact.cli import main
 
     db = tmp_path / "vault.db"
@@ -190,7 +304,7 @@ def test_a_vault_backup_is_made_private(tmp_path: Path, made: list[tuple[str, bo
 
 
 def test_the_log_file_and_a_folder_it_made_are_made_private(
-    tmp_path: Path, made: list[tuple[str, bool]]
+    tmp_path: Path, made: list[tuple[str, bool | str]]
 ) -> None:
     from llm_redact.log import LogFile
 
@@ -264,3 +378,24 @@ def test_the_config_and_the_log_file_are_private(tmp_path: Path) -> None:
         handler.close()
     _private(tmp_path / "logs", user, folder=True)
     _private(tmp_path / "logs" / "proxy.log", user)
+
+
+def test_a_backup_that_cannot_be_kept_private_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from llm_redact.cli import main
+
+    db = tmp_path / "vault.db"
+    sqlite3.connect(db).close()
+
+    def refused(path: Path, folder: bool = False) -> None:
+        raise OSError(None, "another account owns it (PC\\eve)", str(path))
+
+    monkeypatch.setattr(winacl, "make_private", refused)
+    dest = tmp_path / "snap.db"
+    with pytest.raises(SystemExit) as exit_:
+        main(["vault", "backup", str(dest), "--db", str(db)])
+    assert exit_.value.code == 2
+    assert f"cannot keep the backup {dest} private: another account owns it" in (
+        capsys.readouterr().out
+    )

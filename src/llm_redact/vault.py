@@ -472,17 +472,41 @@ def default_vault_path() -> Path:
     return paths.data_dir() / "vault.db"
 
 
+def _kept_private(path: Path, make: Callable[[], None]) -> None:
+    """``make()`` (a ``winacl`` call), its refusal a ConfigError naming the
+    vault: serve and serve --check print it rather than a traceback."""
+    try:
+        make()
+    except OSError as problem:
+        from llm_redact.config import ConfigError
+
+        raise ConfigError(
+            f"the vault {path} cannot be kept private to this account:"
+            f" {problem.strerror or problem}"
+        ) from None
+
+
 def _open_connection(path: Path, cipher: "VaultCipher | None" = None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
     # Windows' 0700: a protected list its -wal and -shm files inherit.
-    winacl.make_private(path.parent, folder=True)
+    _kept_private(path, lambda: winacl.make_private(path.parent, folder=True))
     # Pre-create with tight permissions before SQLite touches it.
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     os.close(fd)
-    winacl.make_private(path)
+    _kept_private(path, lambda: winacl.make_private(path))
+    # A -wal or -shm left by an earlier run keeps its own list: made private,
+    # or refused when another account put it there, before SQLite opens it.
+    _kept_private(path, lambda: winacl.make_sidecars_private(path))
     conn = sqlite3.connect(path, isolation_level=None)
-    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        # Again once SQLite has them: a file made meanwhile through a handle
+        # to the folder opened before its list changed would be another's.
+        _kept_private(path, lambda: winacl.make_sidecars_private(path))
+    except BaseException:
+        conn.close()
+        raise
     conn.execute("PRAGMA synchronous=FULL")
     # Wait on a briefly-held write lock instead of failing immediately — the
     # multi-process case (two proxies over one DB) contends on the WAL writer.

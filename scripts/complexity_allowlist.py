@@ -34,7 +34,6 @@ ALLOWED_UNCOVERED: dict[str, str] = {
     "llm_redact.winjob._Kernel32.create": _JOB_BINDING,
     "llm_redact.winjob._Kernel32.assign": _JOB_BINDING,
     "llm_redact.winacl._Windows.make_private": _ACL_BINDING,
-    "llm_redact.winacl._Windows.set_owner": _ACL_BINDING,
     "llm_redact.winacl._Windows.read_dacl": _ACL_BINDING,
     "llm_redact.winacl._Windows._sid_text": _ACL_BINDING,
     "llm_redact.winacl._Windows._account": _ACL_BINDING,

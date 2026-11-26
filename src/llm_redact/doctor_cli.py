@@ -182,8 +182,10 @@ def _check_paths(report: _Report, config: Config | None = None) -> None:
 
 def _check_windows_drive_stores(report: _Report, config: Config) -> None:
     """In WSL, a WARN for each store other than the vault (doctor's vault
-    check FAILs that one) and for the model folders on a Windows drive:
-    SQLite's locks do not hold there, and a model load reads slowly."""
+    check FAILs that one) and for the model folders on a Windows drive.
+    SQLite's locks do not hold there, and the file modes llm-redact sets
+    keep no Windows program or account out (the drive's own access control
+    list decides); a model load reads slowly there."""
     from llm_redact.audit import default_audit_path
     from llm_redact.overrides import default_overrides_path
     from llm_redact.platform_info import windows_drive_problem
@@ -191,23 +193,28 @@ def _check_windows_drive_stores(report: _Report, config: Config) -> None:
     def configured(path: str | None, default: Path) -> Path:
         return Path(path).expanduser() if path else default
 
-    places: list[tuple[str, Path]] = []
+    store = (
+        "where SQLite's locks do not hold, and the 0600 llm-redact sets keeps no Windows"
+        " program or account out (the Windows drive's own access control list decides);"
+        " keep it in the Linux file system"
+    )
+    places: list[tuple[str, Path, str]] = []
     if config.audit.enabled:
-        places.append(("the audit log", configured(config.audit.path, default_audit_path())))
+        places.append(("the audit log", configured(config.audit.path, default_audit_path()), store))
     if config.overrides.enabled:
-        places.append(
-            ("the override store", configured(config.overrides.path, default_overrides_path()))
+        overrides = configured(config.overrides.path, default_overrides_path())
+        places.append(("the override store", overrides, store))
+    places.append(
+        (
+            "the model folders",
+            paths.models_dir(),
+            "where loading a model reads slowly; keep them in the Linux file system",
         )
-    places.append(("the model folders", paths.models_dir()))
-    for what, path in places:
+    )
+    for what, path, why in places:
         problem = windows_drive_problem(path)
         if problem is not None:
-            report.line(
-                "WARN",
-                "paths",
-                f"{what}: {problem}, where SQLite's locks do not hold and reads are slow;"
-                " keep it in the Linux file system",
-            )
+            report.line("WARN", "paths", f"{what}: {problem}, {why}")
 
 
 def _check_loopback_names(report: _Report, config: Config) -> None:
@@ -271,8 +278,10 @@ def _check_private_windows(report: _Report, area: str, path: Path, want_dir_priv
     """On Windows the NTFS access control list is the real control (POSIX
     mode bits are synthetic: a regular file commonly reports 666): FAIL an
     entry that lets in anyone but this account, SYSTEM and Administrators
-    (``winacl.foreign_access``), for the file and, like the POSIX check, its
-    folder."""
+    (``winacl.foreign_access``), for the database, the ``-wal``, ``-shm``
+    and ``-journal`` files beside it (each keeps its own list once made)
+    and, like the POSIX check, its folder, with what the folder passes on to
+    files created in it."""
     from llm_redact import winacl
     from llm_redact.overrides import shell_quote
 
@@ -285,7 +294,11 @@ def _check_private_windows(report: _Report, area: str, path: Path, want_dir_priv
             f"{path}: cannot check its NTFS access control list ({problem.strerror or problem})",
         )
         return
-    for target in (path, path.parent) if want_dir_private else (path,):
+    sidecars = [path.with_name(path.name + suffix) for suffix in winacl.SQLITE_SIDECARS]
+    targets = [path, *(sidecar for sidecar in sidecars if sidecar.exists())]
+    if want_dir_private:
+        targets.append(path.parent)
+    for target in targets:
         try:
             dacl = winacl.read_dacl(target)
         except OSError as problem:
@@ -296,7 +309,14 @@ def _check_private_windows(report: _Report, area: str, path: Path, want_dir_priv
                 f" ({problem.strerror or problem})",
             )
             continue
-        others = winacl.foreign_access(dacl, user)
+        owned = winacl.ownership_problem(dacl, user)
+        if owned is not None:
+            report.line("FAIL", area, f"{target}: {owned}")
+        others = [
+            name
+            for name in winacl.foreign_access(dacl, user, folder=target == path.parent)
+            if not name.startswith("its owner, ")  # said above
+        ]
         if others:
             report.line(
                 "FAIL",
@@ -305,8 +325,8 @@ def _check_private_windows(report: _Report, area: str, path: Path, want_dir_priv
                 " those entries, so that only your account, SYSTEM and Administrators keep"
                 f" access (icacls {shell_quote(str(target))} lists them)",
             )
-        elif target == path:
-            protected = dacl is not None and dacl.protected
+        elif owned is None and target == path:
+            protected = dacl.protected
             how = "protected" if protected else "inherited from its folder"
             report.line(
                 "PASS", area, f"{path} is private to your account (NTFS access control list, {how})"

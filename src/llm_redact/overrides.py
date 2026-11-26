@@ -441,6 +441,9 @@ class OverrideStore:
         os.close(fd)
         os.chmod(self.path, 0o600)
         winacl.make_private(self.path)
+        # The -wal and -shm keep their own lists: checked before SQLite opens
+        # them and again once it has (winacl.make_sidecars_private).
+        winacl.make_sidecars_private(self.path)
         conn = sqlite3.connect(
             self.path,
             isolation_level=None,
@@ -450,6 +453,7 @@ class OverrideStore:
         try:
             conn.execute(f"PRAGMA busy_timeout={int(self._busy_timeout_ms)}")
             conn.execute("PRAGMA journal_mode=WAL")
+            winacl.make_sidecars_private(self.path)
             # NORMAL under WAL: a commit never waits for the disk (the proxy
             # writes here on its event loop). A power loss may drop the last
             # commits: a pending code, an approval or a one-time use — the

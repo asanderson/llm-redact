@@ -4,47 +4,63 @@ POSIX mode bits are synthetic on Windows (a regular file commonly reports
 666), so doctor reads a file's DACL instead: ``read_dacl`` (advapi32
 through ctypes) turns it into a small model, and ``foreign_access`` names
 every principal other than the current user, SYSTEM and Administrators that
-an allow entry lets read or change the file. The model and that decision are
-plain Python and run on every OS; only ``read_dacl``, ``current_user_sid``
-and the name lookup call Windows.
+the list lets read or change the file, or, for a folder, what is created in
+it. The model and those decisions are plain Python and run on every OS; only
+``read_dacl``, ``current_user_sid`` and the name lookup call Windows.
 
 ``make_private`` is the Windows twin of creating a file 0600 or a folder
 0700: a protected DACL that lets in only this account, SYSTEM and
 Administrators, inherited by everything created in a folder (a SQLite
-vault's ``-wal`` and ``-shm`` files included). It does nothing elsewhere,
-and nothing to a list already private (``needs_private``).
+vault's ``-wal`` and ``-shm`` files included; ``make_sidecars_private``
+checks the ones already there). It does nothing elsewhere, and nothing to a
+list already private (``needs_private``). It refuses a file another account
+owns (an owner may always change who may open it, and a handle opened before
+keeps the access it was opened with, so such a file is never taken over)
+and a list that does not hold once set (a drive that keeps none).
 
-An entry counts when it allows any of ``_ACCESS`` (reading or writing the
-data, changing the ACL or owner, deleting, or a generic right). Entries
-that apply only to what a folder's children inherit (INHERIT_ONLY) do not
-count for the folder itself, and deny entries are not subtracted: a
-principal both allowed and denied is still named, which can only make
-doctor stricter.
+An entry counts when it allows anything beyond reading the file's
+attributes and its list (``_HARMLESS``). An entry that applies only to what
+a folder passes on (INHERIT_ONLY) counts for the folder, whose new files get
+it, not for a file. Deny entries are not subtracted: a principal both
+allowed and denied is still named, which can only make doctor stricter. An
+allow entry of a kind this module does not read (an object or compound
+entry) is named by its type, never skipped.
 """
 
 from __future__ import annotations
 
 import ctypes
+import functools
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 SYSTEM = "S-1-5-18"
 ADMINISTRATORS = "S-1-5-32-544"
+EVERYONE = "S-1-1-0"
 # An entry for OWNER RIGHTS grants the file's owner (Python 3.13+ makes a
-# mkdir(mode=0o700) folder private with one); CREATOR OWNER and CREATOR
-# GROUP are placeholders for what a folder's children inherit, and match no
-# account.
+# mkdir(mode=0o700) folder private with one). CREATOR OWNER and CREATOR
+# GROUP stand for what a folder passes on: inherited, CREATOR OWNER becomes
+# the account that creates the file, CREATOR GROUP that account's primary
+# group (Domain Users, for a domain account); on the folder itself they
+# match no one.
 OWNER_RIGHTS = "S-1-3-4"
-_PLACEHOLDERS = frozenset({"S-1-3-0", "S-1-3-1"})
-# ACE types (winnt.h): the allow and deny entries files carry.
-_ALLOWED, _DENIED, _ALLOWED_CALLBACK = 0, 1, 9
+CREATOR_OWNER = "S-1-3-0"
+CREATOR_GROUP = "S-1-3-1"
+# ACE types (winnt.h) whose SID follows the mask, read in full, and whether
+# each allows: plain and callback entries.
+_SID_AFTER_MASK = {0: True, 1: False, 9: True, 10: False}
+# Deny entries laid out otherwise (object entries): never subtracted, so
+# not read.
+_OTHER_DENY_TYPES = frozenset({6, 12})
 _INHERITED_ACE, _INHERIT_ONLY_ACE = 0x10, 0x08
 _OBJECT_AND_CONTAINER_INHERIT = 0x01 | 0x02
-# FILE_READ_DATA, FILE_WRITE_DATA, FILE_APPEND_DATA, DELETE, WRITE_DAC,
-# WRITE_OWNER, GENERIC_ALL, GENERIC_WRITE, GENERIC_READ.
-_ACCESS = 0x1 | 0x2 | 0x4 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000 | 0x80000000
+# READ_CONTROL, SYNCHRONIZE, FILE_READ_ATTRIBUTES: nothing of the data,
+# nothing changed. Every other right counts (deleting a folder's files,
+# traversing it, extended attributes, the generic rights).
+_HARMLESS = 0x20000 | 0x100000 | 0x80
 
 
 @dataclass(frozen=True)
@@ -66,55 +82,107 @@ class Ace:
         return bool(self.flags & _INHERIT_ONLY_ACE)
 
     @property
+    def passed_on(self) -> bool:
+        """Whether a folder passes it on to the files or folders made in it."""
+        return bool(self.flags & _OBJECT_AND_CONTAINER_INHERIT)
+
+    @property
     def shown(self) -> str:
         return self.name or self.sid
 
 
 @dataclass(frozen=True)
 class Dacl:
-    """A discretionary ACL, and the file's owner (who may always rewrite
-    it). ``protected``: it does not inherit from the folder
-    (SE_DACL_PROTECTED)."""
+    """A discretionary ACL (``aces`` None: none at all, a NULL DACL, which
+    lets everyone in), and the file's owner (who may always rewrite it).
+    ``protected``: it does not inherit from the folder (SE_DACL_PROTECTED)."""
 
-    aces: tuple[Ace, ...]
+    aces: tuple[Ace, ...] | None
     protected: bool = False
     owner: str | None = None
     owner_name: str | None = None
 
 
 NO_DACL = "Everyone (it has no access control list)"
+_CREATOR_GROUP_SHOWN = "CREATOR GROUP (the primary group of an account creating a file there)"
 
 
-def foreign_access(dacl: Dacl | None, user_sid: str) -> list[str]:
+def entry_for(
+    ace_type: int, flags: int, mask: int, principal: Callable[[], tuple[str, str | None]]
+) -> Ace | None:
+    """The model of one entry of a list (``read_dacl``): a plain or callback
+    allow or deny entry read in full (``principal()``: its SID and account
+    name), None for a deny entry laid out otherwise (deny entries are never
+    subtracted), and any other kind (an object or compound allow entry) one
+    that lets in someone this module cannot name, by its type."""
+    allow = _SID_AFTER_MASK.get(ace_type)
+    if allow is not None:
+        sid, name = principal()
+        return Ace(allow, sid, mask, flags, name)
+    if ace_type in _OTHER_DENY_TYPES:
+        return None
+    return Ace(True, f"an access control entry of type {ace_type}", mask, flags)
+
+
+def foreign_access(dacl: Dacl, user_sid: str, *, folder: bool = False) -> list[str]:
     """Who besides ``user_sid``, SYSTEM and Administrators can read or
-    change the file, each once: its owner when that is another account (an
-    owner may always rewrite the list), then the principal of every allow
-    entry, in the list's order. An OWNER RIGHTS entry stands for the owner;
-    the CREATOR placeholders match no account. A missing DACL (a NULL DACL)
-    lets everyone in."""
-    if dacl is None:
-        return [NO_DACL]
+    change the file, or, for a ``folder``, what is created in it, each once:
+    its owner when that is another account (an owner may always rewrite the
+    list), then the principal of every allow entry, in the list's order. An
+    OWNER RIGHTS entry stands for the owner, a CREATOR OWNER one for the
+    account that creates a file; CREATOR GROUP counts where a folder passes
+    it on. No list at all (a NULL DACL) lets everyone in."""
     trusted = {user_sid, SYSTEM, ADMINISTRATORS}
     names: list[str] = []
     if dacl.owner is not None and dacl.owner not in trusted:
         names.append(f"its owner, {dacl.owner_name or dacl.owner}")
+    if dacl.aces is None:
+        return [*names, NO_DACL]
     for ace in dacl.aces:
-        if not ace.allow or ace.inherit_only or not ace.mask & _ACCESS:
+        here = not ace.inherit_only
+        inherited = folder and ace.passed_on
+        if not ace.allow or not ace.mask & ~_HARMLESS or not (here or inherited):
             continue
-        if ace.sid in trusted or ace.sid in _PLACEHOLDERS:
+        if ace.sid in trusted or ace.sid == CREATOR_OWNER:
             continue
-        if ace.sid == OWNER_RIGHTS and dacl.owner is not None:
-            continue  # the owner: named above when it is another account
-        if ace.shown not in names:
-            names.append(ace.shown)
+        if ace.sid == OWNER_RIGHTS and not (here and dacl.owner is None):
+            continue  # the owner (named above when another account), or a new file's
+        if ace.sid == CREATOR_GROUP and not inherited:
+            continue  # matches no one on the folder itself
+        shown = _CREATOR_GROUP_SHOWN if ace.sid == CREATOR_GROUP else ace.shown
+        if shown not in names:
+            names.append(shown)
     return names
 
 
-def needs_private(dacl: Dacl | None, user_sid: str, *, folder: bool) -> bool:
+def ownership_problem(dacl: Dacl, user_sid: str) -> str | None:
+    """Why ``make_private`` refuses a file, or None: it is this account's,
+    SYSTEM's or Administrators' (an elevated process gives what it creates
+    to the group). Another owner may always change who may open the file,
+    and a handle it opened before keeps its access whatever list is set, so
+    the file is never taken over."""
+    if dacl.owner in {user_sid, SYSTEM, ADMINISTRATORS}:
+        return None
+    if dacl.owner is None:
+        return "Windows names no owner for it, so it cannot be kept private"
+    if dacl.owner == EVERYONE:
+        return (
+            "Windows names Everyone as its owner, as on a drive that keeps no access"
+            " control lists (FAT32, exFAT): every account may open what is stored there;"
+            " choose a path on an NTFS drive"
+        )
+    return (
+        f"another account owns it ({dacl.owner_name or dacl.owner}): its owner may always"
+        " change who may open it, and a handle it opened keeps its access, so it is not"
+        " taken over; move it aside or choose another path"
+    )
+
+
+def needs_private(dacl: Dacl, user_sid: str, *, folder: bool) -> bool:
     """Whether ``make_private`` must set the list: anything but a protected
     list that lets no one else in (and, for a folder, passes every entry on
     to what is created in it)."""
-    if dacl is None or not dacl.protected or foreign_access(dacl, user_sid):
+    if dacl.aces is None or not dacl.protected or foreign_access(dacl, user_sid, folder=folder):
         return True
     passed_on = all(
         ace.flags & _OBJECT_AND_CONTAINER_INHERIT == _OBJECT_AND_CONTAINER_INHERIT
@@ -129,28 +197,60 @@ def make_private(path: Path, *, folder: bool = False) -> None:
     ``path`` (a protected DACL; for a folder, one everything created in it
     inherits). Nothing elsewhere, where the POSIX mode does it, nor where
     ctypes has no WinDLL (only a platform name faked in a test lacks it).
-    OSError when Windows refuses, so a store is never left open to
-    others."""
-    if sys.platform != "win32" or not hasattr(ctypes, "WinDLL"):
+    OSError, so a store is never left open to others, when the list cannot
+    be read, when another account owns the file (``ownership_problem``),
+    when Windows refuses the new list, and when it does not hold once set
+    (it is read back: a drive that keeps no lists takes the call and stores
+    nothing)."""
+    if not _on_windows():
         return
     binding = _windows()
     user = binding.current_user_sid()
-    try:
-        current = binding.read_dacl(str(path))
-    except OSError:
-        current = None
-    if needs_private(current, user, folder=folder):
-        binding.make_private(str(path), user, folder=folder)
-        if current is None or current.owner not in {user, SYSTEM, ADMINISTRATORS}:
-            # Another account owns it (or its owner is unknown): an owner
-            # may always rewrite the list, so it becomes this account's.
-            # The new list grants this account WRITE_OWNER to do so.
-            binding.set_owner(str(path), user)
+    current = binding.read_dacl(str(path))
+    refusal = ownership_problem(current, user)
+    if refusal is not None:
+        raise OSError(None, refusal, str(path))
+    if not needs_private(current, user, folder=folder):
+        return
+    binding.make_private(str(path), user, folder=folder)
+    if needs_private(binding.read_dacl(str(path)), user, folder=folder):
+        raise OSError(
+            None,
+            "its access control list did not hold (a drive that keeps none, such as"
+            " FAT32 or exFAT?): choose a path on an NTFS drive",
+            str(path),
+        )
 
 
-def read_dacl(path: Path) -> Dacl | None:
-    """``path``'s DACL (None: a NULL DACL). Windows only; OSError when it
-    cannot be read."""
+# The files SQLite keeps beside a database while it is open.
+SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
+
+
+def make_sidecars_private(database: Path) -> None:
+    """``make_private`` for each of the database's ``-wal``, ``-shm`` and
+    ``-journal`` files that is there: one left by an earlier run keeps its
+    own list (a folder's new list reaches only what inherits from it), and
+    one another account put there while the folder was open to it is
+    refused before SQLite opens it. One that goes meanwhile (another process
+    closing the database) is no refusal. Nothing but on Windows."""
+    if not _on_windows():
+        return
+    for suffix in SQLITE_SIDECARS:
+        sidecar = database.with_name(database.name + suffix)
+        try:
+            make_private(sidecar)
+        except OSError:
+            if sidecar.exists():
+                raise
+
+
+def _on_windows() -> bool:
+    return sys.platform == "win32" and hasattr(ctypes, "WinDLL")
+
+
+def read_dacl(path: Path) -> Dacl:
+    """``path``'s DACL and owner. Windows only; OSError when it cannot be
+    read."""
     if sys.platform != "win32":
         raise OSError("NTFS access control lists are read on Windows only")
     return _windows().read_dacl(str(path))
@@ -271,9 +371,6 @@ class _Windows:
             ctypes.c_void_p,
         ]
         self.set_named_security_info.restype = wintypes.DWORD
-        self.string_to_sid = advapi32.ConvertStringSidToSidW
-        self.string_to_sid.argtypes = [wintypes.LPCWSTR, pointer]
-        self.string_to_sid.restype = wintypes.BOOL
         self.local_free = kernel32.LocalFree
         self.local_free.argtypes = [ctypes.c_void_p]
         self.local_free.restype = ctypes.c_void_p
@@ -308,7 +405,7 @@ class _Windows:
         code = self.ctypes.get_last_error()
         return OSError(None, f"{what} failed ({self.ctypes.FormatError(code)})", None, code)
 
-    def read_dacl(self, path: str) -> Dacl | None:
+    def read_dacl(self, path: str) -> Dacl:
         ctypes = self.ctypes
         owner = ctypes.c_void_p()
         dacl = ctypes.c_void_p()
@@ -332,30 +429,28 @@ class _Windows:
             revision = self.wintypes.DWORD()
             if not self.get_control(descriptor, ctypes.byref(control), ctypes.byref(revision)):
                 raise self._failed("GetSecurityDescriptorControl")
-            if not dacl.value:
-                return None
-            acl = self.acl_type.from_address(dacl.value)
-            aces = []
-            for index in range(acl.count):
-                entry = ctypes.c_void_p()
-                if not self.get_ace(dacl, index, ctypes.byref(entry)) or not entry.value:
-                    raise self._failed("GetAce")
-                header = self.header_type.from_address(entry.value)
-                if header.type not in (_ALLOWED, _DENIED, _ALLOWED_CALLBACK):
-                    continue
-                body = self.ace_type.from_address(entry.value)
-                sid = ctypes.c_void_p(entry.value + self.ace_type.sid_start.offset)
-                aces.append(
-                    Ace(
-                        allow=header.type != _DENIED,
-                        sid=self._sid_text(sid),
-                        mask=int(body.mask),
-                        flags=int(header.flags),
-                        name=self._account(sid),
+            aces: list[Ace] | None = None
+            if dacl.value:
+                acl = self.acl_type.from_address(dacl.value)
+                aces = []
+                for index in range(acl.count):
+                    entry = ctypes.c_void_p()
+                    if not self.get_ace(dacl, index, ctypes.byref(entry)) or not entry.value:
+                        raise self._failed("GetAce")
+                    header = self.header_type.from_address(entry.value)
+                    # Every kind of entry has its mask right after its header.
+                    body = self.ace_type.from_address(entry.value)
+                    sid = ctypes.c_void_p(entry.value + self.ace_type.sid_start.offset)
+                    ace = entry_for(
+                        int(header.type),
+                        int(header.flags),
+                        int(body.mask),
+                        functools.partial(self._principal, sid),
                     )
-                )
+                    if ace is not None:
+                        aces.append(ace)
             return Dacl(
-                tuple(aces),
+                None if aces is None else tuple(aces),
                 protected=bool(control.value & 0x1000),  # SE_DACL_PROTECTED
                 owner=self._sid_text(owner) if owner.value else None,
                 owner_name=self._account(owner) if owner.value else None,
@@ -388,19 +483,8 @@ class _Windows:
         finally:
             self.local_free(descriptor)
 
-    def set_owner(self, path: str, user: str) -> None:
-        ctypes = self.ctypes
-        sid = ctypes.c_void_p()
-        if not self.string_to_sid(user, ctypes.byref(sid)):
-            raise self._failed("ConvertStringSidToSidW")
-        try:
-            # SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION
-            status = self.set_named_security_info(path, 1, 0x1, sid, None, None, None)
-            if status != 0:
-                message = ctypes.FormatError(status)
-                raise OSError(None, f"cannot take ownership of it ({message})", path, status)
-        finally:
-            self.local_free(sid)
+    def _principal(self, sid: object) -> tuple[str, str | None]:
+        return self._sid_text(sid), self._account(sid)
 
     def _sid_text(self, sid: object) -> str:
         ctypes = self.ctypes

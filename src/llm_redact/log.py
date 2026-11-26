@@ -68,10 +68,11 @@ class _FileTextFormatter(logging.Formatter):
 
 
 class LogFile(logging.handlers.RotatingFileHandler):
-    """A rotating log file, created private to its owner (0600; on Windows
-    the folder's inherited access applies), UTF-8 with LF line ends on every
-    platform, a character the file cannot hold escaped rather than the line
-    lost."""
+    """A rotating log file, created private to its owner (0600 in a 0700
+    folder it makes; on Windows a protected access control list,
+    ``winacl.make_private``, refusing a file another account owns), UTF-8
+    with LF line ends on every platform, a character the file cannot hold
+    escaped rather than the line lost."""
 
     def __init__(self, path: Path, *, delay: bool = False) -> None:
         super().__init__(

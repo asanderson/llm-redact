@@ -704,7 +704,11 @@ def run_vault_backup(args: argparse.Namespace) -> int:
         print(f"cannot write backup to {dest}: {type(exc).__name__}")
         return 2
     os.close(fd)
-    winacl.make_private(dest)  # Windows' 0600
+    try:
+        winacl.make_private(dest)  # Windows' 0600
+    except OSError as exc:
+        print(f"cannot keep the backup {dest} private: {exc.strerror or type(exc).__name__}")
+        return 2
     src = sqlite3.connect(paths.sqlite_readonly_uri(src_path), uri=True)
     dst = sqlite3.connect(dest)
     try:

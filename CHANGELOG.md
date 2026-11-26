@@ -89,6 +89,11 @@ and tags `vX.Y.Z`.
   from the old location, with the steps to move it: stop the proxy, move the files (each `.db`
   with its `-wal` and `-shm` files), start the proxy. A set `XDG_CONFIG_HOME` or `XDG_DATA_HOME`
   still wins on every platform. Linux, macOS and WSL are unchanged.
+- On Windows, `init` and `plugin install --proxy-url` print the environment lines in PowerShell
+  syntax (what Windows Terminal opens): `$env:NAME = '…'` for the session and
+  `[Environment]::SetEnvironmentVariable('NAME', '…', 'User')` to keep it for new terminals and
+  programs, the value single-quoted so PowerShell expands nothing in it. An `export` line pasted
+  into PowerShell was an error. Linux and macOS print the same `export` lines as before.
 - An `XDG_CONFIG_HOME` or `XDG_DATA_HOME` that is not an absolute path is now ignored, as the XDG
   Base Directory specification says (an empty one already was): a relative value named a folder
   under whatever the working directory was, so the vault moved with the directory a command ran

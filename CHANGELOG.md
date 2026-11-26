@@ -11,6 +11,19 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.13.1] - 2026-11-26
+
+A security release for Windows. Since 1.0.0 the default config search could load, and `init`
+could write, a config at the root of a drive that another local account can create; since
+1.10.0 `llm-redact override CODE` read its confirmation from a file at a drive's root, which
+approved a refusal without a person typing anything; a non-ASCII deny string never matched on a
+Western Windows install, so its value went upstream unredacted; and `fips-check` read the FIPS
+flag from a planted file. It also fixes text on Windows: the files llm-redact writes keep `\n`
+line ends (a `models pull --to` folder has the digests it has on Linux), and output sent to a
+pipe no longer fails on a character the code page lacks (`lookup` prints nothing rather than a
+value it cannot print exactly). Linux and macOS (WSL included) behave as before; a config file
+that is not UTF-8 now fails with an error naming the offset of its first invalid byte.
+
 ### Security
 - **On Windows, a config file at the root of a drive could be loaded, and `init` and the config
   editor could write the operator's config to it.** When neither `LLM_REDACT_CONFIG` nor a

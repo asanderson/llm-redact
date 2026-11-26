@@ -1,4 +1,4 @@
-"""`llm-redact completions bash|zsh`: shell completion scripts.
+"""`llm-redact completions bash|zsh|fish|powershell`: shell completion scripts.
 
 Hand-written templates (no runtime deps, nothing to install at import
 time); the COMMANDS table below is the single source of truth for the core
@@ -50,7 +50,7 @@ COMMANDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("--config", "--json", "--protocol", "--model", "--header", "--path", "--auth"),
     ),
     "spend": ((), ("--config", "--month", "--json")),
-    "completions": (("bash", "zsh", "fish"), ()),
+    "completions": (("bash", "zsh", "fish", "powershell"), ()),
     "fips-check": ((), ()),
 }
 
@@ -138,6 +138,41 @@ def fish_script() -> str:
     return "\n".join(lines) + "\n"
 
 
+def _powershell_words(words: tuple[str, ...]) -> str:
+    return "@(" + ", ".join(f"'{word}'" for word in words) + ")"
+
+
+def powershell_script() -> str:
+    """A native-command completer for PowerShell 7 and Windows PowerShell
+    5.1 (``Register-ArgumentCompleter -Native``): commands first, then the
+    chosen command's subcommands and options."""
+    commands = all_commands()
+    table = "\n".join(
+        f"        '{name}' = {_powershell_words((*subs, *opts))}"
+        for name, (subs, opts) in commands.items()
+    )
+    return f"""# PowerShell completion for llm-redact (PowerShell 7 and Windows PowerShell 5.1).
+# Load it in this session:
+#   llm-redact completions powershell | Out-String | Invoke-Expression
+# or add that line to your profile ($PROFILE) to load it in every session.
+Register-ArgumentCompleter -Native -CommandName 'llm-redact', 'llm-redact.exe' -ScriptBlock {{
+    param($wordToComplete, $commandAst, $cursorPosition)
+    $commands = @{{
+{table}
+    }}
+    $elements = @($commandAst.CommandElements | ForEach-Object {{ $_.ToString() }})
+    if ($elements.Count -le 1 -or ($elements.Count -eq 2 -and $wordToComplete -ne '')) {{
+        $words = @($commands.Keys) + '--version'
+    }} else {{
+        $words = $commands[$elements[1]]
+    }}
+    $words | Where-Object {{ $_ -like "$wordToComplete*" }} | Sort-Object | ForEach-Object {{
+        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    }}
+}}
+"""
+
+
 def script_for(shell: str) -> str:
     if shell == "bash":
         return bash_script()
@@ -145,4 +180,6 @@ def script_for(shell: str) -> str:
         return zsh_script()
     if shell == "fish":
         return fish_script()
+    if shell == "powershell":
+        return powershell_script()
     raise ValueError(f"unsupported shell {shell!r}")

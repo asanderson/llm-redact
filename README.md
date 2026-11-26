@@ -249,7 +249,8 @@ Then:
   (Claude Code can instead add this repo as a plugin marketplace:
   `/plugin marketplace add asanderson/llm-redact`); see
   [docs/plugins.md](https://github.com/asanderson/llm-redact/blob/main/docs/plugins.md).
-- `llm-redact completions bash|zsh|fish` — shell completions.
+- `llm-redact completions bash|zsh|fish|powershell` — shell completions (PowerShell:
+  `llm-redact completions powershell | Out-String | Invoke-Expression`, in your `$PROFILE`).
 
 ## Quickstart
 

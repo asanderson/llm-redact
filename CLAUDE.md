@@ -57,7 +57,7 @@ uv run llm-redact service install|uninstall|status [--print-only]  # launchd/sys
 uv run llm-redact plugin install|uninstall|status claude|codex|opencode|cursor [--print-only --force --proxy-url URL --install-proxy]  # agent slash-command plugins
 ./scripts/oracle_smoke.sh [docker|podman]      # opt-in Oracle RDBMS-vault battery (needs vault-oracle extra + a container engine)
 uv run python scripts/render_plugins.py       # re-render plugins/llm-redact + .claude-plugin/marketplace.json from plugin_assets.py (pinned by test)
-uv run llm-redact completions bash|zsh|fish    # shell completion scripts
+uv run llm-redact completions bash|zsh|fish|powershell    # shell completion scripts
 uv run llm-redact fips-check                   # host FIPS posture report
 scripts/render_diagrams.sh                     # re-render docs/diagrams/*.mmd -> committed PNGs + animated SVG/GIF for '%% animate' diagrams (needs node + uv; README embeds the PNGs, docs embed the SVGs)
 uv run python scripts/capture_plugin_screenshots.py       # re-render docs/screenshots/plugins/*.svg terminal shots (fixture traffic only)

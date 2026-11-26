@@ -127,6 +127,10 @@ and tags `vX.Y.Z`.
   stopped reading `/dev/tty`, a file at the drive's root there, and refused every approval).
   Without a console (a service, `pythonw.exe`, a process started detached) it refuses as it does
   without a terminal elsewhere.
+- **`llm-redact completions powershell`**: command and flag completion for PowerShell 7 and
+  Windows PowerShell 5.1, from the same command table as the bash, zsh and fish scripts. Load it
+  with `llm-redact completions powershell | Out-String | Invoke-Expression` (in your `$PROFILE`
+  for every session).
 - **`/status` says which platform answered** (`platform`: `windows`, `wsl`, `linux` or `macos`),
   where a native and a WSL proxy both run on one machine; `llm-redact status` prints it on its
   first line. In WSL, `doctor` names the distribution and the networking mode (`wslinfo

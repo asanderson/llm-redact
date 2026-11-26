@@ -719,7 +719,7 @@ def run_vault_gen_key(_args: argparse.Namespace) -> int:
     try:
         from llm_redact.vault_crypto import generate_key
     except ImportError:
-        print("gen-key requires the crypto extra: pip install 'llm-redact-proxy[crypto]'")
+        print('gen-key requires the crypto extra: pip install "llm-redact-proxy[crypto]"')
         return 2
     print(generate_key())
     return 0
@@ -738,12 +738,12 @@ def run_vault_set_key(_args: argparse.Namespace) -> int:
     try:
         import keyring
     except ImportError:
-        print("set-key requires the keyring extra: pip install 'llm-redact-proxy[keyring]'")
+        print('set-key requires the keyring extra: pip install "llm-redact-proxy[keyring]"')
         return 2
     try:
         from llm_redact.vault_crypto import KEYRING_ITEM, KEYRING_SERVICE, decode_master_key
     except ImportError:
-        print("set-key requires the crypto extra: pip install 'llm-redact-proxy[crypto]'")
+        print('set-key requires the crypto extra: pip install "llm-redact-proxy[crypto]"')
         return 2
     import getpass
 

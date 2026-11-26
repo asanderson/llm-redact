@@ -129,7 +129,7 @@ def run_init(args: argparse.Namespace) -> int:
             and interactive
             and _ask_yes_no(
                 "Encrypt the vault at rest? (needs `pip install"
-                " 'llm-redact-proxy[crypto]'` and LLM_REDACT_VAULT_KEY)",
+                ' "llm-redact-proxy[crypto]"` and LLM_REDACT_VAULT_KEY)',
                 False,
             )
             else "none"

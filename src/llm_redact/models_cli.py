@@ -756,4 +756,12 @@ def _print_snippet(
             "and remove these backends' [detection.ner.revisions] entries (a local folder takes"
             f" none: its llm-redact-model.json records the revision): {', '.join(pinned)}"
         )
-    print(f"check the folder where it is used with: llm-redact models verify --dir {where}")
+    from llm_redact.overrides import shell_quote, windows_quote_note
+
+    print(
+        "check the folder where it is used with:"
+        f" llm-redact models verify --dir {shell_quote(where)}"
+    )
+    note = windows_quote_note(where)
+    if note is not None:
+        print(f"(the folder's path: {note})")

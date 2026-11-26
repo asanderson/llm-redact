@@ -100,6 +100,14 @@ and tags `vX.Y.Z`.
   in.
 
 ### Fixed
+- Commands llm-redact prints for pasting work in cmd.exe and PowerShell too. The install hints
+  read `pip install 'llm-redact-proxy[crypto]'`, which in cmd.exe names a package called
+  `'llm-redact-proxy[crypto]'` quotes included; they now double-quote the extra, which every
+  shell reads. On Windows a printed path (the refusal override's `--config`, `models pull`'s
+  `verify --dir`) is double-quoted when it holds a blank or a character cmd.exe or PowerShell
+  would read (`&`, `(`, `)`, `;` …), not only a space, and a path holding `%`, `$` or a backtick,
+  which those shells read even inside double quotes, gets a note (for the override hint, a
+  WARNING at startup).
 - On Windows, `llm-redact run -- claude` did not find an npm-installed tool: npm installs a
   `claude.cmd` shim, and CreateProcess adds only `.exe` to a bare name. The lookup now uses
   PATHEXT's runnable extensions (`.exe` and `.com` before `.cmd` and `.bat` in one folder), and

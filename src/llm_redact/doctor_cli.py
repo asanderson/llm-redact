@@ -379,7 +379,7 @@ def _check_vault(report: _Report, config: Config) -> None:
                 "FAIL",
                 "vault",
                 'encryption = "fernet" but the crypto extra is not installed;'
-                " install it: pip install 'llm-redact-proxy[crypto]'",
+                ' install it: pip install "llm-redact-proxy[crypto]"',
             )
         if config.vault.kms is not None:
             _check_vault_kms(report, config)
@@ -661,7 +661,7 @@ def _check_extras(report: _Report, config: Config) -> None:
                 "FAIL",
                 "otel",
                 "enabled but the otel extra is not installed;"
-                " install it: pip install 'llm-redact-proxy[otel]'",
+                ' install it: pip install "llm-redact-proxy[otel]"',
             )
         else:
             report.line("PASS", "otel", "sdk importable")
@@ -671,7 +671,7 @@ def _check_extras(report: _Report, config: Config) -> None:
             "WARN",
             "realtime",
             "websockets not installed — WebSocket APIs (OpenAI Realtime, Gemini"
-            " Live) will be refused; install: pip install 'llm-redact-proxy[realtime]'",
+            ' Live) will be refused; install: pip install "llm-redact-proxy[realtime]"',
         )
     else:
         report.line("PASS", "realtime", "websockets importable (WS relay active)")

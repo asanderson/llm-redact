@@ -293,8 +293,8 @@ estimated 40 minutes for both slices on the reference CPU. It is report only —
 uploads its reports as the `ner-eval-<configuration>` artifact and writes
 them to the run's summary.
 
-**`ner-windows`** (`.github/workflows/ner-windows.yml`, weekly and by
-`workflow_dispatch`): native Windows, with torch from PyPI, whose Windows
+**`ner-windows`** (`.github/workflows/ner-windows.yml`, weekly, by
+`workflow_dispatch`, and on a pull request that changes it): native Windows, with torch from PyPI, whose Windows
 wheels are the CPU build. It pulls the `hf` and `gliner` default models at
 their catalog pins (`tests/airgap/pull.toml`) into the Hugging Face cache
 and as portable folders (`models pull --to`), verifies the folders

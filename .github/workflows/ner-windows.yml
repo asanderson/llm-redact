@@ -8,12 +8,16 @@ name: NER on Windows
 # `serve --check` and one `preview` (a detection call each), once from the
 # cache and once from the folders, with downloads off: path, memory-mapping,
 # file-lock and case problems that Linux never shows surface here. Run it by
-# hand with workflow_dispatch. tests/test_ner_ci.py pins its shape.
+# hand with workflow_dispatch; a pull request that changes this file runs it
+# too. tests/test_ner_ci.py pins its shape.
 
 on:
   schedule:
     - cron: "23 4 * * 3"
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/ner-windows.yml
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

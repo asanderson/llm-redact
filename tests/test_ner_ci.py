@@ -353,7 +353,10 @@ def test_the_weekly_windows_job_loads_the_default_models_from_cache_and_folders(
     # portable folders, the folders verified, and each source loaded through
     # serve --check and one preview with downloads off.
     workflow = _workflow("ner-windows.yml")
-    assert set(workflow[True]) == {"schedule", "workflow_dispatch"}
+    triggers = workflow[True]  # YAML 1.1 reads the key "on" as true
+    assert set(triggers) == {"schedule", "workflow_dispatch", "pull_request"}
+    # On a pull request only when the workflow itself changes.
+    assert triggers["pull_request"] == {"paths": [".github/workflows/ner-windows.yml"]}
     assert workflow["permissions"] == {"contents": "read"}
     job = workflow["jobs"]["ner-windows"]
     assert job["runs-on"] == "windows-latest"

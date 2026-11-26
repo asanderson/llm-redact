@@ -44,6 +44,11 @@ and tags `vX.Y.Z`.
   mode. The flag is read on Linux only; elsewhere the report says `not checked`. A test now fails
   on any new rooted path without a drive that reaches a file or process call in the source unless
   it is listed with the check that keeps Windows away from it.
+- **On Windows, `llm-redact run -- <tool>` ran a program of that name from the current directory
+  before PATH**: CreateProcess searches the working directory first, so a `claude.exe` in a
+  cloned repository ran instead of the installed tool, with the proxy's base URLs in its
+  environment. A bare name is now looked up on PATH only (relative PATH entries, which name the
+  current directory, are skipped).
 
 ### Added
 - **`[log] file` and `serve --log-file PATH`**: the log goes to a file instead of stderr, rotating
@@ -90,6 +95,15 @@ and tags `vX.Y.Z`.
   in.
 
 ### Fixed
+- On Windows, `llm-redact run -- claude` did not find an npm-installed tool: npm installs a
+  `claude.cmd` shim, and CreateProcess adds only `.exe` to a bare name. The lookup now uses
+  PATHEXT's runnable extensions (`.exe` and `.com` before `.cmd` and `.bat` in one folder), and
+  says so when a batch file's arguments hold a character cmd.exe reads again (`"` `%` `&` …). The
+  ephemeral proxy `run` starts gets a process group of its own, so the terminal's Ctrl+C reaches
+  the tool and not the proxy under it, and is stopped with CTRL_BREAK_EVENT instead of
+  TerminateProcess, so its shutdown drains (the vault closed) before it exits; a file Windows
+  cannot run is a clear exit 126 instead of a traceback. The proxy logs `llm-redact stopped` as
+  the last line of every shutdown.
 - `doctor` checked an encrypted vault's key through a `file:` URI built from the raw path. In a
   folder whose name holds `#`, the path was cut there (the rest, and `mode=ro`, read as a
   fragment): doctor created an empty database at the cut name and reported the vault as not

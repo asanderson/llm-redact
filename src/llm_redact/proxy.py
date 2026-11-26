@@ -9038,6 +9038,9 @@ def create_app(
                 # Last: everything is closed, nothing a SIGHUP's default
                 # action could cut short.
                 loop.remove_signal_handler(sighup)
+            # The shutdown ran to its end (the vault closed): what a
+            # supervisor's log (or `run`'s ephemeral proxy test) can check.
+            logger.info("llm-redact stopped")
 
     app = Starlette(
         routes=[

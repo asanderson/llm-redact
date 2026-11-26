@@ -6,6 +6,8 @@ must tear it down; the already-running path must leave the proxy alone.
 """
 
 import argparse
+import json
+import os
 import socket
 import subprocess
 import sys
@@ -281,3 +283,101 @@ def test_plugin_decorates_the_exported_base_url(
     assert "OPENAI=http://127.0.0.1:9/u/lrk_secret/v1" in out  # the identity prefix first
     assert "with a client identity" in err
     assert "lrk_secret" not in err
+
+
+# --- Windows: PATH-only lookup, shims, a graceful stop ----------------------------
+
+
+@pytest.fixture
+def windows_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+
+
+def _touch(folder: Path, *names: str) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (folder / name).write_text("", encoding="utf-8")
+    return folder
+
+
+def test_a_bare_name_resolves_on_path_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows_lookup: None
+) -> None:
+    from llm_redact.run_cli import resolve_program
+
+    work = _touch(tmp_path / "work", "claude.exe", "claude.cmd")
+    npm = _touch(tmp_path / "npm", "claude", "claude.cmd", "claude.ps1")
+    native = _touch(tmp_path / "native", "claude.exe")
+    monkeypatch.chdir(work)
+    # A relative entry (".", "") names the current directory: skipped, as is
+    # the current directory CreateProcess would search before PATH.
+    path = os.pathsep.join([".", "", str(npm), str(native)])
+    assert resolve_program("claude", path, ".COM;.EXE;.BAT;.CMD") == str(npm / "claude.cmd")
+    # In one folder an .exe goes before a .cmd shim.
+    _touch(npm, "claude.exe")
+    assert resolve_program("claude", path, ".COM;.EXE;.BAT;.CMD") == str(npm / "claude.exe")
+    # An extension a name already has is looked for as is.
+    assert resolve_program("claude.cmd", path, ".COM;.EXE;.BAT;.CMD") == str(npm / "claude.cmd")
+    # PATHEXT decides which extensions count; unset, the Windows default.
+    assert resolve_program("claude", os.pathsep.join(["", str(npm)]), ".CMD") == str(
+        npm / "claude.cmd"
+    )
+    assert resolve_program("claude", str(npm), None) == str(npm / "claude.exe")
+    assert resolve_program("missing", path, None) is None
+    # A name with a folder in it is used as given.
+    assert resolve_program(".\\claude", path, None) == ".\\claude"
+    assert resolve_program("C:claude", path, None) == "C:claude"
+
+
+def test_a_batch_file_with_arguments_cmd_reads_again_is_warned_about(
+    tmp_path: Path, windows_lookup: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from llm_redact.run_cli import _batch_warning
+
+    assert _batch_warning("C:\\npm\\claude.cmd", ["-p", "say hi"]) is None
+    assert _batch_warning("C:\\bin\\claude.exe", ["-p", 'say "hi" & bye']) is None
+    warning = _batch_warning("C:\\npm\\claude.cmd", ["-p", 'say "hi" & bye'])
+    assert warning is not None and "cmd.exe" in warning and "claude.cmd" in warning
+
+
+def _drain_config(tmp_path: Path) -> tuple[Path, Path]:
+    log_file = tmp_path / "proxy.log"
+    config = tmp_path / "config.toml"
+    config.write_text(f"[log]\nfile = {json.dumps(str(log_file))}\n", encoding="utf-8")
+    return config, log_file
+
+
+def test_the_ephemeral_proxy_drains_before_it_exits(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    # Its lifespan shutdown runs to its last line (the vault closed): on
+    # Windows a CTRL_BREAK_EVENT to its own process group, never a bare
+    # TerminateProcess; SIGTERM elsewhere.
+    config, log_file = _drain_config(tmp_path)
+    port = _free_port()
+    code = run_run(_args(port, config, "claude", ["--", sys.executable, "-c", CHILD_SNIPPET]))
+    assert code == 7
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+    assert any("serving on" in line for line in lines)
+    assert lines[-1].endswith("llm_redact: llm-redact stopped"), lines[-3:]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd shims and CreateProcess lookup")
+def test_run_runs_a_cmd_shim_from_path_never_one_in_the_current_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    from windows_fixtures import cmd_shim
+
+    bin_dir = cmd_shim(tmp_path / "bin", "fixture-tool", "from-path", exit_code=7)
+    work = cmd_shim(tmp_path / "work", "fixture-tool", "planted", exit_code=9)
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")]))
+    port = _free_port()
+    config = tmp_path / "config.toml"
+    config.write_text("", encoding="utf-8")
+    code = run_run(_args(port, config, "claude", ["--", "fixture-tool", "one arg"]))
+    out, _ = capfd.readouterr()
+    assert code == 7
+    assert "SHIM=from-path" in out and "planted" not in out
+    assert f"ANTH=http://127.0.0.1:{port}" in out
+    assert "ARGS=['one arg']" in out

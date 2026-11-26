@@ -116,12 +116,18 @@ jobs:
           python-version: ${{ matrix.python }}
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - run: uv sync --frozen
-      - run: uv run pytest
+      - if: matrix.arch == 'x64'
+        run: uv sync --frozen
+      # cryptography publishes no Windows ARM64 wheel, and its source build
+      # needs an OpenSSL the runner lacks; the suite importorskips it (the
+      # dev group's crypto note), so ARM64 runs without it.
+      - if: matrix.arch == 'arm64'
+        run: uv sync --frozen --no-install-package cryptography
+      - run: uv run --no-sync pytest
       # Weekly, as the Linux job runs them on every push: the
       # never-wrong-value-under-load checks on Windows' event loop.
       - if: github.event_name == 'schedule'
-        run: uv run pytest -m soak
+        run: uv run --no-sync pytest -m soak
 
   wheel-windows:
     # The installed wheel, not the source tree: what `uv tool install` puts

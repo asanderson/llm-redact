@@ -402,6 +402,22 @@ def test_write_dump_refuses_a_symlink_without_o_nofollow(
     assert target.read_text() == "old"
 
 
+def test_write_dump_writes_lf_line_ends_on_every_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The descriptor is opened in binary mode (the Windows CRT would write
+    # \r\n for every \n otherwise), and Windows, which has no mode bits
+    # (nor fchmod before Python 3.13), is never asked to set them.
+    target = tmp_path / "errors.jsonl"
+    bench_ner.write_dump(target, [{"kind": "miss"}, {"kind": "leak"}])
+    assert b"\r\n" not in target.read_bytes()
+    assert target.read_bytes().count(b"\n") == 2
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    bench_ner.write_dump(target, [{"kind": "miss"}])
+    assert target.read_bytes().count(b"\n") == 1
+
+
 # --- the command line, end to end through build_detectors ---------------------
 
 

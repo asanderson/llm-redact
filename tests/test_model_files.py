@@ -785,6 +785,52 @@ def test_a_folder_that_cannot_be_assembled_is_a_config_error(
         _gliner(monkeypatch, hub)
 
 
+class _Held(PermissionError):
+    winerror = 32  # ERROR_SHARING_VIOLATION: another program holds the file
+
+
+def _held_renames(monkeypatch: pytest.MonkeyPatch, times: int) -> list[str]:
+    """os.rename refusing the assembled folder ``times`` times, as Windows
+    does while a virus scanner holds a file just linked into it."""
+    import os
+    from types import SimpleNamespace
+
+    from llm_redact import held_files
+
+    monkeypatch.setattr(held_files, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(held_files, "DELAYS", (0.0, 0.0, 0.0))
+    real = os.rename
+    calls: list[str] = []
+
+    def rename(source: Any, target: Any) -> None:
+        if Path(source).name.startswith(".assembling-"):
+            calls.append(Path(target).name)
+            if len(calls) <= times:
+                raise _Held(13, "used by another process")
+        real(source, target)
+
+    monkeypatch.setattr(os, "rename", rename)
+    return calls
+
+
+def test_an_assembled_folder_waits_for_a_held_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _held_renames(monkeypatch, 2)
+    strict, _ = _gliner(monkeypatch, _two_repos())
+    assert len(calls) == 3  # tried again until it was released
+    ((folder, _),) = strict.loaded
+    assert Path(folder).name == calls[0]  # loaded from the folder it assembled
+
+
+def test_an_assembled_folder_held_too_long_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    _held_renames(monkeypatch, 100)
+    with pytest.raises(
+        ConfigError,
+        match=r"cannot assemble its local folder under .* \(_Held\); another program holds a"
+        r" file there",
+    ):
+        _gliner(monkeypatch, _two_repos())
+
+
 # --- GLiNER ONNX weights ([detection.ner.onnx]) -----------------------------------
 
 ONNX_REPO = {**SELF_CONTAINED, "onnx/model_quint8.onnx": "int8", "model.safetensors": ""}

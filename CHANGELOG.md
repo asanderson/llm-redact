@@ -159,6 +159,16 @@ and tags `vX.Y.Z`.
   TerminateProcess, so its shutdown drains (the vault closed) before it exits; a file Windows
   cannot run is a clear exit 126 instead of a traceback. The proxy logs `llm-redact stopped` as
   the last line of every shutdown.
+- On Windows, writing the config file (`init`, the config editor), `models pull --to` and an
+  assembled GLiNER folder failed with a PermissionError while another program held one of their
+  files for a moment, as a virus scanner, the search indexer or a sync client does right after a
+  file is written. Windows refuses to rename or delete a file another program has open; each such
+  step is now tried again for about two seconds, then reported with what to close (`init` prints
+  which file instead of a traceback). `models pull --to` renames a folder it replaces aside
+  before deleting it: a running proxy holds the model files it loaded, and deleting first left a
+  folder half gone (its sidecar too, so the next pull refused it as not its own). The folder now
+  stays whole, and the command says to stop the proxy and run it again. Linux and macOS retry
+  nothing.
 - `doctor` checked an encrypted vault's key through a `file:` URI built from the raw path. In a
   folder whose name holds `#`, the path was cut there (the rest, and `mode=ro`, read as a
   fragment): doctor created an empty database at the cut name and reported the vault as not

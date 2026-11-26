@@ -517,7 +517,16 @@ def run_pull(args: argparse.Namespace) -> int:
         print(f"FAIL  {problem}")
         return FAILED
     except OSError as exc:
-        print(f"FAIL  cannot write the model folders to {args.to} ({type(exc).__name__})")
+        from llm_redact.held_files import is_held
+
+        print(
+            f"FAIL  cannot write the model folders to {args.to} ({type(exc).__name__})"
+            + (
+                ": another program holds a file there; close it and run the command again"
+                if is_held(exc)
+                else ""
+            )
+        )
         return FAILED
     _print_snippet(ner, args, written)
     return OK
@@ -642,6 +651,7 @@ def write_portable(root: Path, pulled: list[Pulled]) -> list[tuple[str, str]]:
     ``models verify --dir`` fails until a pull completes)."""
     from llm_redact import __version__
     from llm_redact.detection.model_manifest import MANIFEST_NAME, manifest_json
+    from llm_redact.held_files import retried
     from llm_redact.jsonwalk import json_text
 
     root.mkdir(parents=True, exist_ok=True)
@@ -662,10 +672,10 @@ def write_portable(root: Path, pulled: list[Pulled]) -> list[tuple[str, str]]:
         manifest.write_text(
             json_text(manifest_json(models, __version__)) + "\n", encoding="utf-8", newline="\n"
         )
-        (root / MANIFEST_NAME).unlink(missing_ok=True)
+        retried(lambda: (root / MANIFEST_NAME).unlink(missing_ok=True))
         for temp, (name, _, _) in zip(staged, named, strict=True):
             _replace_folder(temp, root / name)
-        os.replace(manifest, root / MANIFEST_NAME)
+        retried(lambda: os.replace(manifest, root / MANIFEST_NAME))
     finally:
         for temp in staged:
             shutil.rmtree(temp, ignore_errors=True)
@@ -686,10 +696,27 @@ def _require_replaceable(final: Path) -> None:
 
 
 def _replace_folder(temp: Path, final: Path) -> None:
-    """Put the folder written at ``temp`` in the place of ``final``."""
+    """Put the folder written at ``temp`` in the place of ``final``. The old
+    folder is renamed aside before it is deleted: one Windows will not move
+    (a running proxy that loaded the model holds its files) stays whole, and
+    the command says to stop the proxy (``held_files``)."""
+    from llm_redact.held_files import is_held, retried
+
+    aside = final.with_name(f".{final.name}.old")
     if final.exists():
-        shutil.rmtree(final)
-    os.rename(temp, final)
+        shutil.rmtree(aside, ignore_errors=True)  # (left by a run that was killed)
+        try:
+            retried(lambda: os.rename(final, aside))
+        except OSError as error:
+            if is_held(error):
+                raise PullError(
+                    f"cannot replace {final}: a program holds its files. A running proxy that"
+                    " loaded this model holds them for as long as it runs, a virus scanner for"
+                    " a moment: stop the proxy and run the command again"
+                ) from error
+            raise
+    retried(lambda: os.rename(temp, final))
+    shutil.rmtree(aside, ignore_errors=True)
 
 
 def _stage_folder(temp: Path, name: str, model_id: str, item: Pulled) -> "ManifestModel":

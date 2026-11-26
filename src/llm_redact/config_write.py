@@ -13,6 +13,7 @@ Comments from a hand-edited file are NOT preserved; the editor keeps one
 .bak of the previous bytes.
 """
 
+import contextlib
 import json
 import os
 import re
@@ -44,6 +45,7 @@ from llm_redact.config import (
     VaultKmsConfig,
 )
 from llm_redact.detection.engine import DetectionConfig, LlmNerConfig
+from llm_redact.held_files import HeldFile, is_held, retried
 
 _BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
 
@@ -706,6 +708,9 @@ def write_config_atomic(path: Path, text: str) -> Path | None:
 
     Returns the backup path when a previous file existed, else None. The
     directory is created 0700 if missing (it may hold vault paths later).
+    On Windows a file another program holds open (an editor, a virus
+    scanner, a sync client) is replaced once it is released, within about
+    two seconds; past that ``HeldFile`` says which file to close.
     """
     if not path.parent.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -718,12 +723,31 @@ def write_config_atomic(path: Path, text: str) -> Path | None:
 
     tmp = path.with_name(path.name + ".tmp")
     _write_0600(tmp, text.encode("utf-8"), fsync=True)
-    os.replace(tmp, path)
+    try:
+        retried(lambda: os.replace(tmp, path))
+    except OSError as error:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        if is_held(error):
+            raise _held(path) from error
+        raise
     return backup
 
 
+def _held(path: Path) -> HeldFile:
+    return HeldFile(
+        f"another program holds {path} open (an editor, a virus scanner or a sync client):"
+        " close it and run the command again"
+    )
+
+
 def _write_0600(path: Path, data: bytes, *, fsync: bool = False) -> None:
-    path.unlink(missing_ok=True)
+    try:
+        retried(lambda: path.unlink(missing_ok=True))
+    except OSError as error:
+        if is_held(error):
+            raise _held(path) from error
+        raise
     # O_BINARY: without it the Windows CRT opens the fd in text mode and
     # rewrites the newlines we just emitted — the file must round-trip
     # byte-exact (POSIX has no such flag, hence the getattr).

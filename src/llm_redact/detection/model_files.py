@@ -46,6 +46,7 @@ from typing import Any
 from llm_redact import paths
 from llm_redact.config import ConfigError
 from llm_redact.detection.model_catalog import MODEL_ID_RE, CatalogEntry, ModelIdentity
+from llm_redact.held_files import is_held, retried
 
 # Tokenizer files, by the names transformers looks for: a fast tokenizer's
 # tokenizer.json, its configuration, and the vocabularies a slow tokenizer
@@ -830,12 +831,13 @@ def assemble_folder(model: str, files: Mapping[str, Path], config: Mapping[str, 
     temp: Path | None = None
     try:
         root.mkdir(parents=True, exist_ok=True)
-        temp = Path(tempfile.mkdtemp(prefix=".assembling-", dir=root))
+        built = temp = Path(tempfile.mkdtemp(prefix=".assembling-", dir=root))
         for name, source in files.items():
-            _link(source, temp / name)
-        (temp / GLINER_CONFIG).write_text(text, encoding="utf-8", newline="\n")
+            _link(source, built / name)
+        (built / GLINER_CONFIG).write_text(text, encoding="utf-8", newline="\n")
         try:
-            os.rename(temp, final)
+            # A virus scanner may hold a file just linked in for a moment.
+            retried(lambda: os.rename(built, final))
             temp = None
         except OSError:
             if not (final / GLINER_CONFIG).is_file():  # not a concurrent twin
@@ -844,6 +846,7 @@ def assemble_folder(model: str, files: Mapping[str, Path], config: Mapping[str, 
         raise _config_error(
             f"[detection.ner] gliner model {model!r}: cannot assemble its local folder"
             f" under {root} ({type(exc).__name__})"
+            + ("; another program holds a file there" if is_held(exc) else "")
         ) from exc
     finally:
         if temp is not None:

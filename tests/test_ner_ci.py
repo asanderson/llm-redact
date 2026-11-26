@@ -347,6 +347,38 @@ def test_the_weekly_eval_reports_both_datasets() -> None:
     assert [s["with"]["name"] for s in upload] == ["ner-eval-${{ matrix.config }}"]
 
 
+def test_the_weekly_windows_job_loads_the_default_models_from_cache_and_folders() -> None:
+    # Native Windows: PyPI's torch (the CPU build there), the default hf and
+    # GLiNER models pulled at their catalog pins into the cache and as
+    # portable folders, the folders verified, and each source loaded through
+    # serve --check and one preview with downloads off.
+    workflow = _workflow("ner-windows.yml")
+    assert set(workflow[True]) == {"schedule", "workflow_dispatch"}
+    assert workflow["permissions"] == {"contents": "read"}
+    job = workflow["jobs"]["ner-windows"]
+    assert job["runs-on"] == "windows-latest"
+    assert 0 < job["timeout-minutes"] <= 360
+    runs = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "uv sync --frozen --extra hf --extra gliner" in runs
+    assert "ner_ci_env.sh" not in runs  # the Linux recipe
+    assert "models pull --config tests/airgap/pull.toml --to $models" in runs
+    assert "models verify --dir $models" in runs
+    for source in ("tests/airgap/pull.toml", "$config"):
+        assert f"serve --check --config {source}" in runs
+        assert f"preview --config {source} --text" in runs
+    assert "allow_download" not in runs
+    # The folders it loads are the ones the pull writes for that config, as
+    # the air-gap job's config names them.
+    for backend, folder in (
+        ("hf", "hf-OpenMed--OpenMed-PII-SuperClinical-Small-44M-v1"),
+        ("gliner", "gliner-urchade--gliner_small-v2.1"),
+    ):
+        assert f"{backend} = '$models\\{folder}'" in runs, backend
+    airgap = (ROOT / "tests" / "airgap" / "config.toml").read_text(encoding="utf-8")
+    assert '"/models/hf-OpenMed--OpenMed-PII-SuperClinical-Small-44M-v1"' in airgap
+    assert '"/models/gliner-urchade--gliner_small-v2.1"' in airgap
+
+
 def test_the_weekly_eval_runs_every_bench_config_in_its_own_job() -> None:
     # A serial loop over every configuration ran past the job's timeout
     # once the bench grew past two; each job holds one configuration (two
@@ -443,7 +475,7 @@ def test_the_docs_scope_local_reproduction_to_what_the_script_runs_on() -> None:
     assert "Linux or Windows" not in paragraph
 
 
-@pytest.mark.parametrize("name", ["ci.yml", "ner-eval.yml"])
+@pytest.mark.parametrize("name", ["ci.yml", "ner-eval.yml", "ner-windows.yml"])
 def test_actions_are_pinned_and_checkouts_keep_no_credentials(name: str) -> None:
     for job in _workflow(name)["jobs"].values():
         for step in job["steps"]:

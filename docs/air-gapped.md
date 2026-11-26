@@ -149,6 +149,27 @@ directory: a model folder must be in place when the proxy starts …`
 what the loader misses. `doctor` reports under `models` that downloads are
 off and that each model loads from its folder.
 
+## Model folders on native Windows
+
+`models pull --to` and `models verify --dir` work the same in PowerShell
+(`llm-redact models pull --config pull.toml --to D:\models`). The lines
+it prints name the folders by their Windows paths; written as TOML literal
+strings (`hf = 'D:\models\hf-…'`) the backslashes need no escaping. Three
+things differ from Linux:
+
+- The Hugging Face cache `models pull` fills stores each revision's files
+  whole when Windows will not let it create symbolic links (without
+  Developer Mode or an administrator's rights), so a cache holding several
+  revisions of a model takes more disk.
+- Replacing a folder a running proxy loaded (`models pull --to` over it)
+  needs the proxy stopped: Windows keeps a loaded model's files open, and
+  the command says so and leaves the folder whole.
+- `scripts/ner_ci_env.sh` and `scripts/cpu_torch.py`, the CI's CPU-torch
+  recipe, are Linux tools. On Windows PyPI's torch wheels are already the
+  CPU build, so `pip install "llm-redact-proxy[hf,gliner]"` is the whole
+  install. A weekly CI job (`ner-windows`, [ner-bench.md](ner-bench.md#ci))
+  loads the default models there, from the cache and from the folders.
+
 ## Kubernetes (Helm)
 
 Put the model folders on a volume (for example a PersistentVolumeClaim you

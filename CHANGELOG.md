@@ -45,6 +45,16 @@ and tags `vX.Y.Z`.
   on any new rooted path without a drive that reaches a file or process call in the source unless
   it is listed with the check that keeps Windows away from it.
 
+### Added
+- Browser-extension design and decision record (`docs/browser-extension.md`, listed in the
+  docs index's engineering record): the planned extension's architecture (one Apache-2.0 WXT
+  extension whose chat-site and browser API traffic is redacted through opt-in "site gateway"
+  endpoints while the page sends the redacted request itself, so the proxy forwards no browser
+  traffic), its decisions — twelve accepted on 2026-10-02 and, on 2026-11-26, Windows support
+  both natively and through WSL 2, chosen by where the agents run — and the spike register.
+  Planning only: nothing is implemented, and every key, endpoint and command it names is a
+  proposal until it ships.
+
 ### Fixed
 - On Windows, the files llm-redact writes are no longer translated to `\r\n` line ends: a
   `models pull --to` folder (its manifest, the sidecars and an assembled `gliner_config.json`)

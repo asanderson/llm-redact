@@ -77,6 +77,17 @@ and tags `vX.Y.Z`.
   under `%LOCALAPPDATA%` were private already, by inheritance. Affected: every release on
   Windows with a store outside the user profile.
 
+- **On Windows, the document-extraction worker ran without limits**: POSIX caps the process
+  that parses an uploaded file (memory, CPU time, no child processes) with `setrlimit`, which
+  Windows lacks, so a crafted file could make the worker take all memory, run until the wall-clock
+  kill, start other programs, and outlive a proxy that was killed. Its PATH was Python's
+  default there, `.;C:\bin`: the current folder and a folder at the drive's root. The proxy now
+  puts the worker in a Job Object before a byte of the file reaches it (memory
+  `worker_memory_mb`, the same CPU time, one process, ended with the proxy), a worker that
+  cannot be put in one reads nothing, and its PATH is `%SYSTEMROOT%\System32` alone. The input
+  bound that stood in for the missing memory limit (a quarter of `worker_memory_mb`) now applies
+  on macOS only. Windows has no limit on the files a process writes, so that one stays
+  unlimited there. Affected: `[extraction]` (off by default) on Windows, since 1.10.0.
 ### Added
 - **`[log] file` and `serve --log-file PATH`**: the log goes to a file instead of stderr, rotating
   at 10 MiB and keeping 5 older files, created readable by its owner only (0600 in a 0700 folder

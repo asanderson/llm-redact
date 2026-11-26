@@ -23,7 +23,16 @@ _ACL_BINDING = (
     " the lists it sets)"
 )
 
+_JOB_BINDING = (
+    "the kernel32 Job Object binding that confines the extraction worker, called only"
+    " under sys.platform == 'win32' (this gate runs on Linux); the Windows CI legs run it"
+    " (tests/test_winjob.py confines real processes)"
+)
+
 ALLOWED_UNCOVERED: dict[str, str] = {
+    "llm_redact.winjob.Job.close": _JOB_BINDING,
+    "llm_redact.winjob._Kernel32.create": _JOB_BINDING,
+    "llm_redact.winjob._Kernel32.assign": _JOB_BINDING,
     "llm_redact.winacl._Windows.make_private": _ACL_BINDING,
     "llm_redact.winacl._Windows.read_dacl": _ACL_BINDING,
     "llm_redact.winacl._Windows._sid_text": _ACL_BINDING,

@@ -62,6 +62,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from llm_redact import winjob
 from llm_redact.config import (
     EXTRACTION_LOCAL_READERS,
     ConfigError,
@@ -90,10 +91,14 @@ def worker_env(
 ) -> dict[str, str]:
     """The worker's whole environment: no variable of the proxy's (its
     credentials stay out of the process that parses hostile files) but the
-    ones the platform needs to start Python."""
-    env = dict(_WORKER_ENV)
-    if platform == "win32":
-        env.update({name: environ[name] for name in _WINDOWS_ENV if name in environ})
+    ones the platform needs to start Python. On Windows its PATH is the
+    system folder alone: os.defpath there is ``.;C:\\bin``, the current
+    folder and a folder at the drive's root, where anyone may put a program."""
+    if platform != "win32":
+        return dict(_WORKER_ENV)
+    env = {name: environ[name] for name in _WINDOWS_ENV if name in environ}
+    if "SYSTEMROOT" in env:
+        env["PATH"] = env["SYSTEMROOT"].rstrip("\\") + "\\System32"
     return env
 
 
@@ -362,13 +367,14 @@ def media_type(data: bytes, coarse: str) -> str:
     return "application/octet-stream"
 
 
-# Whether the kernel enforces the worker's address-space limit
-# (``extract_worker.apply_limits``): macOS accepts RLIMIT_AS and ignores it,
-# and Windows has no resource limits at all.
+# Whether the worker's memory limit is enforced: by the kernel's
+# address-space limit (``extract_worker.apply_limits``) on Linux, by the Job
+# Object the proxy puts the worker in (``winjob.confine``) on Windows; macOS
+# accepts RLIMIT_AS and ignores it.
 # Where it is not enforced, the worker is never handed a file larger than a
 # quarter of ``worker_memory_mb`` — a parser's memory grows with its input,
 # so the input bound stands in for the limit the platform will not apply.
-MEMORY_LIMIT_ENFORCED = sys.platform not in ("darwin", "win32")
+MEMORY_LIMIT_ENFORCED = sys.platform != "darwin"
 
 
 def _local_class(coarse: str, formats: tuple[str, ...]) -> bool:
@@ -610,7 +616,19 @@ class ExtractionInspector:
         except OSError as exc:
             raise _Failed(f"start: {type(exc).__name__}") from None
         self.running += 1
+        job: winjob.Job | None = None
         try:
+            if winjob.available():
+                # Windows' rlimits, before the worker reads a byte of the
+                # file; a worker that cannot be confined reads nothing.
+                try:
+                    job = winjob.confine(
+                        proc.pid,
+                        memory_bytes=self.config.worker_memory_mb << 20,
+                        cpu_seconds=math.ceil(self.config.timeout_seconds) + 1,
+                    )
+                except OSError as exc:
+                    raise _Failed(f"confine: {type(exc).__name__}") from None
             output = await _exchange(proc, data, cap)
         finally:
             self.running -= 1
@@ -621,6 +639,8 @@ class ExtractionInspector:
                 # Reaped (and its pipes closed) even when the request is
                 # cancelled meanwhile: SIGKILL cannot be ignored.
                 await asyncio.shield(proc.wait())
+            if job is not None:
+                job.close()
         try:
             result = json.loads(output)
         except ValueError:

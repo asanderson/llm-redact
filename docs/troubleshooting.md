@@ -182,6 +182,17 @@ upload of short prompts can exceed it — raise `max_body_strings` (and
 usually `max_body_bytes`) in the config. A realtime connection whose
 client frame exceeds it is closed with code 1009.
 
+## "PATH: not UTF-8 text (an invalid byte at offset N); save it as UTF-8"
+
+`serve`, `serve --check`, `doctor`, a SIGHUP reload and every command that
+reads the config refuse a config file that is not UTF-8: it is read as UTF-8
+on every platform, whatever the system's code page, so a non-ASCII value (a
+deny string such as `Müller`) means the same everywhere. The offset is the
+first byte that is not UTF-8, counted from the start of the file. Editors on
+Windows may save "ANSI" (cp1252) text: save the file as UTF-8 instead (with
+or without a byte-order mark; one leading mark is allowed). Nothing of the
+file's content is printed.
+
 ## "config parses but does not BUILD: …"
 
 From `doctor`: the file is valid TOML but the detector build refuses it —
@@ -893,8 +904,9 @@ says the same. A model configured as a local folder is checked without it
 configuration file: the one `--config` names, else the one `LLM_REDACT_CONFIG`
 names or the default search finds (the per-user `config.toml`, then, on Linux
 and macOS, `/etc/llm-redact/config.toml`). It does not exist (`FileNotFoundError`), is
-a folder, may not be read, or holds bytes that are not text
-(`UnicodeDecodeError`); the message ends with the exception type. The command
+a folder or may not be read; the message ends with the exception type. A file
+that is not UTF-8 text is reported as such, with the offset of its first
+invalid byte (see "not UTF-8 text" above). The command
 exits 2 without looking at any model — exit 1 is kept for a model that is not
 complete. Check the path; `llm-redact config show --path` prints the file the
 default search finds.

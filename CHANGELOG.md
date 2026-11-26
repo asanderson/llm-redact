@@ -30,6 +30,15 @@ and tags `vX.Y.Z`.
   a person typing anything. On Windows the command now refuses to approve without opening
   anything; approving on the command line is not available there yet. Affected: 1.10.0 and later
   on Windows, with `[overrides] enabled = true` (off by default).
+- **On Windows, a non-ASCII value in the config file was read wrong, and a deny string holding
+  one never matched.** The config file was decoded with the system's code page (cp1252 on a
+  Western install without `PYTHONUTF8`): saved as UTF-8, as TOML requires, `deny = ["Müller"]`
+  loaded as `MÃ¼ller`, so `Müller` in a prompt went upstream unredacted; allowlist entries and
+  custom-rule patterns with non-ASCII characters were read wrong the same way. The file is now
+  read as UTF-8 on every platform, one leading byte-order mark allowed. A file that is not UTF-8
+  is refused, naming the offset of its first invalid byte: a config saved as Windows "ANSI" text
+  (which loaded before) must be saved as UTF-8. Linux and macOS with a UTF-8 locale were not
+  affected.
 - `llm-redact fips-check` read the Linux kernel's FIPS flag, `/proc/sys/crypto/fips_enabled`, on
   every platform: on Windows a file planted at a drive's root could make the report claim FIPS
   mode. The flag is read on Linux only; elsewhere the report says `not checked`. A test now fails

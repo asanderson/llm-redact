@@ -2692,6 +2692,9 @@ def resolve_credentials(routing: RoutingConfig, environ: Mapping[str, str]) -> N
         )
 
 
+_UTF8_BOM = b"\xef\xbb\xbf"
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load configuration.
 
@@ -2700,13 +2703,27 @@ def load_config(path: Path | None = None) -> Config:
     $XDG_CONFIG_HOME/llm-redact/config.toml, then (Linux and macOS only)
     /etc/llm-redact/config.toml, then built-in defaults
     (``config_search_candidates``).
+
+    The file is UTF-8 on every platform, whatever the locale (cp1252 on a
+    Western Windows install would load a non-ASCII deny string as mojibake
+    that never matches), with one leading byte-order mark allowed: bytes
+    that are not UTF-8 are a ConfigError naming the file and the offset.
     """
     if path is None:
         path = resolve_config_path()
         if path is None:
             return Config()
+    data = path.read_bytes()
+    body = data.removeprefix(_UTF8_BOM)
     try:
-        raw = tomllib.loads(path.read_text())
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        offset = len(data) - len(body) + exc.start
+        raise ConfigError(
+            f"{path}: not UTF-8 text (an invalid byte at offset {offset}); save it as UTF-8"
+        ) from None
+    try:
+        raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: {exc}") from exc
     return parse_config(raw, str(path))

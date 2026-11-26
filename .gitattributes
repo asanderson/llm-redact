@@ -1,0 +1,8 @@
+# Files a POSIX shell runs keep LF line ends in every checkout, whatever
+# core.autocrlf says (Git for Windows defaults it to true): a CRLF script
+# fails in bash ($'\r': command not found), in a container image built from
+# a Windows checkout and in WSL, and a CRLF Dockerfile breaks RUN lines
+# continued with a backslash. tests/test_line_endings.py checks both.
+*.sh text eol=lf
+plugins/llm-redact/bin/* text eol=lf
+Dockerfile text eol=lf

@@ -239,7 +239,9 @@ def test_a_tls_file_this_account_may_not_read_fails_although_os_access_passes(
     user = winacl.current_user_sid()
     key = tmp_path / "key.pem"
     key.write_text("-----BEGIN PRIVATE KEY-----\n", encoding="utf-8")
-    _icacls(str(key), "/deny", f"*{user}:R")
+    # Deny reading the data only: denying READ_CONTROL as well (icacls R)
+    # would keep this account from changing the list back.
+    _icacls(str(key), "/deny", f"*{user}:(RD)")
     try:
         assert os.access(key, os.R_OK)  # why doctor no longer asks it
         assert not doctor._readable(key)

@@ -304,11 +304,18 @@ def test_a_windows_process_without_a_console_approves_nothing(tmp_path: Path) ->
     db = tmp_path / "o.db"
     code = _pending(db)
     script = "import sys; from llm_redact.cli import main; main(sys.argv[1:])"
+    # The interpreter itself: a venv's python.exe is a launcher that starts
+    # the base interpreter as its child, and Windows gives a console program
+    # that a process without a console starts a console of its own.
+    python = getattr(sys, "_base_executable", sys.executable)
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(path for path in sys.path if path)}
     done = subprocess.run(
-        [sys.executable, "-c", script, "override", code, "--once", "--db", str(db)],
+        [python, "-c", script, "override", code, "--once", "--db", str(db)],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         timeout=120,
         check=False,
+        env=env,
         creationflags=subprocess.DETACHED_PROCESS,
     )
     assert done.returncode == 1

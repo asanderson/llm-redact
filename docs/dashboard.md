@@ -67,7 +67,10 @@ does not install that dashboard or add user isolation to the core proxy.
   history (types, counts, paths, durations — never values).
 - **Redaction preview / dry-run**: run `llm-redact preview --text "…"`
   (or pipe to stdin) to see what the current config *would* redact, warn
-  on, or block. It reads the config file and builds detectors of its own,
+  on, or block. Piped input is read as UTF-8, as the proxy reads request
+  bodies, whatever the console's code page (input that is not UTF-8 is read
+  in the input's own encoding, which it names on stderr). It reads the
+  config file and builds detectors of its own,
   in its own process, over a throwaway vault: no request is sent upstream,
   nothing reaches a running proxy (its vault, metrics or audit log), and
   the counters those detectors keep end with the command. Iterate on rules,

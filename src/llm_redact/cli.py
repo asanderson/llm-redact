@@ -1,4 +1,6 @@
 import argparse
+import codecs
+import contextlib
 import dataclasses
 import logging
 import os
@@ -408,7 +410,22 @@ def _run_serve_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _tolerant_output() -> None:
+    """Show what the output's encoding lacks as a backslash escape instead
+    of failing on it. On Windows without PYTHONUTF8, output sent to a pipe
+    or a file is encoded with the system's code page (cp1252 has no "→" or
+    "Ł"), and one such character ended the command with a
+    UnicodeEncodeError. ``lookup`` checks the values it prints itself: an
+    escaped secret is a wrong secret, so it prints nothing instead."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(ValueError):  # a closed stream
+                reconfigure(errors="backslashreplace")
+
+
 def main(argv: list[str] | None = None) -> None:
+    _tolerant_output()
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -604,13 +621,40 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(0)
 
 
+def _piped_text() -> str | None:
+    """``preview``'s piped input as text: UTF-8, as the proxy reads request
+    bodies (one leading byte-order mark allowed), whatever the console.
+    Input that is not UTF-8 is read in the input stream's own encoding (the
+    system's code page on Windows without PYTHONUTF8), said on stderr; when
+    that is UTF-8 too there is no other reading: None, after saying why."""
+    data = sys.stdin.buffer.read()
+    body = data.removeprefix(b"\xef\xbb\xbf")
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        offset = len(data) - len(body) + exc.start
+    encoding = sys.stdin.encoding or "utf-8"
+    if codecs.lookup(encoding).name != "utf-8":
+        try:
+            text = body.decode(encoding)
+        except UnicodeDecodeError:
+            pass
+        else:
+            print(f"preview: the input is not UTF-8; read it as {encoding}", file=sys.stderr)
+            return text
+    print(
+        f"preview: the input is not UTF-8 text (an invalid byte at offset {offset})",
+        file=sys.stderr,
+    )
+    return None
+
+
 def run_preview(args: argparse.Namespace) -> int:
     """Dry-run the detection pipeline over text, entirely locally (no proxy,
     no upstream, no vault write). Reads the config from disk, builds the live
     detectors/allowlist/modes, and reports what WOULD be redacted / warned /
     blocked. Text stays on the machine; a throwaway vault issues placeholders."""
     import json
-    import sys
 
     from llm_redact.config import load_config
     from llm_redact.detection.base import DetectorUnavailable
@@ -621,7 +665,9 @@ def run_preview(args: argparse.Namespace) -> int:
     from llm_redact.vault import InMemoryVault
 
     config = apply_env_overrides(load_config(args.config))
-    text = args.text if args.text is not None else sys.stdin.read()
+    text = args.text if args.text is not None else _piped_text()
+    if text is None:
+        return 2
     # A plugin's model-load policy refuses here as it would at startup
     # (a preview never loads a model serve would not).
     resolved = resolve_license(

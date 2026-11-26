@@ -54,6 +54,15 @@ and tags `vX.Y.Z`.
   the vault key command's output is read as UTF-8, and output that is not is no key (logged by
   type, as every other key-command failure). A test fails on any new text read or write in the
   source that leaves the encoding, or a write's line ends, to the platform.
+- On Windows without `PYTHONUTF8`, a command whose output went to a pipe or a file ended with
+  a `UnicodeEncodeError` on a character the system's code page lacks (`doctor`'s `→`, a value
+  `preview` echoed, the `⚠` of a `status` posture line): such a character now prints as a
+  backslash escape. `lookup`, which prints secret values, prints nothing and exits 2 instead,
+  naming `PYTHONUTF8=1`: an escaped value would be a wrong one. `preview` reads piped input as
+  UTF-8 (one byte-order mark allowed), as the proxy reads request bodies, so its verdict is the
+  proxy's on every console; it read UTF-8 input in the code page before, and could report
+  nothing detected for a value the proxy redacts. Input that is not UTF-8 is read in the input's
+  own encoding, which it names on stderr.
 
 ## [1.13.0] - 2026-11-10
 

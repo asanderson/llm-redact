@@ -16,6 +16,8 @@ import json
 import os
 import re
 import sqlite3
+import sys
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -272,22 +274,46 @@ def _rdbms_lookup(config: "Config", args: argparse.Namespace) -> int:
     try:
         if args.value is not None:
             value_rows = store.lookup_value(args.value, args.session)
-            for session_id, detector_type, placeholder in value_rows:
-                print(f"{session_id}\t{detector_type}\t{placeholder}")
             if not value_rows:
                 print("value not found")
                 return 1
-            return 0
+            return _print_rows(
+                f"{session_id}\t{detector_type}\t{placeholder}"
+                for session_id, detector_type, placeholder in value_rows
+            )
         canonical = canonicalize(args.token) or args.token  # accept pasted mangles
         token_rows = store.lookup_token(canonical, args.session)
-        for session_id, original in token_rows:
-            print(f"{session_id}\t{original}")
         if not token_rows:
             print(f"{canonical} not found")
             return 1
-        return 0
+        return _print_rows(f"{session_id}\t{original}" for session_id, original in token_rows)
     finally:
         store.close()
+
+
+LOOKUP_UNSHOWABLE = (
+    "llm-redact lookup: this output's encoding ({encoding}) cannot show a value as it is,"
+    " so nothing was printed (an altered value would be a wrong one); run it again with"
+    " PYTHONUTF8=1 set (or PYTHONIOENCODING=utf-8)"
+)
+
+
+def _print_rows(rows: Iterable[str]) -> int:
+    """Print every row of a lookup's answer, or none: when the output's
+    encoding cannot show one as it is (a legacy code page: cp1252 has no
+    "Ł"), an escaped or replaced character would print a wrong secret, so
+    nothing is printed and the exit code is 2."""
+    lines = list(rows)
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        for line in lines:
+            line.encode(encoding)
+    except UnicodeEncodeError:
+        print(LOOKUP_UNSHOWABLE.format(encoding=encoding), file=sys.stderr)
+        return 2
+    for line in lines:
+        print(line)
+    return 0
 
 
 def run_lookup(args: argparse.Namespace) -> int:
@@ -333,16 +359,16 @@ def _lookup_by_token(
     if not rows:
         print(f"{canonical} not found")
         return 1
-    for session_id, stored in rows:
-        original = stored if cipher is None else cipher.decrypt(stored)
-        print(f"{session_id}\t{original}")
-    return 0
+    return _print_rows(
+        f"{session_id}\t{stored if cipher is None else cipher.decrypt(stored)}"
+        for session_id, stored in rows
+    )
 
 
 def _lookup_by_value(
     conn: sqlite3.Connection, cipher: "VaultCipher | None", value: str, session: str | None
 ) -> int:
-    found = False
+    lines: list[str] = []
     if cipher is None:
         where = "original = ?"
         params: tuple[str, ...] = (value,)
@@ -352,8 +378,7 @@ def _lookup_by_value(
         for session_id, detector_type, placeholder in conn.execute(
             f"SELECT session_id, detector_type, placeholder FROM mappings WHERE {where}", params
         ):
-            print(f"{session_id}\t{detector_type}\t{placeholder}")
-            found = True
+            lines.append(f"{session_id}\t{detector_type}\t{placeholder}")
     else:
         # The MAC is (session, type)-domain-separated: compute it per pair.
         pair_sql = "SELECT DISTINCT session_id, detector_type FROM mappings"
@@ -369,12 +394,11 @@ def _lookup_by_value(
                 (session_id, detector_type, mac),
             ).fetchone()
             if row is not None:
-                print(f"{session_id}\t{detector_type}\t{row[0]}")
-                found = True
-    if not found:
+                lines.append(f"{session_id}\t{detector_type}\t{row[0]}")
+    if not lines:
         print("value not found")
         return 1
-    return 0
+    return _print_rows(lines)
 
 
 def run_vault_verify(args: argparse.Namespace) -> int:

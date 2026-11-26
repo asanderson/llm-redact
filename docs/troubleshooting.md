@@ -193,6 +193,16 @@ Windows may save "ANSI" (cp1252) text: save the file as UTF-8 instead (with
 or without a byte-order mark; one leading mark is allowed). Nothing of the
 file's content is printed.
 
+## "llm-redact lookup: this output's encoding (cp1252) cannot show a value as it is, so nothing was printed"
+
+`lookup` prints secret values, and the output it was sent to (a pipe or a
+file, on Windows without `PYTHONUTF8`) is encoded in a code page that lacks a
+character of one: printed with that character escaped or replaced, the value
+would be a wrong one, so the command prints nothing and exits 2. Run it again
+with `PYTHONUTF8=1` set (PowerShell: `$env:PYTHONUTF8 = "1"`; cmd.exe:
+`set PYTHONUTF8=1`), or `PYTHONIOENCODING=utf-8`. Every other command shows
+such a character as a backslash escape (`\u2192`) instead of failing.
+
 ## "config parses but does not BUILD: …"
 
 From `doctor`: the file is valid TOML but the detector build refuses it —

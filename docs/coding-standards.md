@@ -42,6 +42,17 @@ These four (`ruff check`, `ruff format --check`, `pytest`, `mypy`) plus
   are pinned to their specifications' own test vectors — correctness rests on
   the published vectors, never on self-consistency.
 - Target **Python 3.11+**, Linux and macOS. Windows is unsupported by design.
+- **Name the encoding of every text read and write** (UTF-8 unless the format
+  says otherwise) and the `newline` of every text write (`"\n"`), or work in
+  bytes: the default is the platform's code page and line ends (cp1252 and
+  `\r\n` on Windows), so the same code would read a different value or write
+  a different file there. `tests/test_text_encoding_guard.py` enforces it.
+- **No rooted path without a drive reaches a file or process call**
+  (`Path("/etc/…")`, `open("/dev/tty")`) unless a platform check keeps
+  Windows away from it: on Windows such a path names a file at the root of
+  the working directory's drive, which another local account can create.
+  `tests/test_rooted_paths_guard.py` lists each one with that check and its
+  test.
 
 ## Correctness invariants the code must uphold
 

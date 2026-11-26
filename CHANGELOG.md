@@ -75,6 +75,15 @@ and tags `vX.Y.Z`.
   proxy in this session listens on the port; on Linux and macOS it prints the `kill -HUP` form
   and exits 2.
 
+- **`llm-redact run` inside WSL shares the proxy's address with a Windows program**: one started
+  from WSL (an `.exe`, or a file on a Windows drive) sees only the variables `WSLENV` names, so
+  `run -- claude.exe` reached the provider directly. Each exported variable is now added to
+  `WSLENV` as `NAME/w` (shared with Windows programs only), entries already there kept; a Linux
+  program's environment is unchanged.
+- On Windows and in WSL, `doctor` WARNs when a provider's `upstream_base_url` or the llm backend's
+  model server is named `localhost` or `[::1]`: Windows resolves localhost to `::1` first, servers
+  running there (Ollama, LM Studio) listen on 127.0.0.1 only, and WSL's mirrored networking does
+  not carry `::1` across. It names the setting and the host only.
 - **`/status` says which platform answered** (`platform`: `windows`, `wsl`, `linux` or `macos`),
   where a native and a WSL proxy both run on one machine; `llm-redact status` prints it on its
   first line. In WSL, `doctor` names the distribution and the networking mode (`wslinfo

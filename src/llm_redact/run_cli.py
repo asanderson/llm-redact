@@ -19,17 +19,26 @@ The ephemeral proxy gets a process group of its own, so the terminal's
 Ctrl+C reaches the tool and not the proxy under it, and is stopped with
 CTRL_BREAK_EVENT, which uvicorn handles as SIGTERM: its shutdown drains
 before it exits (a kill follows only when it does not within the bound).
+
+WSL: a Windows program started from WSL (an ``.exe``, or a file on a
+Windows drive) sees only the variables ``WSLENV`` names, so each exported
+one is added there as ``NAME/w`` (shared with Win32 programs only); a
+Linux program's environment is unchanged.
 """
 
 import argparse
 import contextlib
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
+from pathlib import Path
 from types import FrameType
 
+from llm_redact import platform_info
 from llm_redact.config import apply_env_overrides, dial_url, load_config
 from llm_redact.init_cli import TOOL_EXPORTS, export_value
 
@@ -136,6 +145,28 @@ def _batch_warning(program: str, arguments: list[str]) -> str | None:
         f"llm-redact run: {os.path.basename(program)} is a batch file, so cmd.exe reads its"
         ' arguments again: a " % ! ^ & | < > ( ) in them may not reach the program as typed'
     )
+
+
+def wslenv_with(current: str | None, names: Iterable[str]) -> str:
+    """``WSLENV`` with each of ``names`` added as ``NAME/w`` — shared with a
+    Win32 program started from WSL, not with a Linux one: an entry already
+    there is kept as it is, empty entries are dropped."""
+    entries = [entry for entry in (current or "").split(":") if entry]
+    present = {entry.split("/", 1)[0] for entry in entries}
+    for name in names:
+        if name not in present:
+            entries.append(f"{name}/w")
+            present.add(name)
+    return ":".join(entries)
+
+
+def _runs_windows_program(program: str) -> bool:
+    """In WSL, whether ``program`` is a Windows one: an ``.exe``, or a file
+    on a Windows drive (WSL starts both as Win32 programs)."""
+    if program.lower().endswith(".exe"):
+        return True
+    mount = platform_info.mount_of(Path(program))
+    return mount is not None and mount.fstype in platform_info.WINDOWS_DRIVE_TYPES
 
 
 def _stop_ephemeral(proxy: subprocess.Popen[bytes]) -> None:
@@ -282,6 +313,11 @@ def run_run(args: argparse.Namespace) -> int:
             warning = _batch_warning(program, command[1:])
             if warning is not None:
                 print(warning, file=sys.stderr)
+        elif platform_info.is_wsl():
+            target = shutil.which(command[0], path=env.get("PATH"))
+            if target is not None and _runs_windows_program(target):
+                exported = [TOOL_EXPORTS[tool][0] for tool in tools]
+                env["WSLENV"] = wslenv_with(env.get("WSLENV"), [*exported, *extra_env])
         try:
             child = subprocess.Popen(command, env=env)
         except FileNotFoundError:

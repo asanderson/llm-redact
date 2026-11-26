@@ -210,6 +210,46 @@ def _check_windows_drive_stores(report: _Report, config: Config) -> None:
             )
 
 
+def _check_loopback_names(report: _Report, config: Config) -> None:
+    """On Windows and in WSL, a WARN for an upstream, or the llm backend's
+    model server, named by ``localhost`` or ``[::1]``: Windows resolves
+    localhost to ::1 first, the servers people run there (Ollama, LM Studio)
+    listen on 127.0.0.1 only, and WSL's mirrored networking does not carry
+    ::1 across. 127.0.0.1 reaches them. Only the setting and the host name
+    are printed, never the URL (it may carry a credential)."""
+    from llm_redact import platform_info
+    from llm_redact.config import llm_backend_runs
+
+    if sys.platform != "win32" and not platform_info.is_wsl():
+        return
+    named: list[tuple[str, str]] = []
+    for name, provider in sorted(config.providers.items()):
+        if not provider.enabled:
+            continue
+        section = (
+            f"providers.custom.{name.removeprefix('custom:')}"
+            if name.startswith("custom:")
+            else f"providers.{name}"
+        )
+        named.append((f"[{section}] upstream_base_url", provider.upstream_base_url))
+    if llm_backend_runs(config.detection.ner):
+        named.append(("[detection.ner.llm] url", config.detection.ner.llm.url))
+    for setting, url in named:
+        try:
+            host = urllib.parse.urlsplit(url).hostname
+        except ValueError:
+            continue
+        if host is None or (host.lower() != "localhost" and host != "::1"):
+            continue
+        report.line(
+            "WARN",
+            "network",
+            f"{setting} names {host}: Windows resolves localhost to ::1 first, servers"
+            " running there (Ollama, LM Studio) listen on 127.0.0.1 only, and WSL's mirrored"
+            " networking does not carry ::1 — name 127.0.0.1 instead",
+        )
+
+
 def _check_private(report: _Report, area: str, path: Path, want_dir_private: bool) -> None:
     if sys.platform == "win32":
         # POSIX mode bits are synthetic on Windows (regular files commonly
@@ -1587,6 +1627,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_models(report, config)
     _check_extraction(report, config)
     _check_upstream_auth(report, config)
+    _check_loopback_names(report, config)
     _check_allowed_hosts(report, config)
     _check_allowed_origins(report, config)
     _check_routing(report, config, bool(getattr(args, "offline", False)))

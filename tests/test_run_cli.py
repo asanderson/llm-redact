@@ -381,3 +381,77 @@ def test_run_runs_a_cmd_shim_from_path_never_one_in_the_current_directory(
     assert "SHIM=from-path" in out and "planted" not in out
     assert f"ANTH=http://127.0.0.1:{port}" in out
     assert "ARGS=['one arg']" in out
+
+
+# --- WSL: a Windows program started from WSL gets the variables through WSLENV -----
+
+
+def test_wslenv_lists_the_exported_names_for_a_windows_program() -> None:
+    from llm_redact.run_cli import wslenv_with
+
+    assert wslenv_with(None, ["ANTHROPIC_BASE_URL"]) == "ANTHROPIC_BASE_URL/w"
+    assert (
+        wslenv_with("USERPROFILE/p:GOPATH/l", ["ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"])
+        == "USERPROFILE/p:GOPATH/l:ANTHROPIC_BASE_URL/w:OPENAI_BASE_URL/w"
+    )
+    # An entry already there stays as it is; an empty one is not repeated.
+    assert wslenv_with("ANTHROPIC_BASE_URL/u::", ["ANTHROPIC_BASE_URL", "X"]) == (
+        "ANTHROPIC_BASE_URL/u:X/w"
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="WSL is Linux")
+@pytest.mark.parametrize(("name", "windows"), [("tool.exe", True), ("tool", False)])
+def test_run_in_wsl_passes_wslenv_to_a_windows_program_only(
+    name: str,
+    windows: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    import stat as stat_mod
+
+    import llm_redact.run_cli as run_cli_mod
+    from llm_redact import platform_info
+
+    program = tmp_path / "bin" / name
+    program.parent.mkdir()
+    program.write_text('#!/bin/sh\necho "WSLENV=$WSLENV"\n', encoding="utf-8")
+    program.chmod(program.stat().st_mode | stat_mod.S_IXUSR)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(program.parent), os.environ["PATH"]]))
+    monkeypatch.setenv("WSLENV", "USERPROFILE/p")
+    monkeypatch.setattr(platform_info, "is_wsl", lambda *a: True)
+    monkeypatch.setattr(run_cli_mod, "_proxy_running", lambda url, timeout=1.0: True)
+    args = _proxy_args(Path("unused.toml"), ["--", name], proxy_url="http://127.0.0.1:9")
+    args.tools = "claude,codex"
+    assert run_run(args) == 0
+    out, _ = capfd.readouterr()
+    if windows:
+        assert "WSLENV=USERPROFILE/p:ANTHROPIC_BASE_URL/w:OPENAI_BASE_URL/w" in out
+    else:
+        assert "WSLENV=USERPROFILE/p\n" in out
+
+
+@pytest.mark.skipif(os.name != "posix", reason="WSL is Linux")
+def test_a_program_on_a_windows_drive_counts_as_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_redact import platform_info
+    from llm_redact.run_cli import _runs_windows_program
+
+    root = Path(os.path.realpath(tmp_path))
+    drive = root / "mnt" / "c"
+    (drive / "tools").mkdir(parents=True)
+    tool = drive / "tools" / "claude"
+    tool.write_text("", encoding="utf-8")
+    table = root / "mountinfo"
+    table.write_text(
+        "24 1 8:32 / / rw - ext4 /dev/sdc rw\n"
+        f"50 24 0:47 / {drive} rw - 9p C:\\134 rw,aname=drvfs\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(platform_info, "MOUNTINFO", table)
+    assert _runs_windows_program(str(tool)) is True
+    assert _runs_windows_program(str(root / "tool")) is False
+    assert _runs_windows_program(str(root / "TOOL.EXE")) is True

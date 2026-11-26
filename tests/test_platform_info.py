@@ -277,3 +277,51 @@ async def test_status_says_which_platform_answered(
     del payload["platform"]
     assert run_status(args) == 0
     assert " on " not in capsys.readouterr().out.splitlines()[0]
+
+
+def _loopback_rows(config: Config) -> list[str]:
+    from llm_redact.doctor_cli import _check_loopback_names, _Report
+
+    report = _Report(json_mode=True)
+    _check_loopback_names(report, config)
+    assert all(row["level"] == "WARN" for row in report.rows)
+    return [row["message"] for row in report.rows]
+
+
+def _named(ollama: str, llm: str | None = None) -> Config:
+    import dataclasses
+
+    from llm_redact.config import DEFAULT_PROVIDERS, ProviderConfig
+    from llm_redact.detection.engine import DetectionConfig, LlmNerConfig, NerConfig
+
+    providers = dict(DEFAULT_PROVIDERS)
+    providers["ollama"] = ProviderConfig(upstream_base_url=ollama)
+    providers["custom:lmstudio"] = ProviderConfig(upstream_base_url="http://[::1]:1234/v1")
+    detection = DetectionConfig()
+    if llm is not None:
+        ner = NerConfig(enabled=True, backends=("llm",), llm=LlmNerConfig(url=llm, model="m"))
+        detection = dataclasses.replace(detection, ner=ner)
+    return Config(providers=providers, detection=detection)
+
+
+@pytest.mark.parametrize("where", ["windows", "wsl"])
+def test_doctor_warns_a_localhost_upstream_on_windows_and_in_wsl(
+    where: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32" if where == "windows" else "linux")
+    monkeypatch.setattr(platform_info, "is_wsl", lambda *a: where == "wsl")
+    messages = _loopback_rows(_named("http://localhost:11434", llm="http://localhost:11434"))
+    assert len(messages) == 3
+    lmstudio, ollama, llm = messages  # providers in name order, then the llm backend
+    assert ollama.startswith("[providers.ollama] upstream_base_url names localhost")
+    assert lmstudio.startswith("[providers.custom.lmstudio] upstream_base_url names ::1")
+    assert llm.startswith("[detection.ner.llm] url names localhost")
+    assert all("127.0.0.1" in message for message in messages)
+    assert _loopback_rows(_named("http://127.0.0.1:11434"))[:1] == [lmstudio]
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_no_loopback_warning_elsewhere(platform: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(platform_info, "is_wsl", lambda *a: False)
+    assert _loopback_rows(_named("http://localhost:11434", llm="http://localhost:11434")) == []

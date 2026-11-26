@@ -148,6 +148,10 @@ and tags `vX.Y.Z`.
   (`CREATE_NEW_CONSOLE`, `CREATE_NO_WINDOW`) reads that console, which no one may be watching and
   the program that started it can type into: approval guards against accidents, not against
   software running as you (docs/overrides.md).
+- **`llm-redact completions powershell`**: command and flag completion for PowerShell 7 and
+  Windows PowerShell 5.1, from the same command table as the bash, zsh and fish scripts. Load it
+  with `llm-redact completions powershell | Out-String | Invoke-Expression` (in your `$PROFILE`
+  for every session).
 - **`/status` says which platform answered** (`platform`: `windows`, `wsl`, `linux` or `macos`),
   where a native and a WSL proxy both run on one machine; `llm-redact status` prints it on its
   first line. In WSL, `doctor` names the distribution and the networking mode (`wslinfo

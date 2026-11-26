@@ -333,7 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
     spend.add_argument("--json", action="store_true", help="machine-readable output")
 
     completions = subparsers.add_parser("completions", help="print a shell completion script")
-    completions.add_argument("shell", choices=("bash", "zsh", "fish"))
+    completions.add_argument("shell", choices=("bash", "zsh", "fish", "powershell"))
 
     subparsers.add_parser(
         "fips-check",

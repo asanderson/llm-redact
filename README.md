@@ -433,7 +433,8 @@ essentials:
 
 - **Config reload without a restart**: edit the config file, then send
   SIGHUP — `kill -HUP $(pgrep -f 'llm-redact serve')`, or for containers
-  `docker kill --signal=HUP llm-redact`. Detection settings and upstream
+  `docker kill --signal=HUP llm-redact`; on Windows, which has no SIGHUP,
+  run `llm-redact reload`. Detection settings and upstream
   URLs apply as soon as the reload has built them — off the event loop,
   seconds when NER models load; `/__llm-redact/status` `config_reload`
   says when it applied or failed — vault, audit, host, port, allowed_hosts,

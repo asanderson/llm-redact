@@ -59,6 +59,17 @@ and tags `vX.Y.Z`.
   `%LOCALAPPDATA%\llm-redact\logs` on Windows) unless a file is named, from its first line, so a
   start that fails says why there.
 
+- **`llm-redact reload`: the SIGHUP reload on Windows**, which has no SIGHUP. The proxy waits on
+  an event named `Local\llm-redact-reload-<port>`; `llm-redact reload [--port N]` sets it, and the
+  proxy reloads exactly as on SIGHUP (the file read and a changed `[detection]` built off the
+  event loop, a bad file logged with the running configuration kept, `/status` `config_reload`
+  counting it, in-memory vault mappings kept). The event lives in the namespace of the Windows
+  session the proxy runs in, so another session cannot open it, and only the account that
+  started the proxy (with SYSTEM and administrators) may set it. A name another program created
+  first is never used: the proxy logs a WARNING and runs without it. The command exits 1 when no
+  proxy in this session listens on the port; on Linux and macOS it prints the `kill -HUP` form
+  and exits 2.
+
 ### Changed
 - **On Windows, llm-redact's per-user files now go under `%LOCALAPPDATA%\llm-redact`**, which
   stays on the machine (the config holds deny strings, so it should not roam with the profile):

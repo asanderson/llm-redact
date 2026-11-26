@@ -58,7 +58,7 @@ from starlette.requests import HTTPConnection, Request
 from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
 
-from llm_redact import __version__
+from llm_redact import __version__, winreload
 from llm_redact.audit import (
     AuditLog,
     AuditRecord,
@@ -8937,8 +8937,13 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
         loop = asyncio.get_running_loop()
-        # The signal a reload handler was registered for; Windows has none.
+        # The signal a reload handler was registered for; Windows has none:
+        # there `llm-redact reload` sets a named event a thread waits on
+        # (winreload), which asks the same scheduler from that thread.
         sighup: int | None = None
+        reload_listener = winreload.start_listener(
+            state.config.port, lambda: loop.call_soon_threadsafe(state.reloads.request)
+        )
         if sys.platform != "win32":
             try:
                 # The reload runs as a task (state.reloads): the file read
@@ -8989,6 +8994,8 @@ def create_app(
             # SIGHUP then (a terminal closing) would end the process in the
             # middle of the sinks' final flush or the database closes.
             await state.reloads.close()
+            if reload_listener is not None:
+                reload_listener.stop()
             await state.connections.stop()
             for task in background_tasks:
                 task.cancel()

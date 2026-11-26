@@ -314,11 +314,21 @@ own restarts and log retention:
   Review it with `service install --print-only`; heavy NER extras (torch) may
   need the syscall filter loosened.
 - **containers**: cap the log driver (`--log-opt max-size=10m --log-opt
-  max-file=3`), since the proxy does not rotate its own logs.
+  max-file=3`), since the proxy does not rotate what it writes to stderr
+  (`[log] file` writes a file it rotates itself).
 
 Config changes apply on **SIGHUP** without dropping in-flight requests
 (`kill -HUP $(pgrep -f 'llm-redact serve')`, or `docker kill
---signal=HUP`). A request keeps the configuration it was admitted under:
+--signal=HUP`). Windows has no SIGHUP: there `llm-redact reload [--port N]`
+asks the proxy on that port (the config's, by default) for the same reload.
+It sets an event named `Local\llm-redact-reload-<port>` that the proxy waits
+on, in the namespace of the Windows session the proxy runs in: a process in
+another session (another user signed in at the same time, a remote desktop)
+cannot open it, and only the account that started the proxy (with SYSTEM and
+administrators) may set it. It exits 1 when no proxy in this session listens
+on the port. A proxy that finds the name already taken by another program
+logs a WARNING and runs without it; a restart then applies a new
+configuration. A request keeps the configuration it was admitted under:
 its provider's upstream and authorization mode (`auth`, the authorizer
 it holds) are read once, before its body, so a reload that lands while a
 body is still arriving never signs a pass-through request with the

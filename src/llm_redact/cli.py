@@ -58,6 +58,13 @@ def build_parser() -> argparse.ArgumentParser:
         " verify, bind policy) and exit without binding — the deploy/reload gate",
     )
 
+    reload = subparsers.add_parser(
+        "reload",
+        help="ask a running proxy to reload its config file (Windows; elsewhere SIGHUP)",
+    )
+    reload.add_argument("--config", type=Path, default=None, help="path to config.toml")
+    reload.add_argument("--port", type=int, default=None, help="the proxy's port")
+
     status = subparsers.add_parser("status", help="query a running proxy's status endpoint")
     status.add_argument("--config", type=Path, default=None, help="path to config.toml")
     status.add_argument("--port", type=int, default=None, help="override proxy port")
@@ -559,6 +566,10 @@ def main(argv: list[str] | None = None) -> None:
         if sys.stderr is None:
             raise SystemExit(_serve_without_console(args))
         _run_serve(args)
+    elif args.command == "reload":
+        from llm_redact.winreload import run_reload
+
+        raise SystemExit(run_reload(args))
     elif args.command == "status":
         raise SystemExit(run_status(args))
     elif args.command == "sessions":

@@ -84,6 +84,20 @@ and tags `vX.Y.Z`.
   (`CREATE_NEW_CONSOLE`, `CREATE_NO_WINDOW`) reads that console, which no one may be watching and
   the program that started it can type into: approval guards against accidents, not against
   software running as you (docs/overrides.md).
+- **`llm-redact completions powershell`**: command and flag completion for PowerShell 7 and
+  Windows PowerShell 5.1, from the same command table as the bash, zsh and fish scripts. Load it
+  with `llm-redact completions powershell | Out-String | Invoke-Expression` (in your `$PROFILE`
+  for every session).
+- **A Windows wheelhouse with every release**, for machines without internet:
+  `llm-redact-X.Y.Z-wheelhouse-win_amd64.zip` on the GitHub Release holds the release's wheel and
+  every locked wheel of the base install and the crypto, keyring, realtime and extract extras for
+  x64 Windows and Python 3.11 to 3.14, with the hash-pinned `requirements.txt` the install reads
+  and `SHA256SUMS`, under a build provenance attestation. The release builds it on Windows and
+  runs the documented install with no index for each of those Pythons (`pip check`,
+  `serve --check`, `doctor`) before attaching it; `scripts/build_wheelhouse.py` builds one with
+  other extras (the NER ones, which the release's leaves out). docs/air-gapped.md gives the
+  install, the PowerShell `SHA256SUMS` check, and the WSL path: WSL's own package and an approved
+  root filesystem brought in with `wsl --import`, then the Linux offline install.
 
 ### Changed
 - **On Windows, `doctor` checks who the stores' NTFS access control lists let in**: the vault
@@ -115,6 +129,30 @@ and tags `vX.Y.Z`.
 - `doctor` passed a TLS certificate, key or client CA that serve cannot open on Windows: it asked
   `os.access`, which reads only the read-only attribute there, never the access control list.
   It now opens the file, on every platform.
+- On Windows, `llm-redact plugin install` wrote each agent tool's commands under `HOME`, which Git
+  Bash and MSYS set to a POSIX path (`/c/Users/me`) that Windows reads as a folder at the root of
+  the current drive, where the tools never look. They now go under the user profile
+  (`%USERPROFILE%\.claude\commands` and so on); a tool's own variable (`CLAUDE_CONFIG_DIR`,
+  `CODEX_HOME`, `XDG_CONFIG_HOME`) still wins. The `config-edit` command reloads with
+  `llm-redact reload` on Windows, which has no SIGHUP, and the plugin install e2e runs on a
+  Windows CI leg too.
+- On Windows, `pip install "llm-redact-proxy[perf]"` (or `uv tool install` with it) failed: uvloop
+  ships no Windows wheel and refuses to build there. The extra now leaves Windows out, where
+  uvicorn runs asyncio's own loop, so `[perf]` installs and changes nothing. A test walks
+  `uv.lock` and fails when an extra would need a package built from source on x64 Windows (on
+  ARM64, best effort, when a package joins the ones known to ship no wheel there: cryptography,
+  psycopg-binary, pyarrow, pyyaml and torch), and the Windows CI leg installs the wheel with
+  `[perf,crypto,keyring,realtime,extract]` from PyPI. The package names the operating systems CI
+  runs in its classifiers.
+- Model folders carried between Windows and WSL: a `models pull --to` manifest or a sidecar
+  saved with a UTF-8 byte-order mark (as editors on Windows may save JSON) is read, and one saved
+  as UTF-16 (what Windows PowerShell 5.1 writes with `>` and `Out-File`) is refused naming UTF-16
+  instead of "not a UTF-8 JSON document". `models verify --dir` notes and skips the files Windows
+  adds that no loader reads (Explorer's `desktop.ini`, and the `NAME:Zone.Identifier` files a
+  folder copied into WSL carries); any other unlisted file still fails. A model folder written
+  as the other side names it (a drive letter or UNC path inside WSL, `/mnt/c/...` on native
+  Windows) gets a hint naming `wslpath` and `models pull --as`. The NER bench's `--dump-errors`
+  file is private on Windows too.
 
 ## [1.13.1] - 2026-11-26
 

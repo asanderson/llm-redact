@@ -70,11 +70,14 @@ llm-redact-pro dashboard's config editor:
    before applying it.
 3. Validate BEFORE applying: `llm-redact serve --check` must exit 0.
    If it fails, fix the file or revert it — never leave the config
-   failing --check, because a SIGHUP would silently keep the old config
+   failing --check, because a reload would silently keep the old config
    and serve would refuse to start.
-4. Hot-apply: find the proxy (`pgrep -f "llm-redact serve"`), note
-   `config_reload.requested_total` in `llm-redact status --json`, and
-   send `kill -HUP <pid>`. The proxy builds the new configuration off
+4. Hot-apply: note `config_reload.requested_total` in
+   `llm-redact status --json`, then ask the proxy to reload. On
+   Windows, which has no SIGHUP, run `llm-redact reload` (add
+   `--port N` when the proxy listens on another port than the
+   config's); elsewhere find the proxy (`pgrep -f "llm-redact serve"`)
+   and send `kill -HUP <pid>`. The proxy builds the new configuration off
    its event loop (seconds when NER models load), and until it applies,
    status still describes the configuration BEFORE the change: run
    `llm-redact status --json` again until `config_reload.requested_total`

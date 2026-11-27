@@ -1,0 +1,87 @@
+name: NER on Windows
+
+# Weekly: the default hf model and the default GLiNER model on native Windows
+# (tests/airgap/pull.toml names them), with torch from PyPI, whose Windows
+# wheels are the CPU build. The models are pulled at their catalog pins into
+# the Hugging Face cache and as portable folders (`models pull --to`), the
+# folders are verified (`models verify --dir`), and both are loaded through
+# `serve --check` and one `preview` (a detection call each), once from the
+# cache and once from the folders, with downloads off: path, memory-mapping,
+# file-lock and case problems that Linux never shows surface here. Run it by
+# hand with workflow_dispatch; a pull request that changes this file runs it
+# too. tests/test_ner_ci.py pins its shape.
+
+on:
+  schedule:
+    - cron: "23 4 * * 3"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/ner-windows.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ner-windows:
+    name: NER models on Windows (hf + GLiNER defaults, cache and folders)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      # The locked extras; torch comes from PyPI, the CPU build on Windows
+      # (scripts/ner_ci_env.sh, the Linux recipe, is not needed here).
+      - name: install the hf and gliner extras
+        run: uv sync --frozen --extra hf --extra gliner
+      - name: pull the models, into the cache and as portable folders
+        shell: pwsh
+        run: |
+          $models = Join-Path $env:RUNNER_TEMP "models"
+          uv run --no-sync llm-redact models pull --config tests/airgap/pull.toml --to $models
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          uv run --no-sync llm-redact models verify --dir $models
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: load them from the cache
+        shell: pwsh
+        run: |
+          uv run --no-sync llm-redact serve --check --config tests/airgap/pull.toml
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          uv run --no-sync llm-redact preview --config tests/airgap/pull.toml --text "write to Jane Roe at jane.roe@example.com"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      # The folders `models pull --to` wrote, named as its printed
+      # [detection.ner.models] lines name them (literal TOML strings keep the
+      # backslashes). Nothing is fetched: downloads are off.
+      - name: load them from the folders
+        shell: pwsh
+        run: |
+          $models = Join-Path $env:RUNNER_TEMP "models"
+          $config = Join-Path $env:RUNNER_TEMP "folders.toml"
+          $lines = @(
+            "[detection.ner]",
+            "enabled = true",
+            'backends = ["hf", "gliner"]',
+            "",
+            "[detection.ner.models]",
+            "hf = '$models\hf-OpenMed--OpenMed-PII-SuperClinical-Small-44M-v1'",
+            "gliner = '$models\gliner-urchade--gliner_small-v2.1'"
+          )
+          [System.IO.File]::WriteAllLines($config, $lines)
+          uv run --no-sync llm-redact serve --check --config $config
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          uv run --no-sync llm-redact preview --config $config --text "write to Jane Roe at jane.roe@example.com"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          uv run --no-sync llm-redact models verify --config $config
+          if ($LASTEXITCODE -ne 0) { exit 1 }

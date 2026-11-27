@@ -410,6 +410,63 @@ def test_a_malformed_sidecar_is_a_config_error(tmp_path: Path) -> None:
         catalog_window(str(tmp_path))
 
 
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be"])
+def test_a_utf16_sidecar_is_refused_naming_utf16(tmp_path: Path, encoding: str) -> None:
+    from llm_redact.detection.model_catalog import SidecarError, read_sidecar
+
+    sidecar = '{"model_id": "org/model", "revision": null}'
+    (tmp_path / SIDECAR_NAME).write_bytes(sidecar.encode(encoding))
+    with pytest.raises(SidecarError, match="UTF-16 text, not UTF-8"):
+        read_sidecar(tmp_path)
+
+
+def test_a_sidecar_with_a_bom_is_read(tmp_path: Path) -> None:
+    from llm_redact.detection.model_catalog import ModelIdentity, read_sidecar
+
+    (tmp_path / SIDECAR_NAME).write_bytes(b'\xef\xbb\xbf{"model_id": "org/model"}')
+    assert read_sidecar(tmp_path) == ModelIdentity("org/model", None)
+
+
+@pytest.mark.parametrize(
+    ("model", "platform", "wsl", "hint"),
+    [
+        ("C:\\models\\hf-x", "linux", True, "written as a Windows path, which WSL does not read"),
+        ("D:/models/hf-x", "linux", True, "`wslpath -u` converts it"),
+        ("\\\\nas\\models\\hf-x", "linux", True, "written as a Windows path"),
+        ("/mnt/c/models/hf-x", "win32", False, "written as a WSL path, which Windows does not"),
+        ("/mnt/c/models/hf-x", "linux", True, ""),  # what WSL reads
+        ("C:\\models\\hf-x", "win32", False, ""),  # what Windows reads
+        ("/srv/models/hf-x", "linux", False, ""),
+    ],
+)
+def test_a_folder_named_as_the_other_side_names_it_gets_a_hint(
+    model: str, platform: str, wsl: bool, hint: str
+) -> None:
+    from llm_redact.detection.model_files import other_side_hint
+
+    found = other_side_hint(model, platform=platform, wsl=wsl)
+    assert (hint in found) if hint else found == ""
+    if hint:
+        assert "models pull --to DIR --as PATH" in found
+
+
+def test_a_missing_windows_path_in_wsl_says_how_to_name_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_redact import platform_info
+    from llm_redact.detection.model_files import resolve_model
+
+    monkeypatch.setattr(platform_info, "is_wsl", lambda *a, **k: True)
+    with pytest.raises(ConfigError, match="written as a Windows path, which WSL does not read"):
+        resolve_model(
+            "C:\\models\\hf-x",
+            what="hf model",
+            revision=None,
+            allow_download=False,
+            allow_patterns=("config.json",),
+        )
+
+
 def test_install_hub_returns_the_installed_fake(monkeypatch: pytest.MonkeyPatch) -> None:
     hub = install_hub(monkeypatch)
     assert sys.modules["huggingface_hub"].snapshot_download == hub.snapshot_download

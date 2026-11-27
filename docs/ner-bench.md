@@ -293,6 +293,15 @@ estimated 40 minutes for both slices on the reference CPU. It is report only —
 uploads its reports as the `ner-eval-<configuration>` artifact and writes
 them to the run's summary.
 
+**`ner-windows`** (`.github/workflows/ner-windows.yml`, weekly, by
+`workflow_dispatch`, and on a pull request that changes it): native Windows, with torch from PyPI, whose Windows
+wheels are the CPU build. It pulls the `hf` and `gliner` default models at
+their catalog pins (`tests/airgap/pull.toml`) into the Hugging Face cache
+and as portable folders (`models pull --to`), verifies the folders
+(`models verify --dir`), and loads each source through `serve --check` and
+one `preview` with downloads off, so path, memory-mapping, file-lock and
+case problems that Linux never shows surface there. It scores nothing.
+
 | Configuration | What it scores | Gated by |
 |---|---|---|
 | `bench/configs/hf-default.toml` | the `hf` backend's default model (`OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` since 1.13.0, `dslim/bert-base-NER` before) at its catalog pin, default entities (`PERSON`) | `[hf-default.synthetic]`, `[hf-default]` |
@@ -351,8 +360,9 @@ does not use (`df -h /` in the log shows what is left).
 
 To reproduce the job locally (it creates a CPython 3.13 venv; Linux,
 x86_64 or aarch64, where the PyTorch CPU index has a `+cpu` wheel; the
-script runs the venv's `bin/python`, so it does not run on Windows, which
-is unsupported), install as it does; the script replaces `.venv`, so run it in a
+script runs the venv's `bin/python`, so it does not run on Windows, where
+PyPI's torch is already the CPU build and `ner-windows` installs the
+extras with `uv sync` alone), install as it does; the script replaces `.venv`, so run it in a
 checkout you do not develop in, and the models go to the Hugging Face
 cache. When `uv.lock` moves torch to another version, the script refuses
 to run until `CPU_WHEELS` in `scripts/cpu_torch.py` records that

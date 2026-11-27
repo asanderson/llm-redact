@@ -249,7 +249,8 @@ Then:
   (Claude Code can instead add this repo as a plugin marketplace:
   `/plugin marketplace add asanderson/llm-redact`); see
   [docs/plugins.md](https://github.com/asanderson/llm-redact/blob/main/docs/plugins.md).
-- `llm-redact completions bash|zsh|fish` — shell completions.
+- `llm-redact completions bash|zsh|fish|powershell` — shell completions (PowerShell:
+  `llm-redact completions powershell | Out-String | Invoke-Expression`, in your `$PROFILE`).
 
 ## Quickstart
 
@@ -486,7 +487,8 @@ essentials:
   algorithm selections — `llm-redact fips-check`,
   [docs/fips.md](https://github.com/asanderson/llm-redact/blob/main/docs/fips.md).
 - **Event loop**: `pip install 'llm-redact-proxy[perf]'` adds uvloop;
-  uvicorn picks it up automatically — no configuration.
+  uvicorn picks it up automatically — no configuration. uvloop does not run
+  on Windows, so there the extra installs nothing and asyncio's loop runs.
 
 Rule-based upstream routing, quota-aware fallback and monthly budgets
 are a Pro feature of llm-redact-pro; the core parses and validates

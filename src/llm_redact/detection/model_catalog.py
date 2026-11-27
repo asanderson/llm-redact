@@ -829,6 +829,27 @@ class SidecarError(ValueError):
     the directory holds. The message names the file and the problem only."""
 
 
+UTF16_HINT = (
+    "UTF-16 text, not UTF-8 (Windows PowerShell 5.1 writes UTF-16 with > and Out-File):"
+    " save it as UTF-8"
+)
+
+
+class Utf16Text(ValueError):
+    """A JSON file saved as UTF-16 (what Windows PowerShell 5.1 writes with
+    ``>`` and ``Out-File``), where UTF-8 is required."""
+
+
+def json_file_text(raw: bytes) -> str:
+    """A JSON file's text: UTF-8, one leading byte-order mark allowed (an
+    editor on Windows may write one). ``Utf16Text`` for UTF-16, by its
+    byte-order mark or a NUL in its first two bytes (JSON text starts with
+    an ASCII character); UnicodeDecodeError for anything else not UTF-8."""
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in raw[:2]:
+        raise Utf16Text("UTF-16 text")
+    return raw.removeprefix(b"\xef\xbb\xbf").decode("utf-8")
+
+
 def read_sidecar(directory: str | Path) -> ModelIdentity | None:
     """The identity recorded in ``directory``'s :data:`SIDECAR_NAME` file;
     None when there is no such file (or ``directory`` is no directory).
@@ -845,7 +866,9 @@ def read_sidecar(directory: str | Path) -> ModelIdentity | None:
     if len(raw) > MAX_SIDECAR_BYTES:
         raise SidecarError(f"{path}: larger than {MAX_SIDECAR_BYTES} bytes")
     try:
-        data = loads_bounded(raw.decode("utf-8"))
+        data = loads_bounded(json_file_text(raw))
+    except Utf16Text as exc:
+        raise SidecarError(f"{path}: {UTF16_HINT}") from exc
     except ValueError as exc:  # UnicodeDecodeError, JSONDecodeError, JsonTooDeep
         raise SidecarError(f"{path}: not a UTF-8 JSON document") from exc
     if not isinstance(data, dict):

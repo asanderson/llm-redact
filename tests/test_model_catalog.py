@@ -488,7 +488,8 @@ def test_no_sidecar_is_no_identity(tmp_path: Path) -> None:
     ("content", "problem"),
     [
         (b"{not json", "not a UTF-8 JSON document"),
-        (b"\xff\xfe{}", "not a UTF-8 JSON document"),
+        (b"\xff\xfe{}", "UTF-16 text, not UTF-8"),  # a UTF-16 byte-order mark
+        (b"\xef\xbb\xbf{not json", "not a UTF-8 JSON document"),
         (b"[" * 200 + b"]" * 200, "not a UTF-8 JSON document"),
         (b'["dslim/bert-base-NER"]', "not a JSON object"),
         (b"{}", "model_id must be a Hugging Face model id"),

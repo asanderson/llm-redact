@@ -3,7 +3,8 @@
 Releases are tag-driven: pushing a `v*` tag runs `.github/workflows/release.yml`,
 which builds and verifies the distribution, creates a GitHub Release with the
 sdist, the wheel and two SBOMs attached, publishes `llm-redact-proxy` to PyPI,
-and publishes the stock and `-ner` container images to GHCR. Creating the tag
+publishes the stock and `-ner` container images to GHCR, and attaches a
+Windows wheelhouse for offline installs to the Release. Creating the tag
 is the release: PyPI has the files within a few minutes of the tag, and a
 version published there cannot be replaced.
 
@@ -24,6 +25,12 @@ version published there cannot be replaced.
   images, `main` names images that do not exist yet (the Helm chart's
   default tag, the sidecar manifest), which is one more reason to keep the
   window short.
+- The Windows wheelhouse builds from that commit: run the **Windows
+  wheelhouse** workflow on `main` by hand (Actions → Windows wheelhouse → Run
+  workflow; it pushes nothing, so it cancels no CI run). CI runs it only on a
+  pull request that changes the workflow or its script, and the tag run
+  builds it again from the same lock, so a lock change since is caught here
+  rather than after PyPI has the release.
 - `CHANGELOG.md`: the `[Unreleased]` section has been moved into a dated
   `## [X.Y.Z] - YYYY-MM-DD` section describing exactly that tree.
 - `src/llm_redact/__init__.py` `__version__` matches `X.Y.Z` (the single
@@ -86,7 +93,15 @@ and the commit the tag points to.
   `llm-redact-runtime.cdx.json` (the runtime closure) and
   `llm-redact-ner-image.cdx.json` (the `-ner` image's closure). The notes are
   auto-generated when the workflow creates the Release; a Release you
-  published first keeps the notes you gave it.
+  published first keeps the notes you gave it. A fifth file follows when
+  `publish-wheelhouse` finishes: `llm-redact-X.Y.Z-wheelhouse-win_amd64.zip`,
+  every locked wheel of the base install and the crypto, keyring, realtime
+  and extract extras for x64 Windows and Python 3.11 to 3.14, with the
+  release's wheel, `requirements.txt` and `SHA256SUMS`
+  ([air-gapped.md](air-gapped.md#native-windows-the-releases-wheelhouse)).
+  The `wheelhouse` job builds it on Windows (`.github/workflows/wheelhouse.yml`,
+  `scripts/build_wheelhouse.py`) and installs it with no index for each of
+  those Pythons before uploading it; it needs only `build`.
 - **GHCR images**, each for `linux/amd64` and `linux/arm64`: the stock image
   `ghcr.io/asanderson/llm-redact` tagged `X.Y.Z`, `X.Y` and `latest`, and the
   `-ner` variant (the `hf` and `gliner` NER extras on a CPU-only torch) tagged
@@ -108,8 +123,9 @@ and the commit the tag points to.
   repository tree as checked out (`CHANGELOG.md`, `CLAUDE.md`, `docs/`,
   `tests/`, `.github/` ...), and a mistake in any of those files at the tagged
   commit is as permanent as the version.
-- **Build provenance attestations** (Sigstore) for the four files attached
-  to the GitHub Release — on PUBLIC repos only: GitHub cannot persist
+- **Build provenance attestations** (Sigstore) for the five files attached
+  to the GitHub Release (the wheelhouse's by `publish-wheelhouse`) — on
+  PUBLIC repos only: GitHub cannot persist
   attestations for user-owned private repos, so the step self-skips there
   (a pre-debut release run failed on exactly this and was withdrawn). PyPI uploads additionally carry PEP 740
   attestations emitted by the trusted publisher — nothing extra to do.
@@ -124,7 +140,7 @@ docker buildx build --platform linux/arm64 --target runtime \
   --build-arg 'NER_EXTRAS=--extra hf --extra gliner' .
 ```
 
-Verify: the Releases page shows the four files; each `publish-ghcr` job log
+Verify: the Releases page shows the five files; each `publish-ghcr` job log
 shows the image's tags (the metadata step's `Docker tags` group) and its
 pushed digest (the build step's `Digest` group, the digest the sign step
 signs); `docker buildx imagetools inspect ghcr.io/asanderson/llm-redact:X.Y.Z-ner`
@@ -135,6 +151,8 @@ signature verifies:
 ```bash
 gh release download vX.Y.Z --repo asanderson/llm-redact --dir /tmp/rel
 gh attestation verify /tmp/rel/llm_redact_proxy-X.Y.Z-py3-none-any.whl \
+  --repo asanderson/llm-redact
+gh attestation verify /tmp/rel/llm-redact-X.Y.Z-wheelhouse-win_amd64.zip \
   --repo asanderson/llm-redact
 
 docker buildx imagetools inspect ghcr.io/asanderson/llm-redact:X.Y.Z | grep -m1 '^Digest:'   # the <digest> below
@@ -200,9 +218,9 @@ They apply again to a fork, or to a new image or project name.
 Tag-triggered workflows execute the workflow file **as of the tagged
 commit** — fixing `release.yml` on `main` afterwards does not retro-apply to
 an existing tag, and a re-run of the run uses the tagged commit too. What
-is left to recover depends on which job failed: `publish-pypi` and the two
-`publish-ghcr` jobs all start when `build` finishes and do not depend on
-each other.
+is left to recover depends on which job failed: `publish-pypi`, the two
+`publish-ghcr` jobs and `wheelhouse` all start when `build` finishes and do
+not depend on each other; `publish-wheelhouse` waits for `wheelhouse`.
 
 | Failed | What exists afterwards | Recovery |
 | --- | --- | --- |
@@ -211,6 +229,7 @@ each other.
 | `build`, the Release step (the last one) | Nothing on PyPI or GHCR (the other jobs are skipped). A Release may exist, with some of its files. | "Re-run failed jobs": an existing Release gets the files uploaded to it with `--clobber`. A cause in the workflow file: as for the guard. |
 | `publish-pypi`, before PyPI accepted a file (the `pypi` environment, the trusted-publisher setting, an outage) | The Release and the images are unaffected; PyPI has nothing. | Fix the setting, then "Re-run failed jobs". The workflow file is unchanged, so no new tag is needed. |
 | `publish-pypi`, after PyPI accepted a file | The version is on PyPI for good. | Never re-tag; the next patch version carries any fix. |
+| `wheelhouse` or `publish-wheelhouse` | PyPI, the images and the Release's other four files are unaffected; the Release lacks the wheelhouse zip. | A transient fault (runner, network, Sigstore): "Re-run failed jobs" re-runs the failed job (and `publish-wheelhouse` after a failed `wheelhouse`) from the tagged commit, and the zip is attached with `--clobber`. A package of the lock with no Windows wheel, or a fault in the workflow or the script: the release goes out without the zip, say so in its notes, and ship the fix in the next patch version. |
 | One `publish-ghcr` job (`stock` or `ner`) | The other image, PyPI and the Release are unaffected (`fail-fast` is off). If the cosign step failed, the tags are pushed but unsigned. | A transient fault: "Re-run failed jobs" re-runs that job alone (it uses no artifacts): it rebuilds, pushes and signs again. A fault in the workflow or the Dockerfile cannot be fixed under this tag, and `publish-pypi` has normally finished by then: ship the fix as the next patch version. |
 
 Deleting the tag and re-tagging is acceptable only while nothing has

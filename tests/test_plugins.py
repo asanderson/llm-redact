@@ -101,7 +101,9 @@ def test_config_edit_waits_for_the_reload_before_reading_the_posture_back() -> N
     # one applied, and only then reads the posture back.
     body = next(c for c in COMMANDS if c.name == "config-edit").body
     steps = [
-        "note\n   `config_reload.requested_total`",
+        "note `config_reload.requested_total`",
+        # Windows has no SIGHUP: there the reload is `llm-redact reload`.
+        "On\n   Windows, which has no SIGHUP, run `llm-redact reload`",
         "`kill -HUP <pid>`",
         "until `config_reload.requested_total`\n   is above the noted value and"
         " `config_reload.running` is false",

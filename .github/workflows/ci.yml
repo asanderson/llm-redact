@@ -148,7 +148,15 @@ jobs:
         run: |
           $env:UV_TOOL_DIR = Join-Path $env:RUNNER_TEMP "uv-tools"
           $env:UV_TOOL_BIN_DIR = Join-Path $env:RUNNER_TEMP "uv-bin"
-          uv tool install (Get-ChildItem dist/*.whl).FullName
+          # With the extras a Windows workstation takes, resolved from PyPI
+          # as a user's install is (perf installs nothing on Windows);
+          # tests/test_packaging_metadata.py checks every extra's wheels in
+          # the lock.
+          $wheel = ([System.Uri](Get-ChildItem dist/*.whl).FullName).AbsoluteUri
+          uv tool install "llm-redact-proxy[perf,crypto,keyring,realtime,extract] @ $wheel"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $python = Join-Path $env:UV_TOOL_DIR "llm-redact-proxy\Scripts\python.exe"
+          & $python -c "import cryptography, keyring, pypdf, websockets"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $env:UV_TOOL_BIN_DIR | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - name: smoke
@@ -194,6 +202,23 @@ jobs:
           else
             echo "claude CLI not present on the runner; skipping structural validate"
           fi
+
+  plugins-windows:
+    # The install + CLI contract on Windows: every tool's commands land under
+    # the user profile, and every `llm-redact` subcommand a body names parses.
+    name: agent plugins (Windows install e2e)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - run: uv run python scripts/plugin_e2e.py
 
   helm:
     # The Helm chart (deploy/helm/llm-redact) rendered for real: `helm lint`

@@ -150,6 +150,35 @@ def names_a_path(model: str) -> bool:
     )
 
 
+_DRIVE_PATH = re.compile(r"[A-Za-z]:[\\/]")
+_WSL_MOUNT = re.compile(r"/mnt/[A-Za-z](?:/|$)")
+
+
+def other_side_hint(model: str, platform: str | None = None, wsl: bool | None = None) -> str:
+    """What to say about a model folder written as the other side of WSL
+    names it: a Windows path (a drive letter or a UNC share) inside WSL, or
+    a WSL path (``/mnt/c/…``) on native Windows. Empty otherwise."""
+    from llm_redact import platform_info
+
+    platform = sys.platform if platform is None else platform
+    in_wsl = platform_info.is_wsl() if wsl is None else wsl
+    convert = (
+        "or have `llm-redact models pull --to DIR --as PATH` write the setting with the path"
+        " the proxy will see"
+    )
+    if in_wsl and (_DRIVE_PATH.match(model) or model.startswith("\\\\")):
+        return (
+            "; it is written as a Windows path, which WSL does not read: name the folder as"
+            f" WSL sees it (`wslpath -u` converts it, a drive is under /mnt), {convert}"
+        )
+    if platform == "win32" and _WSL_MOUNT.match(model):
+        return (
+            "; it is written as a WSL path, which Windows does not read: name the folder as"
+            f" Windows sees it (`wslpath -w` converts it inside WSL), {convert}"
+        )
+    return ""
+
+
 # The Hugging Face libraries' offline switches. huggingface_hub reads
 # HF_HUB_OFFLINE when it is imported (into huggingface_hub.constants),
 # transformers asks that constant; both refuse every request while set.
@@ -205,6 +234,7 @@ def resolve_model(
                 " be in place when the proxy starts (nothing mounted or copied there?);"
                 " write one on a connected machine with `llm-redact models pull --to DIR`,"
                 " carry it here, and check it with `llm-redact models verify --dir`"
+                + other_side_hint(model)
             )
         raise _config_error(
             f"[detection.ner] {what} {model!r} is neither a local directory nor a"

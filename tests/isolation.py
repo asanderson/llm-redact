@@ -62,9 +62,9 @@ def watched_paths(
     config = Path(environ.get("XDG_CONFIG_HOME") or home / ".config")
     data = Path(environ.get("XDG_DATA_HOME") or home / ".local" / "share")
     cache = Path(environ.get("XDG_CACHE_HOME") or home / ".cache")
-    # `llm-redact plugin` prefers HOME to Path.home(); the two differ only on
-    # Windows (where Path.home() reads USERPROFILE).
-    tool_home = Path(environ.get("HOME") or home)
+    # `llm-redact plugin` reads HOME, else Path.home(), and on Windows the
+    # user profile (Path.home() reads USERPROFILE there).
+    tool_home = home if platform == "win32" else Path(environ.get("HOME") or home)
     claude = Path(environ.get("CLAUDE_CONFIG_DIR") or tool_home / ".claude")
     codex = Path(environ.get("CODEX_HOME") or tool_home / ".codex")
     opencode = Path(environ.get("XDG_CONFIG_HOME") or tool_home / ".config")

@@ -215,8 +215,60 @@ def test_completion_scripts_render() -> None:
         assert name in bash and name in zsh and name in fish
     # Every flag reaches fish too (bash/zsh embed them via the case block).
     assert "-l check" in fish and "-l set-env" in fish
+    powershell = script_for("powershell")
+    assert "Register-ArgumentCompleter -Native -CommandName 'llm-redact', 'llm-redact.exe'" in (
+        powershell
+    )
+    for name, (subs, opts) in COMMANDS.items():
+        assert f"'{name}' = @(" in powershell
+        assert all(f"'{word}'" in powershell for word in (*subs, *opts))
     with pytest.raises(ValueError):
-        script_for("powershell")
+        script_for("tcsh")
+
+
+@pytest.mark.parametrize("shell", ["pwsh", "powershell"])
+def test_powershell_completes_commands_and_their_flags(shell: str, tmp_path: Path) -> None:
+    # PowerShell 7 everywhere it is installed (GitHub's runners have it), and
+    # Windows PowerShell 5.1 on Windows: the completer is asked as the shell
+    # asks it on Tab, for a llm-redact found on PATH.
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    program = shutil.which(shell)
+    if program is None:
+        pytest.skip(f"no {shell}")
+    script = tmp_path / "llm-redact.ps1"
+    script.write_text(script_for("powershell"), encoding="utf-8", newline="\n")
+    found = tmp_path / "bin"
+    found.mkdir()
+    if sys.platform == "win32":
+        (found / "llm-redact.cmd").write_text("@echo off\r\n", encoding="utf-8", newline="")
+    else:
+        (found / "llm-redact").write_text("#!/bin/sh\n", encoding="utf-8", newline="\n")
+        (found / "llm-redact").chmod(0o755)
+
+    def completions(line: str) -> list[str]:
+        command = (
+            f"Get-Content -Raw -LiteralPath '{script}' | Invoke-Expression;"
+            f" $found = TabExpansion2 -inputScript '{line}' -cursorColumn {len(line)};"
+            " [Console]::Out.Write((@($found.CompletionMatches | ForEach-Object"
+            " { $_.CompletionText }) -join ','))"
+        )
+        env = {**os.environ, "PATH": f"{found}{os.pathsep}{os.environ.get('PATH', '')}"}
+        done = subprocess.run(
+            [program, "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True,
+            timeout=120,
+            check=True,
+            env=env,
+        )
+        return done.stdout.decode("utf-8").split(",")
+
+    assert completions("llm-redact se") == ["serve", "service", "sessions"]
+    assert completions("llm-redact serve --c") == ["--check", "--config"]
+    assert completions("llm-redact completions ") == ["bash", "fish", "powershell", "zsh"]
 
 
 def test_service_windows_prints_schtasks_guidance(

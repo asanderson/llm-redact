@@ -11,6 +11,14 @@ description = "Transparent local proxy that redacts private information from LLM
 readme = "README.md"
 license = "AGPL-3.0-only"
 requires-python = ">=3.11"
+# The operating systems CI runs (Windows 11: x64 and best-effort ARM64,
+# natively and under WSL 2; tests/test_packaging_metadata.py checks that
+# every extra installs from wheels on x64 Windows).
+classifiers = [
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
+    "Operating System :: POSIX :: Linux",
+]
 # Floors track the tested majors: CI runs `uv sync --frozen` against the lock,
 # so these lower bounds are what a NON-frozen `pip install` may resolve. They
 # are raised past the starlette 0.x->1.x boundary (lock: 1.3.1) so a fresh
@@ -90,7 +98,9 @@ keyring = ["keyring>=24"]
 # Faster event loop: uvicorn's loop="auto" picks uvloop up automatically
 # when installed; serve needs no code change (and none should be added —
 # an explicit loop= would break the auto-selection this extra relies on).
-perf = ["uvloop>=0.19"]
+# uvloop does not support Windows (it ships no wheel there and refuses to
+# build): on Windows the extra installs nothing and asyncio's loop runs.
+perf = ["uvloop>=0.19; sys_platform != 'win32'"]
 # Realtime WebSocket APIs (OpenAI Realtime, Gemini Live). One package
 # serves both sides: uvicorn's WS protocol lights up automatically when
 # it is importable, and the relay uses its client for the upstream leg.

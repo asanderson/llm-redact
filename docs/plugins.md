@@ -83,6 +83,12 @@ description becomes a heading, and where other tools substitute
 `$ARGUMENTS` the Cursor text asks the agent to use the request you typed
 alongside the command.
 
+On Windows each tool's folder is under your user profile
+(`%USERPROFILE%\.claude\commands` and so on), never under `HOME`, which Git
+Bash sets to a POSIX path (`/c/Users/me`) that Windows reads as a folder at
+the root of the current drive; `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
+`XDG_CONFIG_HOME` are honored there too.
+
 `llm-redact plugin status` shows per-tool install state (current / stale /
 missing); `llm-redact plugin uninstall TOOL` removes exactly the files the
 installer manages. `install` never silently overwrites a command file you
@@ -96,7 +102,7 @@ have edited — it refuses and asks for `--force`.
 | `recent` | Newest-first table of recent requests (path, provider, status, detections) | dashboard recent-request table |
 | `sessions` | Vault session list (metadata only); prune only on explicit confirmation | dashboard session browser |
 | `config-show` | Effective config with env overrides named | config editor (read side) |
-| `config-edit` | Guarded config change: effective-config read → TOML edit → `serve --check` gate → SIGHUP → wait for the reload → posture read-back | config editor (write side) |
+| `config-edit` | Guarded config change: effective-config read → TOML edit → `serve --check` gate → reload (SIGHUP; `llm-redact reload` on Windows) → wait for the reload → posture read-back | config editor (write side) |
 | `preview` | Local dry-run: what WOULD be redacted in a sample text | dashboard preview card |
 | `doctor` | Read-only diagnostics, failures explained via troubleshooting.md | — |
 | `audit` | Tamper-evident chain verification verdict | dashboard audit block |
@@ -144,7 +150,8 @@ guide, or the requires-pro line without that package):
 **`/llm-redact:config-edit`** — a guarded config change driven from
 inside the agent (what the llm-redact-pro config editor does in the
 browser): read the effective config, edit the TOML, gate on
-`serve --check`, reload via SIGHUP, wait for that reload to apply, and
+`serve --check`, reload (SIGHUP, or `llm-redact reload` on Windows, which
+has no SIGHUP), wait for that reload to apply, and
 read the coverage posture back. The wait matters: the proxy builds the
 new configuration off its event loop (seconds when NER models load) and
 answers `/status` from the configuration BEFORE the change until it

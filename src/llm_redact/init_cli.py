@@ -163,7 +163,11 @@ def run_init(args: argparse.Namespace) -> int:
         print(f"refusing to overwrite {target} (pass --force, or edit it directly)")
         return 1
 
-    backup = write_config_atomic(target, emit_config_toml(config))
+    try:
+        backup = write_config_atomic(target, emit_config_toml(config))
+    except OSError as problem:
+        print(f"cannot write {target} ({problem.strerror or problem})", file=sys.stderr)
+        return 1
     print(f"\nwrote {target}" + (f" (previous file kept at {backup})" if backup else ""))
 
     base_url = f"http://127.0.0.1:{port}"

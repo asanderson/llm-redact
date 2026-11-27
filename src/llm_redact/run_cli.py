@@ -13,29 +13,31 @@ The wrapper's exit code is the child's.
 Windows: a bare program name is looked up on PATH only (``resolve_program``),
 never in the current directory, which CreateProcess searches first, and
 with PATHEXT's extensions, so an npm ``claude.cmd`` shim is found (an
-``.exe`` beside it goes first). A batch file's arguments are read again by
-cmd.exe, which is said when they hold a character it treats specially.
-The ephemeral proxy gets a process group of its own, so the terminal's
-Ctrl+C reaches the tool and not the proxy under it, and is stopped with
-CTRL_BREAK_EVENT, which uvicorn handles as SIGTERM: its shutdown drains
-before it exits (a kill follows only when it does not within the bound).
+``.exe`` beside it goes first). A batch file runs through cmd.exe with
+every argument quoted (``batch_command_line``), and one no quoting keeps
+from cmd.exe is refused. The ephemeral proxy gets a process group of its
+own, so the terminal's Ctrl+C reaches the tool and not the proxy under it,
+and is stopped with CTRL_BREAK_EVENT, which uvicorn handles as SIGTERM: its
+shutdown drains before it exits (a kill follows only when it does not
+within the bound).
 
 WSL: a Windows program started from WSL (an ``.exe``, or a file on a
 Windows drive) sees only the variables ``WSLENV`` names, so each exported
-one is added there as ``NAME/w`` (shared with Win32 programs only); a
-Linux program's environment is unchanged.
+one is put there as ``NAME/w`` (shared with Win32 programs only, replacing
+an entry already there for it); a Linux program's environment is unchanged.
 """
 
 import argparse
 import contextlib
+import ntpath
 import os
 import shutil
 import signal
 import subprocess
 import sys
 import time
-from collections.abc import Iterable
-from pathlib import Path
+from collections.abc import Iterable, Sequence
+from pathlib import Path, PureWindowsPath
 from types import FrameType
 
 from llm_redact import platform_info
@@ -50,8 +52,9 @@ _STOP_TIMEOUT_SECONDS = 5.0
 _RUNNABLE_EXTENSIONS = (".exe", ".com", ".cmd", ".bat")
 _DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
 _BATCH_EXTENSIONS = (".cmd", ".bat")
-# What cmd.exe reads in a batch file's arguments before the program does.
-_CMD_SPECIAL = frozenset('"%!^&|<>()\r\n')
+# What no quoting keeps from cmd.exe: a quote ends the quoting, a percent
+# sign expands a variable inside quotes too, a line break ends the command.
+_BATCH_REFUSED = {'"': '"', "%": "%", "\n": "a line feed", "\r": "a carriage return"}
 
 # Names an EXISTING llm-redact proxy (this machine or a team server) for
 # every client-side command: `run` routes tools at it instead of spawning
@@ -123,7 +126,7 @@ def resolve_program(name: str, path: str | None, pathext: str | None) -> str | N
     )
     for entry in (path or "").split(os.pathsep):
         folder = entry.strip().strip('"')
-        if not folder or not os.path.isabs(folder):
+        if not folder or not names_one_folder(folder):
             continue
         for candidate in candidates:
             program = os.path.join(folder, candidate)
@@ -132,32 +135,57 @@ def resolve_program(name: str, path: str | None, pathext: str | None) -> str | N
     return None
 
 
-def _batch_warning(program: str, arguments: list[str]) -> str | None:
-    """What to say before running a batch file whose arguments hold a
-    character cmd.exe reads itself: they may not reach the program as
-    typed (a ``"`` can end the quoting, and an ``&`` after it start
-    another command)."""
-    if not program.lower().endswith(_BATCH_EXTENSIONS):
-        return None
-    if not any(_CMD_SPECIAL & set(argument) for argument in arguments):
-        return None
-    return (
-        f"llm-redact run: {os.path.basename(program)} is a batch file, so cmd.exe reads its"
-        ' arguments again: a " % ! ^ & | < > ( ) in them may not reach the program as typed'
+def names_one_folder(entry: str, *, windows: bool | None = None) -> bool:
+    """Whether a PATH entry names one folder wherever the command runs. On
+    Windows (``windows``, by default this platform's) that is a drive and a
+    root, or a share: ``\\tools`` names the current drive's root and
+    ``C:tools`` drive C's current folder, which depend on where the command
+    runs as ``.`` does."""
+    if os.name == "nt" if windows is None else windows:
+        return PureWindowsPath(entry).is_absolute()
+    return os.path.isabs(entry)
+
+
+def batch_command_line(program: str, arguments: Sequence[str], *, cmd: str) -> str:
+    """The command line that runs batch file ``program`` with ``arguments``
+    through ``cmd`` (cmd.exe), as typed. CreateProcess hands a batch file's
+    whole command line to cmd.exe, which acts on ``& | < > ( ) ^`` in it
+    (BatBadBut: Python's quoting does not guard against that), so every
+    argument is put in double quotes, where cmd.exe reads them as text;
+    delayed expansion is off (``/v:OFF``: a ``!`` stays a ``!``) and so are
+    AutoRun commands (``/d``). A trailing backslash is doubled, so the
+    program's own parsing does not read the closing quote as part of the
+    argument. ValueError naming the character when the path or an argument
+    holds one no quoting keeps from cmd.exe (``_BATCH_REFUSED``)."""
+    for text in (program, *arguments):
+        for character, named in _BATCH_REFUSED.items():
+            if character in text:
+                raise ValueError(named)
+    quoted = " ".join(
+        '"' + text + "\\" * (len(text) - len(text.rstrip("\\"))) + '"'
+        for text in (program, *arguments)
     )
+    return f'"{cmd}" /d /e:ON /v:OFF /s /c "{quoted}"'
+
+
+def _cmd_exe() -> str:
+    """cmd.exe in the system folder, never one found on PATH."""
+    return ntpath.join(os.environ.get("SYSTEMROOT") or "C:\\Windows", "System32", "cmd.exe")
 
 
 def wslenv_with(current: str | None, names: Iterable[str]) -> str:
-    """``WSLENV`` with each of ``names`` added as ``NAME/w`` — shared with a
-    Win32 program started from WSL, not with a Linux one: an entry already
-    there is kept as it is, empty entries are dropped."""
-    entries = [entry for entry in (current or "").split(":") if entry]
-    present = {entry.split("/", 1)[0] for entry in entries}
-    for name in names:
-        if name not in present:
-            entries.append(f"{name}/w")
-            present.add(name)
-    return ":".join(entries)
+    """``WSLENV`` sharing each of ``names`` as ``NAME/w`` with a Win32
+    program started from WSL, not with a Linux one. An entry already there
+    for one of them is replaced: one flagged ``/u`` never reaches a Windows
+    program and ``/p`` would translate the URL as a path, so the program
+    would reach the provider directly. Other entries stay; empty ones go."""
+    wanted = list(dict.fromkeys(names))
+    kept = [
+        entry
+        for entry in (current or "").split(":")
+        if entry and entry.split("/", 1)[0] not in wanted
+    ]
+    return ":".join([*kept, *(f"{name}/w" for name in wanted)])
 
 
 def _runs_windows_program(program: str) -> bool:
@@ -301,6 +329,9 @@ def run_run(args: argparse.Namespace) -> int:
     identified = " with a client identity" if tool_base != base_url else ""
     print(f"llm-redact: routing {routed} via {shown}{identified} ({origin})", file=sys.stderr)
 
+    # A batch file runs through cmd.exe, as a command line of its own.
+    spawn: str | None = None
+    executable: str | None = None
     try:
         if sys.platform == "win32":
             # PATH only, with PATHEXT (an npm .cmd shim is found), never the
@@ -310,16 +341,27 @@ def run_run(args: argparse.Namespace) -> int:
                 print(f"llm-redact run: command not found: {command[0]}", file=sys.stderr)
                 return 127
             command = [program, *command[1:]]
-            warning = _batch_warning(program, command[1:])
-            if warning is not None:
-                print(warning, file=sys.stderr)
+            if program.lower().endswith(_BATCH_EXTENSIONS):
+                cmd = _cmd_exe()
+                try:
+                    spawn = batch_command_line(program, command[1:], cmd=cmd)
+                except ValueError as refused:
+                    print(
+                        f"llm-redact run: {os.path.basename(program)} is a batch file, which"
+                        f" cmd.exe runs: its path or an argument holds {refused}, which cmd.exe"
+                        " would act on itself, so it cannot reach the program as typed; run"
+                        " the program the batch file starts instead",
+                        file=sys.stderr,
+                    )
+                    return 2
+                executable = cmd
         elif platform_info.is_wsl():
             target = shutil.which(command[0], path=env.get("PATH"))
             if target is not None and _runs_windows_program(target):
                 exported = [TOOL_EXPORTS[tool][0] for tool in tools]
                 env["WSLENV"] = wslenv_with(env.get("WSLENV"), [*exported, *extra_env])
         try:
-            child = subprocess.Popen(command, env=env)
+            child = subprocess.Popen(spawn or command, executable=executable, env=env)
         except FileNotFoundError:
             # The most likely first-run failure: the wrapped tool isn't on
             # PATH in this shell. 127 is the shell's own command-not-found

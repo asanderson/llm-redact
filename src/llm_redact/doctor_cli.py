@@ -182,8 +182,10 @@ def _check_paths(report: _Report, config: Config | None = None) -> None:
 
 def _check_windows_drive_stores(report: _Report, config: Config) -> None:
     """In WSL, a WARN for each store other than the vault (doctor's vault
-    check FAILs that one) and for the model folders on a Windows drive:
-    SQLite's locks do not hold there, and a model load reads slowly."""
+    check FAILs that one) and for the model folders on a Windows drive.
+    SQLite's locks do not hold there, and the file modes llm-redact sets
+    keep no Windows program or account out (the drive's own access control
+    list decides); a model load reads slowly there."""
     from llm_redact.audit import default_audit_path
     from llm_redact.overrides import default_overrides_path
     from llm_redact.platform_info import windows_drive_problem
@@ -191,23 +193,28 @@ def _check_windows_drive_stores(report: _Report, config: Config) -> None:
     def configured(path: str | None, default: Path) -> Path:
         return Path(path).expanduser() if path else default
 
-    places: list[tuple[str, Path]] = []
+    store = (
+        "where SQLite's locks do not hold, and the 0600 llm-redact sets keeps no Windows"
+        " program or account out (the Windows drive's own access control list decides);"
+        " keep it in the Linux file system"
+    )
+    places: list[tuple[str, Path, str]] = []
     if config.audit.enabled:
-        places.append(("the audit log", configured(config.audit.path, default_audit_path())))
+        places.append(("the audit log", configured(config.audit.path, default_audit_path()), store))
     if config.overrides.enabled:
-        places.append(
-            ("the override store", configured(config.overrides.path, default_overrides_path()))
+        overrides = configured(config.overrides.path, default_overrides_path())
+        places.append(("the override store", overrides, store))
+    places.append(
+        (
+            "the model folders",
+            paths.models_dir(),
+            "where loading a model reads slowly; keep them in the Linux file system",
         )
-    places.append(("the model folders", paths.models_dir()))
-    for what, path in places:
+    )
+    for what, path, why in places:
         problem = windows_drive_problem(path)
         if problem is not None:
-            report.line(
-                "WARN",
-                "paths",
-                f"{what}: {problem}, where SQLite's locks do not hold and reads are slow;"
-                " keep it in the Linux file system",
-            )
+            report.line("WARN", "paths", f"{what}: {problem}, {why}")
 
 
 def _check_loopback_names(report: _Report, config: Config) -> None:
@@ -252,17 +259,7 @@ def _check_loopback_names(report: _Report, config: Config) -> None:
 
 def _check_private(report: _Report, area: str, path: Path, want_dir_private: bool) -> None:
     if sys.platform == "win32":
-        # POSIX mode bits are synthetic on Windows (regular files commonly
-        # report 666) — checking them would only raise false alarms. NTFS
-        # ACLs are the real control, and the user-profile defaults are
-        # private to the user; say so instead of pretending to verify.
-        report.line(
-            "WARN",
-            area,
-            f"{path}: POSIX permission checks do not apply on Windows — keep"
-            " this file under your user profile, where default NTFS ACLs are"
-            " private to your account",
-        )
+        _check_private_windows(report, area, path, want_dir_private)
         return
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode & 0o077:
@@ -274,6 +271,65 @@ def _check_private(report: _Report, area: str, path: Path, want_dir_private: boo
         if parent_mode & 0o077:
             report.line(
                 "FAIL", area, f"{path.parent} is group/world accessible (mode {parent_mode:03o})"
+            )
+
+
+def _check_private_windows(report: _Report, area: str, path: Path, want_dir_private: bool) -> None:
+    """On Windows the NTFS access control list is the real control (POSIX
+    mode bits are synthetic: a regular file commonly reports 666): FAIL an
+    entry that lets in anyone but this account, SYSTEM and Administrators
+    (``winacl.foreign_access``), for the database, the ``-wal``, ``-shm``
+    and ``-journal`` files beside it (each keeps its own list once made)
+    and, like the POSIX check, its folder, with what the folder passes on to
+    files created in it."""
+    from llm_redact import winacl
+    from llm_redact.overrides import shell_quote
+
+    try:
+        user = winacl.current_user_sid()
+    except OSError as problem:
+        report.line(
+            "WARN",
+            area,
+            f"{path}: cannot check its NTFS access control list ({problem.strerror or problem})",
+        )
+        return
+    sidecars = [path.with_name(path.name + suffix) for suffix in winacl.SQLITE_SIDECARS]
+    targets = [path, *(sidecar for sidecar in sidecars if sidecar.exists())]
+    if want_dir_private:
+        targets.append(path.parent)
+    for target in targets:
+        try:
+            dacl = winacl.read_dacl(target)
+        except OSError as problem:
+            report.line(
+                "WARN",
+                area,
+                f"{target}: cannot check its NTFS access control list"
+                f" ({problem.strerror or problem})",
+            )
+            continue
+        owned = winacl.ownership_problem(dacl, user)
+        if owned is not None:
+            report.line("FAIL", area, f"{target}: {owned}")
+        others = [
+            name
+            for name in winacl.foreign_access(dacl, user, folder=target == path.parent)
+            if not name.startswith("its owner, ")  # said above
+        ]
+        if others:
+            report.line(
+                "FAIL",
+                area,
+                f"{target} lets in {', '.join(others)} (its NTFS access control list): remove"
+                " those entries, so that only your account, SYSTEM and Administrators keep"
+                f" access (icacls {shell_quote(str(target))} lists them)",
+            )
+        elif owned is None and target == path:
+            protected = dacl.protected
+            how = "protected" if protected else "inherited from its folder"
+            report.line(
+                "PASS", area, f"{path} is private to your account (NTFS access control list, {how})"
             )
 
 
@@ -409,6 +465,11 @@ def _check_live_vault(report: _Report, status: Any) -> None:
 
 
 def _check_port_free(report: _Report, config: Config) -> None:
+    from llm_redact import ports
+
+    if sys.platform == "win32" and ports.exclusive_option() is not None:
+        _check_port_free_windows(report, config)
+        return
     # An IPv6 bind needs an IPv6 socket: an IPv4 one fails to bind "::1"
     # whether or not the port is free.
     family = socket.AF_INET6 if ":" in config.host else socket.AF_INET
@@ -436,6 +497,46 @@ def _check_port_free(report: _Report, config: Config) -> None:
         report.line("PASS", "proxy", f"port {config.port} is free")
     finally:
         probe.close()
+
+
+def _check_port_free_windows(report: _Report, config: Config) -> None:
+    """On Windows, every address of the host bound exclusively
+    (``ports.bind_exclusive``): serve's own bind for a wildcard host, and
+    for a specific address the same answer a plain bind gets (Microsoft's
+    tables). WSAEADDRINUSE (10048) is a port in use; WSAEACCES (10013) one
+    Windows will not bind at all."""
+    from llm_redact.ports import bind_exclusive
+
+    try:
+        sockets = bind_exclusive(config.host, config.port)
+    except OSError as problem:
+        code = getattr(problem, "winerror", None) or problem.errno
+        if code == 10013:
+            report.line(
+                "WARN",
+                "proxy",
+                f"Windows will not bind port {config.port}: it may reserve it for Hyper-V, WSL"
+                " or Docker (see netsh int ipv4 show excludedportrange protocol=tcp), or"
+                " another program holds it exclusively — choose another port",
+            )
+        elif code == 10048:
+            report.line(
+                "WARN",
+                "proxy",
+                f"port {config.port} is in use by something that does not answer"
+                " /__llm-redact/status — is another service bound there?",
+            )
+        else:
+            report.line(
+                "WARN",
+                "proxy",
+                f"cannot bind port {config.port} on {config.host or 'all interfaces'}"
+                f" ({problem.strerror or problem})",
+            )
+        return
+    for sock in sockets:
+        sock.close()
+    report.line("PASS", "proxy", f"port {config.port} is free")
 
 
 def _check_vault(report: _Report, config: Config) -> None:
@@ -763,6 +864,18 @@ def _check_extras(report: _Report, config: Config) -> None:
         report.line("PASS", "realtime", "websockets importable (WS relay active)")
 
 
+def _readable(path: Path) -> bool:
+    """Whether ``path`` opens and reads, as serve will open it. os.access
+    does not read Windows access control lists (it checks only the
+    read-only attribute there), so it passed a file serve cannot open."""
+    try:
+        with path.open("rb") as handle:
+            handle.read(1)
+    except OSError:
+        return False
+    return True
+
+
 def _check_tls_and_bind(report: _Report, config: Config) -> None:
     for label, value in (
         ("certfile", config.tls.certfile),
@@ -772,7 +885,7 @@ def _check_tls_and_bind(report: _Report, config: Config) -> None:
         if value is None:
             continue
         path = Path(value).expanduser()
-        if path.exists() and os.access(path, os.R_OK):
+        if _readable(path):
             report.line("PASS", "tls", f"{label} {path} readable")
         else:
             report.line("FAIL", "tls", f"{label} {path} missing or unreadable")

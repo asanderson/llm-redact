@@ -755,13 +755,17 @@ async def test_a_file_declared_as_another_format_is_not_vouched_for(
 
 def test_the_worker_environment_holds_only_what_python_needs() -> None:
     # No variable of the proxy's reaches the worker; on Windows the two
-    # system paths CPython needs to start (SYSTEMROOT seeds its hashing).
-    environ = {"SYSTEMROOT": r"C:\\Windows", "WINDIR": r"C:\\Windows", "API_KEY": "sk-x"}
+    # system paths CPython needs to start (SYSTEMROOT seeds its hashing), and
+    # a PATH of the system folder alone: os.defpath there is .;C:\\bin, the
+    # current folder and a drive-root folder anyone may put a program in.
+    environ = {"SYSTEMROOT": "C:\\Windows", "WINDIR": "C:\\Windows", "API_KEY": "sk-x"}
     assert extraction.worker_env("linux", environ) == {"PATH": os.defpath}
     assert extraction.worker_env("darwin", environ) == {"PATH": os.defpath}
     assert extraction.worker_env("win32", environ) == {
-        "PATH": os.defpath,
-        "SYSTEMROOT": r"C:\\Windows",
-        "WINDIR": r"C:\\Windows",
+        "PATH": "C:\\Windows\\System32",
+        "SYSTEMROOT": "C:\\Windows",
+        "WINDIR": "C:\\Windows",
     }
-    assert extraction.worker_env("win32", {}) == {"PATH": os.defpath}
+    trailing = extraction.worker_env("win32", {"SYSTEMROOT": "C:\\Windows\\"})
+    assert trailing["PATH"] == "C:\\Windows\\System32"
+    assert extraction.worker_env("win32", {}) == {}  # no PATH rather than a planted one

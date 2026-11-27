@@ -594,7 +594,8 @@ the package).
 
 `llm-redact doctor` ties these together as a read-only preflight: it
 checks config parse, the bind policy, proxy reachability and version skew,
-vault/audit file permissions (`0600`/`0700`), missing extras, that the
+vault/audit file permissions (`0600`/`0700`; on Windows, who their access
+control lists let in), missing extras, that the
 fernet key actually **matches** the vault (not merely that it is set), and
 loudly reports every coverage opt-out (warn-mode types, per-provider
 detection off, MCP exempt servers, language-scoped-out rules). It exits

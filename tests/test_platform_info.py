@@ -239,6 +239,14 @@ def test_doctor_fails_a_vault_and_warns_other_stores_on_a_windows_drive(
     assert any("audit" in m for m in warned)
     assert any("override" in m for m in warned)
     assert any("model folders" in m for m in warned)
+    # A store there is neither locked as SQLite needs nor kept private: the
+    # 0600 llm-redact sets does not keep Windows programs or accounts out.
+    (store,) = [m for m in warned if m.startswith("the audit log")]
+    assert "SQLite's locks do not hold" in store and "0600" in store
+    assert "Windows drive's own access control list" in store
+    # A model folder only loads slowly there.
+    (models,) = [m for m in warned if m.startswith("the model folders")]
+    assert "SQLite" not in models and "loading a model reads slowly" in models
 
 
 def test_doctor_outside_wsl_says_nothing_new(

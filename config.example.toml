@@ -133,7 +133,9 @@ format = "text"
 # "sqlite" (Free, unencrypted): mappings persist across restarts, so tokens
 # issued before a restart keep rehydrating and provider prompt caches stay
 # coherent. The database holds the real secret values — it is created 0600 in
-# a 0700 directory, but only enable this if you accept secrets on disk.
+# a 0700 directory (on Windows, with an access control list that lets in only
+# your account, SYSTEM and Administrators), but only enable this if you
+# accept secrets on disk.
 # Encrypting it at rest (encryption = "fernet", below) needs Pro.
 # "postgresql" | "mysql" | "oracle" | "dbapi" (Pro; llm-redact-pro docs/vault-rdbms.md):
 # the same persistent vault on a server RDBMS via the [vault.rdbms] section

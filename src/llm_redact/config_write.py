@@ -13,6 +13,7 @@ Comments from a hand-edited file are NOT preserved; the editor keeps one
 .bak of the previous bytes.
 """
 
+import contextlib
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import textwrap
 from collections.abc import Mapping
 from pathlib import Path
 
+from llm_redact import winacl
 from llm_redact.config import (
     CONFIDENCE_BACKENDS,
     DEFAULT_MAP_WRITE_WAIT_SECONDS,
@@ -44,6 +46,7 @@ from llm_redact.config import (
     VaultKmsConfig,
 )
 from llm_redact.detection.engine import DetectionConfig, LlmNerConfig
+from llm_redact.held_files import HeldFile, is_held, retried, sharing_violation
 
 _BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
 
@@ -706,10 +709,14 @@ def write_config_atomic(path: Path, text: str) -> Path | None:
 
     Returns the backup path when a previous file existed, else None. The
     directory is created 0700 if missing (it may hold vault paths later).
+    On Windows a file another program holds open (an editor, a virus
+    scanner, a sync client) is replaced once it is released, within about
+    two seconds; past that ``HeldFile`` says which file to close.
     """
     if not path.parent.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(path.parent, 0o700)
+        winacl.make_private(path.parent, folder=True)
 
     backup: Path | None = None
     if path.exists():
@@ -718,12 +725,38 @@ def write_config_atomic(path: Path, text: str) -> Path | None:
 
     tmp = path.with_name(path.name + ".tmp")
     _write_0600(tmp, text.encode("utf-8"), fsync=True)
-    os.replace(tmp, path)
+    try:
+        retried(lambda: os.replace(tmp, path))
+    except OSError as error:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        if is_held(error):
+            raise _held(path, error) from error
+        raise
     return backup
 
 
+def _held(path: Path, error: OSError) -> HeldFile:
+    if sharing_violation(error):
+        return HeldFile(
+            f"another program holds {path} open (an editor, a virus scanner or a sync client):"
+            " close it and run the command again"
+        )
+    return HeldFile(
+        f"Windows refused to change {path}: another program may hold it open (an editor, a"
+        " virus scanner or a sync client), or your account may not change it (it is read-only,"
+        " or its access control list does not let you): close such a program and run the"
+        " command again"
+    )
+
+
 def _write_0600(path: Path, data: bytes, *, fsync: bool = False) -> None:
-    path.unlink(missing_ok=True)
+    try:
+        retried(lambda: path.unlink(missing_ok=True))
+    except OSError as error:
+        if is_held(error):
+            raise _held(path, error) from error
+        raise
     # O_BINARY: without it the Windows CRT opens the fd in text mode and
     # rewrites the newlines we just emitted — the file must round-trip
     # byte-exact (POSIX has no such flag, hence the getattr).
@@ -735,3 +768,5 @@ def _write_0600(path: Path, data: bytes, *, fsync: bool = False) -> None:
             os.fsync(fd)
     finally:
         os.close(fd)
+    # Windows' 0600; a rename keeps the list, so the replaced config has it.
+    winacl.make_private(path)

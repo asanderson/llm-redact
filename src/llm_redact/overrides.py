@@ -58,7 +58,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from llm_redact import paths
+from llm_redact import paths, winacl
 from llm_redact.config import config_search_candidates
 
 logger = logging.getLogger(__name__)
@@ -436,9 +436,14 @@ class OverrideStore:
             return None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(self.path.parent, 0o700)
+        winacl.make_private(self.path.parent, folder=True)
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
         os.close(fd)
         os.chmod(self.path, 0o600)
+        winacl.make_private(self.path)
+        # The -wal and -shm keep their own lists: checked before SQLite opens
+        # them and again once it has (winacl.make_sidecars_private).
+        winacl.make_sidecars_private(self.path)
         conn = sqlite3.connect(
             self.path,
             isolation_level=None,
@@ -448,6 +453,7 @@ class OverrideStore:
         try:
             conn.execute(f"PRAGMA busy_timeout={int(self._busy_timeout_ms)}")
             conn.execute("PRAGMA journal_mode=WAL")
+            winacl.make_sidecars_private(self.path)
             # NORMAL under WAL: a commit never waits for the disk (the proxy
             # writes here on its event loop). A power loss may drop the last
             # commits: a pending code, an approval or a one-time use — the

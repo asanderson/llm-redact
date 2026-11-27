@@ -1033,6 +1033,168 @@ def test_pull_to_that_fails_while_replacing_leaves_no_manifest(
     assert _run(capsys, "verify", "--dir", str(out_dir))[0] == 0
 
 
+class _Held(PermissionError):
+    winerror = 32  # ERROR_SHARING_VIOLATION: another program holds the file
+
+
+def test_pull_to_keeps_whole_a_folder_windows_will_not_move(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # On Windows a running proxy that loaded a model holds its files, so
+    # the folder can be neither renamed nor deleted. Deleting it first once
+    # removed part of it (the sidecar too, so the next pull refused the
+    # folder as not its own). It is renamed aside before it is deleted.
+    import os
+    from types import SimpleNamespace
+
+    from llm_redact import held_files
+
+    install_hub(monkeypatch, _pull_hub())
+    out_dir = tmp_path / "carry"
+    config = _config(tmp_path, 'backends = ["hf", "gliner"]')
+    assert _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))[0] == 0
+    before = _tree(out_dir)
+    monkeypatch.setattr(held_files, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(held_files, "DELAYS", (0.0, 0.0))
+    real = os.rename
+    tries: list[str] = []
+
+    def rename(source: Any, target: Any) -> None:
+        if Path(source).name == HF_FOLDER:
+            tries.append(Path(target).name)
+            raise _Held(13, "used by another process")
+        real(source, target)
+
+    monkeypatch.setattr(os, "rename", rename)
+    code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
+    assert code == 1
+    assert out.splitlines()[-1] == (
+        f"FAIL  cannot replace {out_dir / HF_FOLDER}: a program holds its files. A running"
+        " proxy that loaded this model holds them for as long as it runs, a virus scanner for"
+        " a moment: stop the proxy and run the command again"
+    )
+    assert tries == [f".{HF_FOLDER}.old"] * 3  # tried again, then reported
+    # Every folder whole, no manifest describing them, nothing left aside.
+    assert _tree(out_dir) == {k: v for k, v in before.items() if k != MANIFEST_NAME}
+    assert sorted(p.name for p in out_dir.iterdir()) == [
+        "gliner-urchade--gliner_small-v2.1",
+        HF_FOLDER,
+    ]
+    monkeypatch.setattr(os, "rename", real)  # the proxy stopped
+    assert _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))[0] == 0
+    assert _run(capsys, "verify", "--dir", str(out_dir))[0] == 0
+
+
+class _Denied(PermissionError):
+    winerror = 5  # ERROR_ACCESS_DENIED: held, or not the account's to change
+
+
+def test_pull_to_does_not_call_every_denial_a_hold(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    from types import SimpleNamespace
+
+    from llm_redact import held_files
+
+    install_hub(monkeypatch, _pull_hub())
+    out_dir = tmp_path / "carry"
+    config = _config(tmp_path, 'backend = "hf"')
+    assert _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))[0] == 0
+    monkeypatch.setattr(held_files, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(held_files, "DELAYS", (0.0,))
+    real = os.rename
+
+    def rename(source: Any, target: Any) -> None:
+        if Path(source).name == HF_FOLDER:
+            raise _Denied(13, "access denied")
+        real(source, target)
+
+    monkeypatch.setattr(os, "rename", rename)
+    code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
+    assert code == 1
+    assert out.splitlines()[-1] == (
+        f"FAIL  cannot replace {out_dir / HF_FOLDER}: Windows refused to move it, as it does"
+        " while a program holds its files (a running proxy that loaded this model holds them"
+        " for as long as it runs, a virus scanner for a moment) or when your account may not"
+        " change it: stop the proxy and run the command again"
+    )
+
+
+def test_a_folder_put_aside_comes_back_when_its_replacement_cannot_move_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The old folder renamed aside, the new one refused (a scanner opened it):
+    # the configured folder once stayed missing.
+    import os
+
+    from llm_redact import models_cli
+
+    final = tmp_path / "hf-model"
+    final.mkdir()
+    (final / "config.json").write_text("{}", encoding="utf-8")
+    temp = tmp_path / ".hf-model.partial"
+    temp.mkdir()
+    real = os.rename
+
+    def rename(source: Any, target: Any) -> None:
+        if Path(source) == temp:
+            raise OSError(28, "No space left on device")
+        real(source, target)
+
+    monkeypatch.setattr(os, "rename", rename)
+    with pytest.raises(OSError, match="No space left"):
+        models_cli._replace_folder(temp, final)
+    assert (final / "config.json").read_text(encoding="utf-8") == "{}"
+    assert not (tmp_path / ".hf-model.old").exists()
+
+
+def test_pull_to_says_which_file_windows_kept_held(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    from types import SimpleNamespace
+
+    from llm_redact import held_files
+
+    install_hub(monkeypatch, _pull_hub())
+    out_dir = tmp_path / "carry"
+    config = _config(tmp_path, 'backend = "hf"')
+    monkeypatch.setattr(held_files, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(held_files, "DELAYS", (0.0,))
+    real = os.replace
+
+    def replace(source: Any, target: Any) -> None:
+        if Path(target).name == MANIFEST_NAME:
+            raise _Held(13, "used by another process")
+        real(source, target)
+
+    monkeypatch.setattr(os, "replace", replace)
+    code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
+    assert code == 1
+    assert out.splitlines()[-1] == (
+        f"FAIL  cannot write the model folders to {out_dir} (_Held): another program holds a"
+        " file there; close it and run the command again"
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows file locks")
+def test_pull_to_keeps_whole_a_folder_whose_file_is_open(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_hub(monkeypatch, _pull_hub())
+    out_dir = tmp_path / "carry"
+    config = _config(tmp_path, 'backend = "hf"')
+    assert _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))[0] == 0
+    before = _tree(out_dir)
+    with open(out_dir / HF_FOLDER / "config.json", "rb"):  # as a loaded model holds it
+        code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
+    assert code == 1 and "stop the proxy and run the command again" in out.splitlines()[-1]
+    assert _tree(out_dir) == {k: v for k, v in before.items() if k != MANIFEST_NAME}
+    assert _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))[0] == 0
+    assert _run(capsys, "verify", "--dir", str(out_dir))[0] == 0
+
+
 def test_pull_cannot_write_its_output(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

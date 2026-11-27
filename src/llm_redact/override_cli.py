@@ -37,7 +37,8 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO
+from types import TracebackType
+from typing import IO, Protocol
 
 from llm_redact.config import (
     Config,
@@ -56,11 +57,6 @@ from llm_redact.overrides import (
 )
 
 CONFIRM_WORD = "allow"
-NO_TERMINAL_ON_WINDOWS = (
-    "approving an override on the command line is not available on Windows yet: the"
-    " confirmation is read from the controlling terminal (/dev/tty), which Windows does"
-    " not have"
-)
 
 
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -90,7 +86,74 @@ def _store(args: argparse.Namespace, config: Config, *, read_only: bool = False)
     return OverrideStore(path, ttl_seconds=config.overrides.ttl_minutes * 60, read_only=read_only)
 
 
-def _open_tty() -> IO[str]:
+class _Terminal(Protocol):
+    """What the approval reads its answer from and writes its prompt to."""
+
+    def write(self, text: str, /) -> int: ...
+
+    def flush(self) -> None: ...
+
+    def readline(self) -> str: ...
+
+    def __enter__(self) -> _Terminal: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+        /,
+    ) -> None: ...
+
+
+class _Console:
+    """The Windows console: ``CONIN$`` to read, ``CONOUT$`` to write."""
+
+    def __init__(self, reader: IO[str], writer: IO[str]) -> None:
+        self._reader = reader
+        self._writer = writer
+
+    def write(self, text: str, /) -> int:
+        return self._writer.write(text)
+
+    def flush(self) -> None:
+        self._writer.flush()
+
+    def readline(self) -> str:
+        return self._reader.readline()
+
+    def __enter__(self) -> _Console:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+        /,
+    ) -> None:
+        try:
+            self._writer.close()
+        finally:
+            self._reader.close()
+
+
+def _open_console() -> _Console:
+    """The console of this process (OSError without one: pythonw, a service,
+    a process started with DETACHED_PROCESS; one started in a console of its
+    own reads that console, which no one may be watching). ``CONIN$`` and
+    ``CONOUT$`` are device names Windows reads as the console in any
+    directory, never a file."""
+    reader = open("CONIN$", encoding="utf-8")  # noqa: SIM115 — closed by _Console
+    try:
+        writer = open("CONOUT$", "w", encoding="utf-8", newline="\n")  # noqa: SIM115
+    except BaseException:
+        reader.close()
+        raise
+    return _Console(reader, writer)
+
+
+def _open_tty() -> _Terminal:
     """The controlling terminal, for reading and writing (OSError without
     one). Unbuffered bytes under a text layer: ``open("/dev/tty", "r+")``
     wraps a terminal in a seekable BufferedRandom, which a terminal is not
@@ -100,10 +163,12 @@ def _open_tty() -> IO[str]:
 
     Windows has no /dev/tty: there "/dev/tty" names ``\\dev\\tty`` at the
     root of the working directory's drive, a file another local account can
-    create with the confirmation word in it. Nothing is opened there: the
-    approval refuses (OverrideError)."""
+    create with the confirmation word in it. The approval reads the console
+    instead (``CONIN$``, ``CONOUT$``: the console even when stdin and
+    stdout are redirected), and without one refuses as POSIX does without
+    a terminal."""
     if sys.platform == "win32":
-        raise OverrideError(NO_TERMINAL_ON_WINDOWS)
+        return _open_console()
     raw = io.FileIO("/dev/tty", "r+")
     try:
         return io.TextIOWrapper(raw, encoding="utf-8", write_through=True)

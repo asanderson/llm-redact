@@ -3085,8 +3085,8 @@ def apply_limits(memory_bytes: int, cpu_seconds: int) -> None:
     platform enforces it — not macOS), CPU seconds, files written (none),
     open files and child processes. A limit the platform refuses is skipped
     (the parent's wall-clock kill still holds), and a platform without
-    resource limits (Windows) applies none: the parent bounds the input
-    there instead (``extraction.MEMORY_LIMIT_ENFORCED``)."""
+    resource limits (Windows) applies none: there the parent confines this
+    process in a Job Object before it reads the file (``winjob.confine``)."""
     if sys.platform == "win32":
         return
     try:

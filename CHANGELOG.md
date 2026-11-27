@@ -11,6 +11,111 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Security
+- **On Windows, `llm-redact run -- <tool>` still looked for the tool in folders that move with the
+  working directory.** 1.13.1 stopped searching the current directory and skips relative PATH
+  entries, but an entry naming the current drive's root (`\tools`) or a drive's current folder
+  (`C:tools`) also depends on where the command runs from: on the drive of a cloned repository,
+  `\tools\claude.exe` is a file at that drive's root. Such entries are skipped now too. Affected:
+  1.13.1 and earlier on Windows, with such an entry on PATH.
+- **On Windows, `llm-redact run -- <tool>` let cmd.exe act on what the tool's arguments held
+  when the tool is a batch file**, as npm's `claude.cmd` is: CreateProcess hands a batch file's
+  command line to cmd.exe, and Python's quoting does not guard against it (BatBadBut), so an
+  argument holding `"x" & calc` ran `calc`, and a script passing text it did not write (a prompt
+  read from a file) ran what the text said. A batch file now runs through `cmd.exe /d /v:OFF`
+  with every argument in double quotes, where cmd.exe reads `& | < > ( ) ^ !` as text, and an
+  argument holding what no quoting keeps from cmd.exe (`"`, `%`, a line break) is refused
+  (exit 2), naming the character: run the program the batch file starts instead (1.13.1 only
+  warned about such an argument). Affected: every release run on Windows with a batch file named.
+- **On Windows, a proxy listening on all interfaces could have the connections local clients
+  sent it taken by another program.** With `host = "0.0.0.0"`, `"::"` or empty (a non-loopback
+  bind, so with mutual TLS or `LLM_REDACT_INSECURE_BIND=1`), another program could bind the
+  proxy's port on 127.0.0.1 beside it and receive the connections sent there, the address that
+  `llm-redact run`, `status` and `doctor` dial for such a bind: a program running as the same
+  user while the proxy ran, or a program of any account that bound the port first, beside which
+  the proxy then started without a word. Over plain HTTP it received their prompts and
+  credentials; a client that verifies the proxy's certificate refuses it, so its requests failed
+  instead. On Windows `serve` now binds a wildcard host's addresses with SO_EXCLUSIVEADDRUSE: no
+  other socket shares the port, and a port another program holds stops `serve` (naming `netsh
+  int ipv4 show excludedportrange protocol=tcp` when Windows will not bind it at all). A
+  specific address, the default 127.0.0.1 included, was not exposed, and Linux and macOS are
+  unchanged. `doctor` probes the port as `serve` binds it and tells a port in use from one
+  Windows reserves (for Hyper-V, WSL or Docker) or another program holds exclusively. Affected:
+  every release run natively on Windows with a wildcard bind.
+- **On Windows, a store created outside the user profile could be read by every local account.**
+  The vault, the override store, the config file and its `.bak`, a `vault backup` and the log
+  file are created `0600` in a `0700` folder on POSIX, but Windows ignores those modes: each
+  inherited its folder's access control list, and a folder at the root of a drive
+  (`C:\llm-redact\vault.db`) lets every local account read what is in it. They now get a
+  protected access control list that lets in only your account, SYSTEM and Administrators. A
+  folder llm-redact makes private passes it on to what is created in it, a vault's `-wal` and
+  `-shm` files included: the vault's and the override store's folder always, as `chmod 700` does
+  on POSIX, the config's and the log's when llm-redact creates them. A store, folder, `-wal` or
+  `-shm` another account owns is refused, never taken over: its owner could change the list
+  back, and a handle it opened before keeps its access (a vault's `-wal` and `-shm` already
+  there are checked before SQLite opens them, and again once it has). A list that does not hold
+  once set (a FAT32 or exFAT drive keeps none) is refused too, and so is a file Windows will not
+  give that list, as a failed `chmod` stops the command or the proxy; a vault refused this way
+  stops `serve` and `serve --check` with an error naming it. The default locations under
+  `%LOCALAPPDATA%` were private already, by inheritance. Affected: every release on Windows with
+  a store outside the user profile.
+- **On Windows, the document-extraction worker ran without limits**: POSIX caps the process
+  that parses an uploaded file (memory, CPU time, no child processes) with `setrlimit`, which
+  Windows lacks, so a crafted file could make the worker take all memory, run until the wall-clock
+  kill, start other programs, and outlive a proxy that was killed. Its PATH was Python's
+  default there, `.;C:\bin`: the current folder and a folder at the drive's root. The proxy now
+  puts the worker in a Job Object before a byte of the file reaches it (memory
+  `worker_memory_mb`, the same CPU time, one process, ended with the proxy), a worker that
+  cannot be put in one reads nothing, and its PATH is `%SYSTEMROOT%\System32` alone. In a
+  virtual environment the worker runs on the base interpreter (the environment's `python.exe` is
+  a launcher that would start it as a process of its own), and it gets no console window. The
+  input bound that stood in for the missing memory limit (a quarter of `worker_memory_mb`) now
+  applies on macOS only. What the job leaves: Windows has no limit on the files a process writes,
+  a Windows service the worker asks (WMI, the Task Scheduler) starts programs outside the job, and
+  the worker, running as the proxy's account, may open the proxy's process and read its memory
+  (docs/extraction.md). Affected: `[extraction]` (off by default) on Windows, since 1.10.0.
+
+### Added
+- **On Windows, `llm-redact override CODE --once|--always` approves at the console again**: it
+  reads `allow` from `CONIN$`, the console even when stdin and stdout are redirected (1.13.1
+  stopped reading `/dev/tty`, a file at the drive's root there, and refused every approval).
+  Without a console (a service, `pythonw.exe`, a process started with `DETACHED_PROCESS`) it
+  refuses as it does without a terminal elsewhere. One started in a console of its own
+  (`CREATE_NEW_CONSOLE`, `CREATE_NO_WINDOW`) reads that console, which no one may be watching and
+  the program that started it can type into: approval guards against accidents, not against
+  software running as you (docs/overrides.md).
+
+### Changed
+- **On Windows, `doctor` checks who the stores' NTFS access control lists let in**: the vault
+  (with its `-wal` and `-shm`, and its folder with what the folder passes on to the files made in
+  it) and the audit log FAIL when another account owns them (an owner may always rewrite the
+  list) or an entry allows anyone but your account, SYSTEM and Administrators any right beyond
+  reading the attributes and the list (`BUILTIN\Users`, for a file under a folder at a drive's
+  root), naming them and how to list them (`icacls`). An entry of a kind doctor does not read is
+  named by its type. An OWNER RIGHTS entry, which Python 3.13 and later use for a
+  folder made private, counts as its owner. It used to WARN that it could not check anything,
+  since POSIX mode bits are synthetic there. A private file says whether its list is protected
+  or inherited from its folder.
+
+### Fixed
+- In WSL, `llm-redact run` now replaces an entry `WSLENV` already holds for a variable it exports
+  with `NAME/w`: 1.13.1 kept it, and one flagged `/u` never reached the Windows program, while `/p`
+  would have translated the URL as a path. Other entries stay.
+- On Windows, writing the config file (`init`, the config editor), `models pull --to` and an
+  assembled GLiNER folder failed with a PermissionError while another program held one of their
+  files for a moment, as a virus scanner, the search indexer or a sync client does right after a
+  file is written. Windows refuses to rename or delete a file another program has open; each such
+  step is now tried again for about two seconds, then reported with what to close (`init` prints
+  which file instead of a traceback; where Windows only says access is denied, the message also
+  names an account that may not change the file). `models pull --to` renames a folder it replaces
+  aside before deleting it: a running proxy holds the model files it loaded, and deleting first
+  left a folder half gone (its sidecar too, so the next pull refused it as not its own). The
+  folder now stays whole (put back when its replacement cannot move in), and the command says to
+  stop the proxy and run it again. Linux and macOS retry nothing.
+- `doctor` passed a TLS certificate, key or client CA that serve cannot open on Windows: it asked
+  `os.access`, which reads only the read-only attribute there, never the access control list.
+  It now opens the file, on every platform.
+
 ## [1.13.1] - 2026-11-26
 
 A security release for Windows. Since 1.0.0 the default config search could load, and `init`

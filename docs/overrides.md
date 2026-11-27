@@ -70,19 +70,23 @@ The command shows what was refused (kind, detector types, route, requester;
 the route and requester come from the request, so every non-printable
 character is escaped and either is cut to 120 characters, its length named),
 repeats the kind and types on the line it asks you to confirm, and waits for
-`allow` typed on the controlling terminal (`/dev/tty`). It never
-reads the answer from stdin and refuses without a terminal, so an agent that
-merely pipes `allow` into the command does not approve anything. Windows has
-no `/dev/tty`, so on Windows the command refuses to approve: approving on the
-command line is not available there yet. With
+`allow` typed on the controlling terminal (`/dev/tty`; on Windows the
+console, `CONIN$`, which is the console even when stdin and stdout are
+redirected). It never reads the answer from stdin and refuses without a
+terminal (on Windows, without a console: a service, `pythonw.exe`, a process
+started with `DETACHED_PROCESS`), so an agent that merely pipes `allow` into the
+command does not approve anything. On Windows a process started in a console of
+its own (`CREATE_NEW_CONSOLE`, or `CREATE_NO_WINDOW`, a console no one sees)
+reads that console: no one may be watching it, and the program that started it
+can type into it, as the next paragraph says. With
 llm-redact-pro and a dashboard sign-in (`[auth.dashboard]`), the dashboard
 shows the same pending refusals with **Allow once** and **Always allow**
 buttons, and your rules with **Revoke**.
 
 **Approval guards against accidents, not against local software.** An agent
 that has a shell running as you can approve its own refusal: it can open a
-pseudo-terminal and type `allow` into it, or edit the store file, just as it
-can edit the configuration. Leave overrides off (the default) where every
+pseudo-terminal and type `allow` into it (on Windows, write to the console's
+input buffer), or edit the store file, just as it can edit the configuration. Leave overrides off (the default) where every
 refusal must stay final, or where an agent with a shell works next to the
 proxy unsupervised.
 
@@ -244,7 +248,8 @@ point to the CLI, and the listing says `"can_approve": false`.
   applies to the next connection's matching frame.
 - `--always` lasts until `llm-redact override revoke`.
 - The store is `$XDG_DATA_HOME/llm-redact/overrides.db` (0600, its directory
-  0700), or `[overrides] path`.
+  0700; on Windows a protected access control list for your account, SYSTEM
+  and Administrators), or `[overrides] path`.
   - It holds no values: each refused value is an HMAC-SHA256 under a random
     per-install key kept in the same file. Someone who can read the file
     can therefore test guesses of a short value, such as a national ID

@@ -37,8 +37,8 @@ LISTED: dict[tuple[str, str], tuple[str, str]] = {
         "test_config_search.py::test_windows_never_touches_the_drive_root_config",
     ),
     ("override_cli.py", "/dev/tty"): (
-        "_open_tty refuses on Windows before opening anything",
-        "test_override_cli.py::test_windows_never_opens_a_tty_file",
+        "_open_tty reads the Windows console there (CONIN$, CONOUT$), never /dev/tty",
+        "test_override_cli.py::test_windows_reads_the_console_never_a_tty_file",
     ),
     ("fips.py", "/proc/sys/crypto/fips_enabled"): (
         "collect_fips_report reads it on Linux only",

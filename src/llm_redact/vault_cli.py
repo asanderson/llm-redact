@@ -21,7 +21,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from llm_redact import paths
+from llm_redact import paths, winacl
 from llm_redact.config import apply_env_overrides, dial_url, load_config
 from llm_redact.placeholders import MAX_TOKEN_NUMBER, canonicalize
 from llm_redact.vault import (
@@ -704,6 +704,11 @@ def run_vault_backup(args: argparse.Namespace) -> int:
         print(f"cannot write backup to {dest}: {type(exc).__name__}")
         return 2
     os.close(fd)
+    try:
+        winacl.make_private(dest)  # Windows' 0600
+    except OSError as exc:
+        print(f"cannot keep the backup {dest} private: {exc.strerror or type(exc).__name__}")
+        return 2
     src = sqlite3.connect(paths.sqlite_readonly_uri(src_path), uri=True)
     dst = sqlite3.connect(dest)
     try:

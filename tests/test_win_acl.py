@@ -1,0 +1,438 @@
+"""doctor reads a store's NTFS access control list on Windows, and opens a
+TLS file to check it can be read.
+
+POSIX mode bits are synthetic on Windows (a regular file commonly reports
+666): doctor used to WARN that it could not check anything. It now reads the
+DACL (``llm_redact.winacl``) and FAILs an allow entry for anyone but this
+account, SYSTEM and Administrators. ``os.access`` does not read access
+control lists on Windows (only the read-only attribute), so a TLS file
+serve cannot open passed; doctor now opens it.
+
+The ACL model and doctor's decision run on every OS with stand-in lists; the
+real-API tests run on the Windows legs (icacls changes the lists)."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from llm_redact import winacl
+from llm_redact.winacl import (
+    ADMINISTRATORS,
+    CREATOR_GROUP,
+    NO_DACL,
+    OWNER_RIGHTS,
+    SYSTEM,
+    Ace,
+    Dacl,
+    entry_for,
+    foreign_access,
+)
+
+USER = "S-1-5-21-1000-2000-3000-1001"
+USERS = "S-1-5-32-545"
+AUTHENTICATED = "S-1-5-11"
+CREATOR_OWNER = "S-1-3-0"
+FULL, READ, SYNC_ONLY = 0x1F01FF, 0x120089, 0x120000  # FILE_ALL_ACCESS, FILE_GENERIC_READ, ...
+INHERITED, INHERIT_ONLY = 0x10, 0x08
+PASSED_ON = 0x01 | 0x02  # OBJECT_INHERIT | CONTAINER_INHERIT: what is created in a folder
+
+
+def _private(*extra: Ace, protected: bool = False) -> Dacl:
+    return Dacl(
+        (
+            Ace(True, USER, FULL, name="RUNNER\\me"),
+            Ace(True, SYSTEM, FULL, INHERITED, "NT AUTHORITY\\SYSTEM"),
+            Ace(True, ADMINISTRATORS, FULL, INHERITED, "BUILTIN\\Administrators"),
+            *extra,
+        ),
+        protected=protected,
+        owner=USER,
+    )
+
+
+def test_a_list_of_this_account_system_and_administrators_lets_no_one_else_in() -> None:
+    assert foreign_access(_private(), USER) == []
+
+
+def test_an_entry_for_users_lets_them_in() -> None:
+    dacl = _private(Ace(True, USERS, READ, INHERITED, "BUILTIN\\Users"))
+    assert foreign_access(dacl, USER) == ["BUILTIN\\Users"]
+
+
+def test_another_account_is_named_once_and_an_unnamed_one_by_its_sid() -> None:
+    dacl = _private(
+        Ace(True, AUTHENTICATED, READ, name="NT AUTHORITY\\Authenticated Users"),
+        Ace(True, AUTHENTICATED, 0x80000000, name="NT AUTHORITY\\Authenticated Users"),
+        Ace(True, "S-1-5-21-9-9-9-500", FULL),
+    )
+    assert foreign_access(dacl, USER) == [
+        "NT AUTHORITY\\Authenticated Users",
+        "S-1-5-21-9-9-9-500",
+    ]
+
+
+def test_entries_that_grant_nothing_here_do_not_count() -> None:
+    dacl = _private(
+        Ace(True, CREATOR_OWNER, FULL, INHERIT_ONLY, "CREATOR OWNER"),  # for children only
+        Ace(False, USERS, FULL, name="BUILTIN\\Users"),  # a deny entry
+        Ace(True, USERS, SYNC_ONLY, name="BUILTIN\\Users"),  # synchronize, read the ACL
+    )
+    assert foreign_access(dacl, USER) == []
+
+
+def test_owner_rights_stand_for_the_owner() -> None:
+    # Python 3.13+ makes a mkdir(mode=0o700) folder private through OWNER
+    # RIGHTS: private while this account owns it.
+    owner_rights = Ace(True, OWNER_RIGHTS, FULL, INHERITED, "OWNER RIGHTS")
+    mine = Dacl((Ace(True, SYSTEM, FULL), owner_rights), protected=True, owner=USER)
+    assert foreign_access(mine, USER) == []
+    theirs = Dacl(mine.aces, protected=True, owner="S-1-5-21-9-9-9-1002", owner_name="PC\\eve")
+    assert foreign_access(theirs, USER) == ["its owner, PC\\eve"]
+    unknown = Dacl(mine.aces, protected=True)
+    assert foreign_access(unknown, USER) == ["OWNER RIGHTS"]
+
+
+def test_another_owner_is_named_even_with_no_entry_for_it() -> None:
+    # An owner may always rewrite the list.
+    dacl = _private()
+    dacl = Dacl(dacl.aces, protected=True, owner="S-1-5-21-9-9-9-1002")
+    assert foreign_access(dacl, USER) == ["its owner, S-1-5-21-9-9-9-1002"]
+
+
+def test_the_creator_placeholders_match_no_account() -> None:
+    dacl = _private(Ace(True, "S-1-3-0", FULL, name="CREATOR OWNER"))
+    assert foreign_access(dacl, USER) == []
+
+
+def test_no_list_at_all_lets_everyone_in() -> None:
+    assert foreign_access(Dacl(None), USER) == [NO_DACL]
+    theirs = Dacl(None, owner="S-1-5-21-9-9-9-1002", owner_name="PC\\eve")
+    assert foreign_access(theirs, USER) == ["its owner, PC\\eve", NO_DACL]
+
+
+@pytest.mark.parametrize(
+    "mask",
+    [
+        0x20,  # FILE_EXECUTE (a folder's traverse)
+        0x40,  # FILE_DELETE_CHILD: a folder's files deleted, and put back as another's
+        0x20000000,  # GENERIC_EXECUTE
+        0x100,  # FILE_WRITE_ATTRIBUTES
+        0x10,  # FILE_WRITE_EA
+        0x8,  # FILE_READ_EA
+        0x01000000,  # ACCESS_SYSTEM_SECURITY
+    ],
+)
+def test_any_right_beyond_reading_attributes_and_the_list_counts(mask: int) -> None:
+    dacl = _private(Ace(True, USERS, mask, name="BUILTIN\\Users"))
+    assert foreign_access(dacl, USER) == ["BUILTIN\\Users"]
+
+
+def test_reading_attributes_and_the_list_and_waiting_on_it_let_nothing_in() -> None:
+    # READ_CONTROL, SYNCHRONIZE, FILE_READ_ATTRIBUTES
+    dacl = _private(Ace(True, USERS, 0x20000 | 0x100000 | 0x80, name="BUILTIN\\Users"))
+    assert foreign_access(dacl, USER) == []
+
+
+def test_what_a_folder_passes_on_counts_for_the_folder() -> None:
+    # Inherit-only: not the folder's own access, but every file made in it
+    # (a vault's -wal and -shm) gets it.
+    passed = Ace(True, AUTHENTICATED, FULL, PASSED_ON | INHERIT_ONLY, "NT AUTHORITY\\Auth")
+    dacl = _private(passed)
+    assert foreign_access(dacl, USER) == []
+    assert foreign_access(dacl, USER, folder=True) == ["NT AUTHORITY\\Auth"]
+    # An inherit-only entry passed on to nothing reaches no one.
+    nowhere = _private(Ace(True, AUTHENTICATED, FULL, INHERIT_ONLY, "NT AUTHORITY\\Auth"))
+    assert foreign_access(nowhere, USER, folder=True) == []
+
+
+def test_creator_group_counts_where_a_folder_passes_it_on() -> None:
+    # Inherited, CREATOR GROUP becomes the primary group of the account that
+    # creates the file: Domain Users, for a domain account.
+    group = _private(Ace(True, CREATOR_GROUP, READ, PASSED_ON | INHERIT_ONLY, "CREATOR GROUP"))
+    assert foreign_access(group, USER) == []
+    assert foreign_access(group, USER, folder=True) == [
+        "CREATOR GROUP (the primary group of an account creating a file there)"
+    ]
+
+
+def test_creator_owner_and_owner_rights_passed_on_stand_for_who_creates_the_file() -> None:
+    passed = (
+        Ace(True, CREATOR_OWNER, FULL, PASSED_ON | INHERIT_ONLY, "CREATOR OWNER"),
+        Ace(True, OWNER_RIGHTS, FULL, PASSED_ON | INHERIT_ONLY, "OWNER RIGHTS"),
+    )
+    dacl = Dacl((*_private().aces, *passed), protected=True)  # owner unknown
+    assert foreign_access(dacl, USER, folder=True) == []
+
+
+def test_an_entry_of_a_kind_not_read_is_named_never_skipped() -> None:
+    # An object or compound allow entry (its SID is not where a plain one's
+    # is): it may let anyone in.
+    other = entry_for(5, PASSED_ON, FULL, lambda: pytest.fail("read as a plain entry"))
+    assert other == Ace(True, "an access control entry of type 5", FULL, PASSED_ON)
+    assert foreign_access(_private(other), USER) == ["an access control entry of type 5"]
+    # Deny entries are never subtracted: one laid out otherwise is not read.
+    assert entry_for(6, 0, FULL, lambda: pytest.fail("read")) is None
+    assert entry_for(12, 0, FULL, lambda: pytest.fail("read")) is None
+
+
+@pytest.mark.parametrize(("kind", "allow"), [(0, True), (9, True), (1, False), (10, False)])
+def test_plain_and_callback_entries_are_read_in_full(kind: int, allow: bool) -> None:
+    assert entry_for(kind, 0x10, READ, lambda: (USERS, "BUILTIN\\Users")) == Ace(
+        allow, USERS, READ, 0x10, "BUILTIN\\Users"
+    )
+
+
+def test_the_model_says_what_is_inherited_and_what_is_protected() -> None:
+    ace = Ace(True, SYSTEM, FULL, INHERITED | INHERIT_ONLY)
+    assert ace.inherited and ace.inherit_only and ace.shown == SYSTEM
+    assert _private(protected=True).protected and not _private().protected
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_lists_are_read_on_windows_only(platform: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    with pytest.raises(OSError, match="Windows only"):
+        winacl.read_dacl(Path("vault.db"))
+    with pytest.raises(OSError, match="Windows only"):
+        winacl.current_user_sid()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the API is there on Windows")
+def test_a_missing_security_api_is_an_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    with pytest.raises(OSError, match="the Windows security API is not available"):
+        winacl.current_user_sid()
+
+
+def _doctor(
+    monkeypatch: pytest.MonkeyPatch, lists: dict[str, Any], path: Path, folder: bool = False
+) -> list[dict[str, str]]:
+    import llm_redact.doctor_cli as doctor
+
+    def read(target: Path) -> Dacl:
+        found = lists[target.name]
+        if isinstance(found, OSError):
+            raise found
+        return found  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(winacl, "read_dacl", read)
+    monkeypatch.setattr(winacl, "current_user_sid", lambda: USER)
+    report = doctor._Report(json_mode=True)
+    doctor._check_private(report, "vault", path, folder)
+    return report.rows
+
+
+def test_doctor_fails_a_store_others_can_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault.db"
+    users = _private(Ace(True, USERS, READ, INHERITED, "BUILTIN\\Users"))
+    (row,) = _doctor(monkeypatch, {"vault.db": users}, vault)
+    assert row["level"] == "FAIL"
+    assert row["message"].startswith(
+        f"{vault} lets in BUILTIN\\Users (its NTFS access control list): remove those entries,"
+        " so that only your account, SYSTEM and Administrators keep access (icacls "
+    )
+
+
+def test_doctor_passes_a_private_store_and_says_how_it_is_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault.db"
+    (protected,) = _doctor(monkeypatch, {"vault.db": _private(protected=True)}, vault)
+    assert protected == {
+        "level": "PASS",
+        "area": "vault",
+        "message": f"{vault} is private to your account (NTFS access control list, protected)",
+    }
+    (inherited,) = _doctor(monkeypatch, {"vault.db": _private()}, vault)
+    assert inherited["message"].endswith("(NTFS access control list, inherited from its folder)")
+
+
+def test_doctor_says_another_account_owns_a_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Removing entries would not help: its owner may always change the list.
+    vault = tmp_path / "vault.db"
+    owned = _private(Ace(True, USERS, READ, INHERITED, "BUILTIN\\Users"))
+    owned = Dacl(owned.aces, protected=True, owner="S-1-5-21-9-9-9-1002", owner_name="PC\\eve")
+    rows = _doctor(monkeypatch, {"vault.db": owned}, vault)
+    assert [row["level"] for row in rows] == ["FAIL", "FAIL"]
+    assert rows[0]["message"].startswith(f"{vault}: another account owns it (PC\\eve)")
+    assert rows[1]["message"].startswith(f"{vault} lets in BUILTIN\\Users (its NTFS")
+
+
+def test_doctor_checks_the_folder_too_when_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault.db"
+    folder = _private(Ace(True, AUTHENTICATED, FULL, name="NT AUTHORITY\\Authenticated Users"))
+    rows = _doctor(monkeypatch, {"vault.db": _private(), tmp_path.name: folder}, vault, True)
+    assert [row["level"] for row in rows] == ["PASS", "FAIL"]
+    assert rows[1]["message"].startswith(f"{tmp_path} lets in NT AUTHORITY\\Authenticated Users")
+
+
+def test_doctor_reads_what_the_folder_passes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault.db"
+    passed = Ace(True, USERS, READ, PASSED_ON | INHERIT_ONLY, "BUILTIN\\Users")
+    rows = _doctor(
+        monkeypatch, {"vault.db": _private(), tmp_path.name: _private(passed)}, vault, True
+    )
+    assert [row["level"] for row in rows] == ["PASS", "FAIL"]
+    assert rows[1]["message"].startswith(f"{tmp_path} lets in BUILTIN\\Users")
+
+
+def test_doctor_checks_a_vaults_wal_and_shm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # They keep their own list once made: one left from before, or put there
+    # while the folder was open to others, may let them in.
+    vault = tmp_path / "vault.db"
+    for name in ("vault.db-wal", "vault.db-shm"):
+        (tmp_path / name).write_bytes(b"")
+    users = _private(Ace(True, USERS, READ, INHERITED, "BUILTIN\\Users"))
+    rows = _doctor(
+        monkeypatch,
+        {"vault.db": _private(), "vault.db-wal": users, "vault.db-shm": _private()},
+        vault,
+    )
+    assert [row["level"] for row in rows] == ["PASS", "FAIL"]
+    assert rows[1]["message"].startswith(f"{tmp_path / 'vault.db-wal'} lets in BUILTIN\\Users")
+
+
+def test_doctor_warns_when_it_cannot_read_a_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault.db"
+    error = OSError(None, "cannot read its access control list (Access is denied.)")
+    (row,) = _doctor(monkeypatch, {"vault.db": error}, vault)
+    assert row == {
+        "level": "WARN",
+        "area": "vault",
+        "message": f"{vault}: cannot check its NTFS access control list (cannot read its access"
+        " control list (Access is denied.))",
+    }
+
+
+def test_doctor_opens_a_tls_file_to_check_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import llm_redact.doctor_cli as doctor
+
+    readable = tmp_path / "cert.pem"
+    readable.write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+    locked = tmp_path / "key.pem"
+    locked.write_text("-----BEGIN PRIVATE KEY-----\n", encoding="utf-8")
+    real_open = Path.open
+
+    def open_(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == locked:
+            raise PermissionError(13, "Access is denied")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_)
+    assert doctor._readable(readable)
+    assert not doctor._readable(locked)
+    assert not doctor._readable(tmp_path / "missing.pem")
+
+
+# Real access control lists, Windows only.
+
+on_windows = pytest.mark.skipif(sys.platform != "win32", reason="NTFS access control lists")
+
+
+def _icacls(*arguments: str) -> None:
+    icacls = Path(os.environ.get("SYSTEMROOT", "C:\\Windows")) / "System32" / "icacls.exe"
+    subprocess.run([str(icacls), *arguments], check=True, capture_output=True, timeout=60)
+
+
+@on_windows
+def test_the_real_list_of_a_private_file_and_one_users_can_read(tmp_path: Path) -> None:
+    import llm_redact.doctor_cli as doctor
+
+    user = winacl.current_user_sid()
+    assert user.startswith("S-1-5-")
+    vault = tmp_path / "vault.db"
+    vault.write_bytes(b"")
+    private = (f"*{user}:F", f"*{SYSTEM}:F", f"*{ADMINISTRATORS}:F")
+    _icacls(str(vault), "/inheritance:r", "/grant:r", *private)
+    dacl = winacl.read_dacl(vault)
+    assert dacl is not None and dacl.protected and dacl.owner in {user, ADMINISTRATORS}
+    # Python 3.13+ gives a mkdir(mode=0o700) folder an OWNER RIGHTS entry,
+    # which pytest's temporary folders carry down to the file.
+    assert {ace.sid for ace in dacl.aces} - {OWNER_RIGHTS} == {user, SYSTEM, ADMINISTRATORS}
+    assert foreign_access(dacl, user) == []
+    report = doctor._Report(json_mode=True)
+    doctor._check_private(report, "vault", vault, False)
+    assert [row["level"] for row in report.rows] == ["PASS"]
+
+    _icacls(str(vault), "/grant", f"*{USERS}:R")
+    dacl = winacl.read_dacl(vault)
+    assert dacl is not None and USERS in {ace.sid for ace in dacl.aces}
+    (others,) = foreign_access(dacl, user)
+    assert others.endswith("\\Users") or others == USERS
+    report = doctor._Report(json_mode=True)
+    doctor._check_private(report, "vault", vault, False)
+    assert [row["level"] for row in report.rows] == ["FAIL"]
+
+
+@on_windows
+def test_a_tls_file_this_account_may_not_read_fails_although_os_access_passes(
+    tmp_path: Path,
+) -> None:
+    import llm_redact.doctor_cli as doctor
+
+    user = winacl.current_user_sid()
+    key = tmp_path / "key.pem"
+    key.write_text("-----BEGIN PRIVATE KEY-----\n", encoding="utf-8")
+    # Deny reading the data only: denying READ_CONTROL as well (icacls R)
+    # would keep this account from changing the list back.
+    _icacls(str(key), "/deny", f"*{user}:(RD)")
+    try:
+        assert os.access(key, os.R_OK)  # why doctor no longer asks it
+        assert not doctor._readable(key)
+    finally:
+        _icacls(str(key), "/remove:d", f"*{user}")
+
+
+@on_windows
+def test_the_real_list_of_a_folder_says_what_it_passes_on(tmp_path: Path) -> None:
+    user = winacl.current_user_sid()
+    folder = tmp_path / "data"
+    folder.mkdir()
+    _icacls(str(folder), "/grant", f"*{USERS}:(OI)(CI)(IO)(R)")
+    dacl = winacl.read_dacl(folder)
+    assert foreign_access(dacl, user) == []  # not the folder's own access
+    (others,) = foreign_access(dacl, user, folder=True)
+    assert others.endswith("\\Users") or others == USERS
+
+
+@on_windows
+def test_a_store_another_account_owns_is_refused(tmp_path: Path) -> None:
+    user = winacl.current_user_sid()
+    vault = tmp_path / "vault.db"
+    vault.write_bytes(b"")
+    icacls = Path(os.environ.get("SYSTEMROOT", "C:\\Windows")) / "System32" / "icacls.exe"
+    given = subprocess.run(
+        [str(icacls), str(vault), "/setowner", "*S-1-5-19"],  # LOCAL SERVICE
+        capture_output=True,
+        timeout=60,
+    )
+    if given.returncode != 0:
+        pytest.skip("this account may not give a file another owner")
+    try:
+        assert winacl.read_dacl(vault).owner == "S-1-5-19"
+        with pytest.raises(OSError, match="another account owns it"):
+            winacl.make_private(vault)
+        assert winacl.read_dacl(vault).owner == "S-1-5-19"  # never taken over
+    finally:
+        _icacls(str(vault), "/setowner", f"*{user}")

@@ -185,6 +185,8 @@ def test_doctor_probes_an_ipv6_port_with_an_ipv6_socket(
     from llm_redact import doctor_cli
     from llm_redact.config import Config
 
+    # The POSIX probe; on Windows doctor binds as serve does (test_bind_windows).
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(httpx, "get", _Recorder(httpx.ConnectError("refused")))
     monkeypatch.setattr(doctor_cli.socket, "socket", _FakeSocket)
     _FakeSocket.made = []
@@ -212,6 +214,7 @@ def test_doctor_says_when_the_address_family_is_missing(
     def no_ipv6(family: int, kind: int) -> Any:
         raise OSError(97, "Address family not supported by protocol")
 
+    monkeypatch.setattr(sys, "platform", "linux")  # the POSIX probe
     monkeypatch.setattr(httpx, "get", _Recorder(httpx.ConnectError("refused")))
     monkeypatch.setattr(doctor_cli.socket, "socket", no_ipv6)
     report = doctor_cli._Report(json_mode=True)
